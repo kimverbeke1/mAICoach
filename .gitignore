@@ -35,3 +35,10 @@ node_modules/
 
 # Logs
 *.log
+
+# Oude archief-map
+PadelAnalysis/archive/
+
+# Backup/debug bestanden
+*.backup_*.py
+debug_output*/
