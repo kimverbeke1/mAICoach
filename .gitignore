@@ -1,0 +1,37 @@
+﻿# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Secrets / credentials
+*.env
+.env.*
+*serviceAccount*.json
+firebase-adminsdk*.json
+*credentials*.json
+*.pem
+*.key
+.streamlit/secrets.toml
+
+# Backups / temp
+*.bak
+*.backup
+*_backup*
+*.old
+*~
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node (indien van toepassing)
+node_modules/
+
+# Logs
+*.log
