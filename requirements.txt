@@ -1,0 +1,14 @@
+# Python-dependencies voor mAICoach op Streamlit Community Cloud.
+# Kies bij het deployen Python 3.12 (Advanced settings) om build-fouten met
+# pandas/plotly op 3.13 te vermijden.
+streamlit>=1.37
+pandas>=2.2
+numpy>=1.26
+plotly>=5.22
+openai>=1.40
+requests>=2.32
+python-dotenv>=1.0
+
+# Persistente cloudopslag (Google Cloud Storage) voor history + activity_streams
+google-cloud-storage>=2.16
+google-auth>=2.30
