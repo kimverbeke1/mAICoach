@@ -1,5 +1,6 @@
 """
 dashboard.py  —  PadelAnalysis v2 Streamlit dashboard
+
 Schema v2: matches zitten in doc.matches (niet doc.raw_data.matches)
 Stats: total_matches, tournament_matches, interclub_matches, wins, losses, winrate
 """
@@ -24,7 +25,8 @@ import schedule_scraper as ss
 import opponent_scout as osc
 import lineup_quick as lq
 import player_inline_actions as pia
-from cloud_helpers import is_scraping_available, scraping_unavailable_notice, render_cloud_scrape_trigger
+import opponent_dossier as od
+from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
 
 try:
     st.set_page_config(page_title="Padel Analysis", page_icon="🎾", layout="wide", initial_sidebar_state="collapsed")
@@ -45,12 +47,15 @@ st.markdown("""
 }
 [data-testid="stMetricLabel"] { font-size: 0.75rem; color: #666; }
 [data-testid="stMetricValue"] { font-size: 1.5rem; font-weight: 700; }
+
 /* Tab styling */
 .stTabs [data-baseweb="tab"] { font-size: 0.85rem; padding: 6px 14px; }
 .stTabs [aria-selected="true"] { border-bottom: 3px solid #1a73e8 !important; }
+
 /* Win badge */
 .badge-win  { background:#d4edda; color:#155724; border-radius:4px; padding:2px 8px; font-size:0.8rem; font-weight:600; }
 .badge-loss { background:#f8d7da; color:#721c24; border-radius:4px; padding:2px 8px; font-size:0.8rem; font-weight:600; }
+
 /* Section header */
 .section-header { font-size:1.1rem; font-weight:700; margin-bottom:8px; color:#1a1a1a; border-bottom:2px solid #e0e0e0; padding-bottom:4px; }
 </style>
@@ -60,11 +65,25 @@ st.markdown("""
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
+
 def _clean(text) -> str:
     return " ".join(str(text or "").split()).strip()
 
 
-_SEASON_RANK = {"winter": 0, "voorjaar": 1, "lente": 1, "zomer": 2, "najaar": 3, "herfst": 3}
+# PADEL_ANALYSIS_PERIOD_SORT_FIX_2026-09-06
+# Vorige aanpak gaf elk seizoenswoord een vaste rang 0-3 (winter=0, zomer=2, ...),
+# los van de kalendermaand. Dat plaatste bv. "Winter 2026" (start september 2026,
+# nu net begonnen) ONDER "Zomer 2026" (mei-augustus 2026, al afgelopen) omdat
+# winter toevallig de laagste rang had -- terwijl winter net de MEEST RECENTE
+# periode is. Nieuwe aanpak: elk seizoenswoord krijgt de kalendermaand waarin
+# het typisch START, zodat (jaar, maand) altijd chronologisch correct sorteert,
+# ook over de winter-jaargrens heen.
+_SEASON_START_MONTH = {
+    "winter": 9,             # interclub-winterseizoen start ~september
+    "najaar": 9, "herfst": 9,
+    "zomer": 5,              # zomerseizoen/-tornooien start ~mei
+    "lente": 3, "voorjaar": 3,
+}
 _MONTH_RANK = {
     "jan": 1, "feb": 2, "mrt": 3, "maart": 3, "apr": 4, "mei": 5, "jun": 6, "juni": 6,
     "jul": 7, "juli": 7, "aug": 8, "sep": 9, "sept": 9, "okt": 10, "nov": 11, "dec": 12,
@@ -98,19 +117,19 @@ def _short_period_label(label: str) -> str:
 
 def _period_sort_key(label: str):
     """
-    Sorteersleutel (jaar, sub-rang) voor periode-labels. Robuust opgezet: we
-    weten het exacte labelformaat niet 100% zeker, dus zoeken we naar een
-    jaartal + een seizoens- of maandnaam ergens in de tekst, in plaats van een
-    strikt patroon te verwachten. Onherkenbare labels belanden samen
-    onderaan in plaats van de hele sortering te verstoren.
+    Sorteersleutel (jaar, maand) voor periode-labels, zodat de recentste
+    periode altijd bovenaan staat -- zowel voor tornooi-periodes (benoemd
+    naar kalendermaand) als interclub-periodes (benoemd naar seizoen, bv.
+    "Winter 2026"). Zie _SEASON_START_MONTH hierboven voor de uitleg waarom
+    dit een echte kalendermaand gebruikt i.p.v. een willekeurige rang.
     """
     text = str(label or "").lower()
     year_m = re.search(r"(20\d{2})", text)
     year = int(year_m.group(1)) if year_m else 0
-    sub_rank = next((r for kw, r in _SEASON_RANK.items() if kw in text), None)
-    if sub_rank is None:
-        sub_rank = next((r for kw, r in _MONTH_RANK.items() if kw in text), 50)
-    return (year, sub_rank)
+    month = next((m for kw, m in _SEASON_START_MONTH.items() if kw in text), None)
+    if month is None:
+        month = next((m for kw, m in _MONTH_RANK.items() if kw in text), 6)
+    return (year, month)
 
 
 def _display_name(profile_or_id, name_lookup: Optional[dict] = None) -> str:
@@ -294,6 +313,7 @@ def _render_table(df: pd.DataFrame, name_col: str, height=400):
 # ─────────────────────────────────────────────
 # State helpers
 # ─────────────────────────────────────────────
+
 @st.cache_data(ttl=600, show_spinner="Wedstrijdschema ophalen...")
 def _load_poule_fixtures(reeks_url: str):
     """Haalt en parset het publieke poule-schema. Returns (fixtures, error_message_or_None)."""
@@ -335,25 +355,36 @@ for i, p in enumerate(PAGES):
 st.divider()
 page = st.session_state["page"]
 
+
 # ═══════════════════════════════════════════════
 # PAGE: Speler toevoegen
 # ═══════════════════════════════════════════════
+
 def page_add_player():
     st.header("➕ Speler toevoegen")
     st.caption("Zoek een speler op de TVL-website en voeg hem/haar toe aan de database.")
+
     if not is_scraping_available():
-        scraping_unavailable_notice("Spelers zoeken/toevoegen en verversen")
+        # Op cloud is deze pagina (nieuwe spelers zoeken/scrapen) niet mogelijk
+        # zonder browser. Geen technische melding meer -- gewoon een korte,
+        # simpele uitleg en (indien geconfigureerd) de "Data verversen"-knop
+        # voor de reeds gekende spelers.
+        st.info("Nieuwe spelers zoeken kan enkel lokaal. Bestaande spelers verversen kan wel hieronder.")
+        render_cloud_scrape_trigger(key_prefix="add_player_page", mode="missing", label="🔄 Data verversen")
         return
+
     with st.form("search_form"):
         c1, c2, c3 = st.columns([2, 2, 2])
         first = c1.text_input("Voornaam")
         last  = c2.text_input("Achternaam")
         club  = c3.text_input("Club (optioneel)")
         submitted = st.form_submit_button("🔍 Zoek op TVL-website", use_container_width=True, type="primary")
+
     if submitted:
         if not _clean(first) and not _clean(last):
             st.warning("Geef minstens een voornaam of achternaam in.")
             return
+
         with st.spinner("Zoeken op tennisenpadelvlaanderen.be..."):
             try:
                 from player_search import search_players
@@ -367,18 +398,23 @@ def page_add_player():
             except Exception as e:
                 st.error(f"Zoekfout: {e}")
                 return
+
     candidates = st.session_state.get("add_candidates", [])
     if not st.session_state.get("add_search_done"):
         return
+
     if not candidates:
         st.warning("Geen spelers gevonden op TVL.")
         return
+
     st.success(f"{len(candidates)} kandidaat(en) gevonden")
+
     for i, c in enumerate(candidates):
         name = c.get("display_name") or "?"
         club_str = c.get("club") or ""
         pid = c.get("player_id") or "?"
         url = c.get("dashboard_url") or ""
+
         with st.container(border=True):
             col_info, col_btn = st.columns([4, 1])
             with col_info:
@@ -417,6 +453,7 @@ def page_add_player():
                             st.warning(f"Profiel opgeslagen, scrape mislukt: {e}")
                     else:
                         st.success(f"✅ {name} toegevoegd (nog niet gescraped)")
+
     st.divider()
     st.subheader("🔄 Meerdere spelers verversen")
     st.caption("Voor onderhoud: vernieuw in bulk (enkel nieuwe periodes per speler, sequentieel met pauze).")
@@ -427,6 +464,7 @@ def page_add_player():
             for p in sorted(all_profiles, key=lambda x: x.get("display_name") or "")
         }
         bulk_chosen = st.multiselect("Kies spelers", list(bulk_options.keys()), key="bulk_scrape_select")
+
         if bulk_chosen and st.button("▶️ Verversen", type="primary", use_container_width=True):
             overall = st.progress(0.0, text="Starten...")
             for i, label in enumerate(bulk_chosen):
@@ -446,11 +484,174 @@ def page_add_player():
 # ═══════════════════════════════════════════════
 # PAGE: Opstelling-analyse (Fase 1 — retrospectieve test-tool)
 # ═══════════════════════════════════════════════
+
 @st.cache_data(ttl=600, show_spinner="Ontmoetingen ophalen...")
 def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
+
+
+def _render_volgende_match(sel_player_id: str, sel_label: str):
+    """
+    Zoekt en toont de volgende (nog te spelen) interclubmatch van de
+    geselecteerde speler.
+
+    PADEL_ANALYSIS_MANUAL_SCHEDULE_OVERRIDE_2026-09-06:
+    Automatische detectie gebruikt de reeks_url van de MEEST RECENTE reeds
+    GESPEELDE interclubmatch. Dat werkt niet meer zodra een nieuw seizoen is
+    gestart maar het eigen team zijn EERSTE match van dat seizoen nog niet
+    heeft gespeeld (dus nog geen enkele match -- en dus geen reeks_url --
+    van het NIEUWE seizoen in Firestore staat), ook al zijn andere ploegen in
+    de competitie al wel gestart. In dat geval bieden we een handmatige
+    override: plak de poule/tabel-URL van het huidige seizoen, en kies
+    (eenmalig) je eigen team uit de lijst als automatische team-herkenning
+    ook niet lukt (die herkenning steunt op score/datum-matching met een
+    reeds gespeelde eigen match, wat er per definitie nog niet is).
+    """
+    st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
+
+    override_url_key = f"manual_reeks_url_{sel_player_id}"
+    override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
+
+    sel_doc = fb.get_player(sel_player_id)
+    own_interclub_matches = [
+        m for m in (sel_doc or {}).get("matches", [])
+        if m.get("match_type") == "interclub" and m.get("reeks_url")
+    ]
+
+    auto_reeks_url = None
+    if own_interclub_matches:
+        most_recent = sorted(own_interclub_matches, key=lambda m: m.get("match_date") or "", reverse=True)[0]
+        auto_reeks_url = most_recent["reeks_url"]
+
+    reeks_url = st.session_state.get(override_url_key) or auto_reeks_url
+
+    if not reeks_url:
+        st.info(
+            f"Nog geen wedstrijdschema gekend voor {sel_label} (nog geen interclubmatch gescraped "
+            "in het huidige seizoen). Plak hieronder de poule/tabel-link van "
+            "tennisenpadelvlaanderen.be om je volgende match toch te zien."
+        )
+        manual_url = st.text_input("Poule/tabel-URL (handmatig)", key=f"manual_url_input_{sel_player_id}")
+        if manual_url and st.button("Gebruiken", key=f"use_manual_url_{sel_player_id}"):
+            st.session_state[override_url_key] = manual_url.strip()
+            st.rerun()
+        return
+
+    try:
+        fixtures, fetch_error = _load_poule_fixtures(reeks_url)
+    except Exception as e:
+        fixtures, fetch_error = [], str(e)
+
+    if fetch_error:
+        st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
+        if st.session_state.get(override_url_key) and st.button("Reset handmatige link", key=f"reset_manual_{sel_player_id}"):
+            st.session_state.pop(override_url_key, None)
+            st.session_state.pop(override_team_key, None)
+            st.rerun()
+        return
+
+    if not fixtures:
+        st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
+        return
+
+    # Ploeg-identificatie: eerst automatisch via score/datum-match, anders
+    # (bv. bij een nog niet gespeeld nieuw seizoen) handmatige keuze.
+    home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
+    own_ploeg_id = st.session_state.get(override_team_key)
+
+    if not own_ploeg_id and matched_fx:
+        opp_names_known = {_clean_name(m.get("opp1_name")) for m in own_interclub_matches if m.get("opp1_name")}
+        if any(_clean_name(matched_fx["away_name"]) in n or n in _clean_name(matched_fx["away_name"]) for n in opp_names_known):
+            own_ploeg_id = home_ploeg_id
+        else:
+            own_ploeg_id = away_ploeg_id
+
+    if not own_ploeg_id:
+        st.warning(
+            "Kon niet automatisch bepalen welke ploeg dit is op de poule-pagina "
+            "(dit gebeurt bv. als je team dit seizoen nog niet gespeeld heeft). "
+            "Kies hieronder eenmalig je eigen team."
+        )
+        team_names = sorted({f["home_name"] for f in fixtures} | {f["away_name"] for f in fixtures})
+        chosen_team = st.selectbox(
+            "Jouw team in dit schema:", [""] + team_names, key=f"manual_team_pick_{sel_player_id}"
+        )
+        if chosen_team and st.button("Bevestigen", key=f"confirm_team_{sel_player_id}"):
+            match = next((f for f in fixtures if f["home_name"] == chosen_team), None)
+            pid = match["home_ploeg_id"] if match else None
+            if not pid:
+                match = next((f for f in fixtures if f["away_name"] == chosen_team), None)
+                pid = match["away_ploeg_id"] if match else None
+            if pid:
+                st.session_state[override_team_key] = pid
+                st.session_state[override_url_key] = reeks_url
+                st.rerun()
+        return
+
+    team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
+    next_match = ss.get_next_match(team_fixtures)
+    if not next_match:
+        st.success("Geen nog te spelen wedstrijden gevonden voor dit schema.")
+        if st.session_state.get(override_url_key) and st.button("Reset handmatige link", key=f"reset_manual2_{sel_player_id}"):
+            st.session_state.pop(override_url_key, None)
+            st.session_state.pop(override_team_key, None)
+            st.rerun()
+        return
+
+    opp = ss.opponent_of(next_match, own_ploeg_id)
+    st.markdown(f"**{next_match['date_text']}** — tegen **{opp['name']}** ({next_match['poule_label']})")
+
+    scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
+    if st.button("🔍 Tegenstander analyseren", key="btn_scout", type="primary"):
+        with st.spinner("Vorige wedstrijd(en) van de tegenstander opzoeken..."):
+            bundle = osc.scout_opponent(fixtures, opp["name"], opp["ploeg_id"], next_match["date_text"], lookback=1)
+        st.session_state[scout_key] = bundle
+
+    bundle = st.session_state.get(scout_key)
+    if not bundle:
+        st.stop()
+
+    if bundle["note"]:
+        st.info(bundle["note"])
+        st.caption("Zonder historische tegenstander-data kan ik enkel jouw eigen ploeg-sterkte tonen, niet hen inschatten.")
+
+    unknown = [p for p in bundle["unique_players"] if not fb.get_player_profile(p["user_id"])]
+    if bundle["unique_players"]:
+        with st.expander(f"👥 Gevonden tegenstander-spelers ({len(bundle['unique_players'])})", expanded=False):
+            # PADEL_ANALYSIS_OPPONENT_DOSSIER_2026-09-06: elke gekende tegenstander
+            # krijgt een "Dossier"-knop met volledige stats, all-time high ranking,
+            # en interclubresultaten binnen dit specifieke schema (reeks_url).
+            all_docs_for_dossier = ll.get_docs_for_players([p["user_id"] for p in bundle["unique_players"]])
+            for p in bundle["unique_players"]:
+                status = "❓ nog niet gescraped (ranking wel al gekend)" if p in unknown else "✅ volledig gekend"
+                c1, c2, c3 = st.columns([3, 1, 1])
+                c1.write(f"• {p['name']} — {status}")
+                if p not in unknown:
+                    if c2.button("👁️ Bekijk", key=f"jump_opp_{p['user_id']}"):
+                        _go_to_player(p["user_id"])
+                    with c3:
+                        od.render_opponent_dossier_button(
+                            p["user_id"], p["name"], all_docs_for_dossier,
+                            current_reeks_url=reeks_url,
+                            key_prefix="scout_dossier",
+                        )
+            if unknown:
+                if is_scraping_available():
+                    if st.button(f"📥 Scrape {len(unknown)} nieuwe tegenstander(s) (verrijkt toekomstige analyses)", key="btn_scrape_opp"):
+                        progress = st.progress(0.0, text="Starten...")
+
+                        def _cb(i, total, name):
+                            progress.progress(i / total if total else 0, text=f"({i}/{total}) {name} scrapen...")
+
+                        result = osc.scrape_new_opponent_players(unknown, lookback_periods=1, delay=1.5, progress_callback=_cb)
+                        progress.progress(1.0, text="Klaar.")
+                        st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
+                        st.rerun()
+                # Op cloud: geen knop, geen technische melding -- gewoon niets tonen.
+
+    return bundle, opp
 
 
 def page_lineup_lab():
@@ -459,8 +660,10 @@ def page_lineup_lab():
     if not profiles:
         st.info("Nog geen spelers in de database. Voeg eerst spelers toe via '➕ Speler toevoegen'.")
         return
+
     name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
     profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
+
     # ── Voor wie tonen we dit? ──
     settings = fb.get_app_settings()
     home_id = settings.get("home_player_id")
@@ -480,84 +683,13 @@ def page_lineup_lab():
     )
 
     # ═══════════════════════════════════════
-    # Volgende match
+    # Volgende match (incl. handmatige override, zie _render_volgende_match)
     # ═══════════════════════════════════════
-    st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
-    sel_doc = fb.get_player(sel_player_id)
-    own_interclub_matches = [
-        m for m in (sel_doc or {}).get("matches", [])
-        if m.get("match_type") == "interclub" and m.get("reeks_url")
-    ]
-    if not own_interclub_matches:
-        st.info(f"Geen interclub-matches met een poule-link gevonden voor {sel_label}. Vernieuw dit profiel eerst.")
+    scout_result = _render_volgende_match(str(sel_player_id), sel_label)
+    if not scout_result:
         return
-    most_recent = sorted(own_interclub_matches, key=lambda m: m.get("match_date") or "", reverse=True)[0]
-    reeks_url = most_recent["reeks_url"]
-    try:
-        fixtures, fetch_error = _load_poule_fixtures(reeks_url)
-    except Exception as e:
-        fixtures, fetch_error = [], str(e)
-    if fetch_error:
-        st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
-        return
-    if not fixtures:
-        st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
-        return
-    home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
-    own_ploeg_id = None
-    if matched_fx:
-        opp_names_known = {_clean_name(m.get("opp1_name")) for m in own_interclub_matches if m.get("opp1_name")}
-        if any(_clean_name(matched_fx["away_name"]) in n or n in _clean_name(matched_fx["away_name"]) for n in opp_names_known):
-            own_ploeg_id = home_ploeg_id
-        else:
-            own_ploeg_id = away_ploeg_id
-    if not own_ploeg_id:
-        st.warning(
-            "Kon niet zeker bepalen welke ploeg dit is op de poule-pagina "
-            "(geen overeenkomende datum/score gevonden)."
-        )
-        return
-    team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
-    next_match = ss.get_next_match(team_fixtures)
-    if not next_match:
-        st.success("Geen nog te spelen wedstrijden gevonden — seizoen is voorbij (of het schema toont nog niets).")
-        return
-    opp = ss.opponent_of(next_match, own_ploeg_id)
-    st.markdown(f"**{next_match['date_text']}** — tegen **{opp['name']}** ({next_match['poule_label']})")
-    scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
-    if st.button("🔍 Tegenstander analyseren", key="btn_scout", type="primary"):
-        with st.spinner("Vorige wedstrijd(en) van de tegenstander opzoeken..."):
-            bundle = osc.scout_opponent(fixtures, opp["name"], opp["ploeg_id"], next_match["date_text"], lookback=1)
-        st.session_state[scout_key] = bundle
-    bundle = st.session_state.get(scout_key)
-    if not bundle:
-        st.stop()
-    if bundle["note"]:
-        st.info(bundle["note"])
-        st.caption("Zonder historische tegenstander-data kan ik enkel jouw eigen ploeg-sterkte tonen, niet hen inschatten.")
-    unknown = [p for p in bundle["unique_players"] if not fb.get_player_profile(p["user_id"])]
-    if bundle["unique_players"]:
-        with st.expander(f"👥 Gevonden tegenstander-spelers ({len(bundle['unique_players'])})", expanded=False):
-            for p in bundle["unique_players"]:
-                status = "❓ nog niet gescraped (ranking wel al gekend)" if p in unknown else "✅ volledig gekend"
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"• {p['name']} — {status}")
-                if p not in unknown:
-                    if c2.button("👁️ Bekijk", key=f"jump_opp_{p['user_id']}"):
-                        _go_to_player(p["user_id"])
-            if unknown:
-                if not is_scraping_available():
-                    scraping_unavailable_notice("Scrapen van nieuwe tegenstander-spelers")
-                elif st.button(f"📥 Scrape {len(unknown)} nieuwe tegenstander(s) (verrijkt toekomstige analyses)", key="btn_scrape_opp"):
-                    progress = st.progress(0.0, text="Starten...")
+    bundle, opp = scout_result
 
-                    def _cb(i, total, name):
-                        progress.progress(i / total if total else 0, text=f"({i}/{total}) {name} scrapen...")
-
-                    result = osc.scrape_new_opponent_players(unknown, lookback_periods=1, delay=1.5, progress_callback=_cb)
-                    progress.progress(1.0, text="Klaar.")
-                    st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
-                    st.rerun()
     st.divider()
 
     # ═══════════════════════════════════════
@@ -719,18 +851,18 @@ def page_lineup_lab():
 # ═══════════════════════════════════════════════
 # Gedeelde dashboard-weergave (gebruikt door Mijn profiel én Spelers)
 # ═══════════════════════════════════════════════
+
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
     # PADEL_ANALYSIS_FIX_RC_COLUMNS
     if not is_scraping_available():
-        scraping_unavailable_notice("Verversen/herscrapen van spelersdata")
-        # FIX 2026-09-06: op cloud kan de gebruiker de bestaande GitHub Actions-
-        # workflow (scrape-padel.yml, met Playwright) op afstand triggeren via de
-        # GitHub REST API, i.p.v. zelf een browser te starten (wat hier niet kan).
-        # Dit ververst ALLE gekende spelers (niet enkel deze speler) — zie
-        # cloud_helpers.render_cloud_scrape_trigger voor details en vereisten.
-        render_cloud_scrape_trigger(key_prefix=key_prefix)
+        # Op cloud: geen technische "verversen vereist browser"-melding meer.
+        # Enkel (indien geconfigureerd) één simpele knop die de bestaande
+        # GitHub Actions-workflow triggert -- ververst alle gekende spelers.
+        render_cloud_scrape_trigger(key_prefix=key_prefix, mode="missing", label="🔄 Data verversen")
         return
+
     rc1, rc2 = st.columns(2)
+
     with rc1:
         if st.button("🔄 Vernieuwen (enkel nieuwe periodes)", type="primary", key=f"{key_prefix}_refresh"):
             bar, cb = _scrape_progress_widget()
@@ -1041,44 +1173,44 @@ def _render_player_dashboard(player_id: str, profile: dict):
                 "Nog geen klassementsdata beschikbaar. Klik hieronder om de klassementshistoriek te laden. "
                 "Dit opent een browser en doorloopt alle beschikbare periodes (~30-60 seconden)."
             )
-        if not is_scraping_available():
-            scraping_unavailable_notice("Klassementshistoriek laden/verversen")
-        elif st.button("📥 Klassementshistoriek laden / verversen", key=f"load_klassement_{player_id}"):
-            import sys
-            _root = str(__import__("pathlib").Path(__file__).parent)
-            if _root not in sys.path:
-                sys.path.insert(0, _root + "/scraper")
-                sys.path.insert(0, _root)
-            from scrape_klassement import scrape_klassement, klassement_to_history_summary, extract_niveau_winrates
-            bar, cb = _scrape_progress_widget(label_prefix="Klassement: ")
-            try:
-                periods = scrape_klassement(str(player_id), progress_callback=cb)
-                bar.progress(1.0, text="Klaar.")
-                history = klassement_to_history_summary(periods)
-                niveau_winrates = extract_niveau_winrates(periods)
-                import datetime
-                klass_data = {
-                    "history": history,
-                    "niveau_winrates": niveau_winrates,
-                    "raw_periods": periods,
-                    "scraped_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                }
-                payload = {"klassement_history": fb.sanitize_for_firestore(klass_data)}
-                # Opslaan in beide collecties:
-                # - player_profiles: profielmetadata
-                # - players: wordt gebruikt door fb.get_player(player_id) in deze dashboard-render
-                fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(payload, merge=True)
-                fb.db.collection(fb.PLAYERS_COLLECTION).document(str(player_id)).set(payload, merge=True)
-                if history:
-                    st.success(f"Klaar — {len(history)} periodes geladen.")
-                else:
-                    st.warning(
-                        f"Scrape afgerond, maar compacte historiek is leeg. "
-                        f"Raw periodes: {len(periods)}. Bekijk de Klassement-tab of Debug-tab."
-                    )
-                st.rerun()
-            except Exception as e:
-                st.error(f"Mislukt: {e}")
+        if is_scraping_available():
+            if st.button("📥 Klassementshistoriek laden / verversen", key=f"load_klassement_{player_id}"):
+                import sys
+                _root = str(__import__("pathlib").Path(__file__).parent)
+                if _root not in sys.path:
+                    sys.path.insert(0, _root + "/scraper")
+                    sys.path.insert(0, _root)
+                from scrape_klassement import scrape_klassement, klassement_to_history_summary, extract_niveau_winrates
+                bar, cb = _scrape_progress_widget(label_prefix="Klassement: ")
+                try:
+                    periods = scrape_klassement(str(player_id), progress_callback=cb)
+                    bar.progress(1.0, text="Klaar.")
+                    history = klassement_to_history_summary(periods)
+                    niveau_winrates = extract_niveau_winrates(periods)
+                    import datetime
+                    klass_data = {
+                        "history": history,
+                        "niveau_winrates": niveau_winrates,
+                        "raw_periods": periods,
+                        "scraped_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }
+                    payload = {"klassement_history": fb.sanitize_for_firestore(klass_data)}
+                    # Opslaan in beide collecties:
+                    # - player_profiles: profielmetadata
+                    # - players: wordt gebruikt door fb.get_player(player_id) in deze dashboard-render
+                    fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(payload, merge=True)
+                    fb.db.collection(fb.PLAYERS_COLLECTION).document(str(player_id)).set(payload, merge=True)
+                    if history:
+                        st.success(f"Klaar — {len(history)} periodes geladen.")
+                    else:
+                        st.warning(
+                            f"Scrape afgerond, maar compacte historiek is leeg. "
+                            f"Raw periodes: {len(periods)}. Bekijk de Klassement-tab of Debug-tab."
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Mislukt: {e}")
+        # Op cloud: geen knop, geen technische melding.
 
     # ── Debug ──
     with tab_debug:
@@ -1092,6 +1224,7 @@ def _render_player_dashboard(player_id: str, profile: dict):
 # ═══════════════════════════════════════════════
 # PAGE: Mijn profiel
 # ═══════════════════════════════════════════════
+
 def page_my_profile():
     st.header("👤 Mijn profiel")
     profiles = _get_all_profiles()
@@ -1136,6 +1269,7 @@ def page_my_profile():
 # ═══════════════════════════════════════════════
 # PAGE: Spelers (eender wie opzoeken)
 # ═══════════════════════════════════════════════
+
 def page_players():
     st.header("🔍 Spelers")
     profiles = _get_all_profiles()
@@ -1192,6 +1326,7 @@ def page_players():
 # ═══════════════════════════════════════════════
 # RENDER
 # ═══════════════════════════════════════════════
+
 if page == "➕ Speler toevoegen":
     page_add_player()
 elif page == "🧩 Opstelling-analyse":

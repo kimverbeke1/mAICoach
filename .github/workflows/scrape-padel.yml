@@ -1,50 +1,20 @@
-# .github/workflows/scrape-padel.yml
+# Handmatige workflow om Padel-spelersdata te verversen.
+# GitHub -> tabblad "Actions" -> "Padel data verversen" -> "Run workflow"
 #
-# PadelAnalysis-scrape via GitHub Actions — UITSLUITEND handmatig te starten
-# (geen automatische dagelijkse/periodieke run). Draait Playwright (met
-# browser-binaries, iets wat Streamlit Community Cloud NIET ondersteunt) om
-# spelers te verversen en de resultaten rechtstreeks naar Firestore te
-# schrijven. De gedeployde Streamlit-app leest enkel uit Firestore en hoeft
-# zelf niets te scrapen.
-#
-# Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON
-#   Settings -> Secrets and variables -> Actions -> New repository secret
-#   Naam:   FIREBASE_SERVICE_ACCOUNT_JSON
-#   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand
-#           (gewoon de hele JSON-tekst plakken, inclusief { } en newlines
-#           in private_key — niets extra escapen).
-#
-# Starten: GitHub -> tabblad "Actions" -> "Scrape Padel Data" -> "Run workflow"
-#   - Veld "player_ids" LEEG laten  -> ALLE gekende spelers in aanmerking.
-#   - Veld "player_ids" invullen    -> enkel die speler(s) in aanmerking,
-#                                      komma-gescheiden, bv. 214435,198221
-#   - Veld "mode" kiezen:
-#       missing    (standaard) -> enkel ontbrekende periodes per speler,
-#                                 reeds up-to-date spelers worden supersnel
-#                                 overgeslagen (geen Playwright-launch nodig).
-#       new_users               -> enkel spelers die NOG NOOIT gescraped
-#                                 zijn (volledig nieuw toegevoegd).
-#       full                    -> forceer volledige herscrape (traag,
-#                                 normaal niet nodig).
-#
-# Dependencies: geinstalleerd in TWEE stappen, bewust gescheiden zoals
-# opgezet in PadelAnalysis/scraper/requirements-scraper.txt:
-#   1. requirements.txt (repo-root)                 -> algemene dependencies,
-#      ook gebruikt door de Streamlit Cloud-deploy (GEEN playwright hierin).
-#   2. PadelAnalysis/scraper/requirements-scraper.txt -> enkel playwright,
-#      alleen nodig voor deze workflow.
+# Vereist repo secret FIREBASE_SERVICE_ACCOUNT_JSON (Settings -> Secrets and
+# variables -> Actions), met de volledige inhoud van firebase-key.json.
 
-name: Scrape Padel Data
+name: Padel data verversen
 
 on:
   workflow_dispatch:
     inputs:
       player_ids:
-        description: "Player ID's om in aanmerking te nemen, komma-gescheiden (leeg = alle spelers)"
+        description: "Specifieke speler(s), komma-gescheiden (leeg = iedereen)"
         required: false
         default: ""
       mode:
-        description: "Wat scrapen?"
+        description: "Wat verversen?"
         required: false
         default: "missing"
         type: choice
@@ -72,18 +42,14 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install general Python dependencies (repo requirements.txt)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r ../../requirements.txt
+          pip install -r requirements-scraper.txt
+          python -m playwright install --with-deps chromium
 
-      - name: Install scraper-only Python dependencies (playwright)
-        run: pip install -r requirements-scraper.txt
-
-      - name: Install Playwright browsers
-        run: python -m playwright install --with-deps chromium
-
-      - name: Run padel scraper
+      - name: Data verversen
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           PLAYER_IDS: ${{ github.event.inputs.player_ids }}
