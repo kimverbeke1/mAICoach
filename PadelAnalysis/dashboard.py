@@ -25,6 +25,7 @@ import schedule_scraper as ss
 import opponent_scout as osc
 import lineup_quick as lq
 import player_inline_actions as pia
+from cloud_helpers import is_scraping_available, scraping_unavailable_notice
 
 try:
     st.set_page_config(page_title="Padel Analysis", page_icon="🎾", layout="wide", initial_sidebar_state="collapsed")
@@ -356,6 +357,10 @@ def page_add_player():
     st.header("➕ Speler toevoegen")
     st.caption("Zoek een speler op de TVL-website en voeg hem/haar toe aan de database.")
 
+    if not is_scraping_available():
+        scraping_unavailable_notice("Spelers zoeken/toevoegen en verversen")
+        return
+
     with st.form("search_form"):
         c1, c2, c3 = st.columns([2, 2, 2])
         first = c1.text_input("Voornaam")
@@ -584,14 +589,17 @@ def page_lineup_lab():
                 if p not in unknown:
                     if c2.button("👁️ Bekijk", key=f"jump_opp_{p['user_id']}"):
                         _go_to_player(p["user_id"])
-            if unknown and st.button(f"📥 Scrape {len(unknown)} nieuwe tegenstander(s) (verrijkt toekomstige analyses)", key="btn_scrape_opp"):
-                progress = st.progress(0.0, text="Starten...")
-                def _cb(i, total, name):
-                    progress.progress(i / total if total else 0, text=f"({i}/{total}) {name} scrapen...")
-                result = osc.scrape_new_opponent_players(unknown, lookback_periods=1, delay=1.5, progress_callback=_cb)
-                progress.progress(1.0, text="Klaar.")
-                st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
-                st.rerun()
+            if unknown:
+                if not is_scraping_available():
+                    scraping_unavailable_notice("Scrapen van nieuwe tegenstander-spelers")
+                elif st.button(f"📥 Scrape {len(unknown)} nieuwe tegenstander(s) (verrijkt toekomstige analyses)", key="btn_scrape_opp"):
+                    progress = st.progress(0.0, text="Starten...")
+                    def _cb(i, total, name):
+                        progress.progress(i / total if total else 0, text=f"({i}/{total}) {name} scrapen...")
+                    result = osc.scrape_new_opponent_players(unknown, lookback_periods=1, delay=1.5, progress_callback=_cb)
+                    progress.progress(1.0, text="Klaar.")
+                    st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
+                    st.rerun()
 
     st.divider()
 
@@ -779,6 +787,10 @@ def page_lineup_lab():
 
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
     # PADEL_ANALYSIS_FIX_RC_COLUMNS
+    if not is_scraping_available():
+        scraping_unavailable_notice("Verversen/herscrapen van spelersdata")
+        return
+
     rc1, rc2 = st.columns(2)
 
     with rc1:
@@ -1107,7 +1119,9 @@ def _render_player_dashboard(player_id: str, profile: dict):
                 "Dit opent een browser en doorloopt alle beschikbare periodes (~30-60 seconden)."
             )
 
-        if st.button("📥 Klassementshistoriek laden / verversen", key=f"load_klassement_{player_id}"):
+        if not is_scraping_available():
+            scraping_unavailable_notice("Klassementshistoriek laden/verversen")
+        elif st.button("📥 Klassementshistoriek laden / verversen", key=f"load_klassement_{player_id}"):
             import sys
             _root = str(__import__("pathlib").Path(__file__).parent)
             if _root not in sys.path:
