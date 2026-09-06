@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import io
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -14,20 +16,18 @@ from AICoach.dashboard.ui_helpers import (
     is_running_sport,
 )
 
-# Streams komen uit Firestore/lokaal via persistent_data (ensure_local_stream).
+# Persistente streamlaag (GCS/lokaal) is optioneel.
 try:
-    from AICoach.download_activity_streams import ensure_local_stream
-    from AICoach.persistent_data import load_stream_csv
-except Exception:  # noqa: BLE001 - persistente laag is optioneel
-    ensure_local_stream = None
+    from AICoach.persistent_data import load_stream_csv, save_stream_csv
+except Exception:  # noqa: BLE001
     load_stream_csv = None
+    save_stream_csv = None
 
-# Mogelijke kolomnamen per meetwaarde in de Intervals streams-CSV.
 STREAM_TIME_COLUMNS = ("time", "seconds", "elapsed", "secs")
 STREAM_DISTANCE_COLUMNS = ("distance", "distance_km", "distance_m")
 STREAM_SERIES = [
     ("heartrate", ("heartrate", "hr", "heart_rate"), "Hartslag (bpm)", "#d62728"),
-    ("pace", ("pace", "velocity_smooth", "speed", "enhanced_speed"), "Snelheid/Tempo", "#1f77b4"),
+    ("velocity", ("velocity_smooth", "speed", "enhanced_speed", "pace"), "Snelheid/Tempo", "#1f77b4"),
     ("altitude", ("altitude", "elevation", "enhanced_altitude"), "Hoogte (m)", "#8c564b"),
     ("cadence", ("cadence", "cadence_running", "cad"), "Cadans", "#2ca02c"),
     ("power", ("power", "watts"), "Vermogen (W)", "#9467bd"),
@@ -49,14 +49,12 @@ def _peer_label(row: pd.Series) -> str:
         parts.append(format_duration(duration))
     if pd.notna(row.get("avg_hr")):
         parts.append(f"{float(row['avg_hr']):.0f} bpm")
-    if pd.notna(row.get("training_load")):
-        parts.append(f"load {float(row['training_load']):.1f}")
     return " | ".join(parts)
 
 
 def _render_peer_selection(selected: pd.Series, peers: pd.DataFrame) -> None:
-    st.markdown("#### Selecteer één activiteit om mee te vergelijken")
-    st.caption("De geopende activiteit wordt automatisch meegenomen. De vergelijking opent in een aparte tab.")
+    st.markdown("#### Vergelijk met een gelijkaardige activiteit")
+    st.caption("Tik op een activiteit; de vergelijking met de huidige opent in een aparte tab.")
     for _, peer in peers.iterrows():
         peer_id = str(peer.get("id"))
         if st.button(
@@ -68,6 +66,7 @@ def _render_peer_selection(selected: pd.Series, peers: pd.DataFrame) -> None:
             st.session_state.comparison_active = True
             st.session_state.comparison_answer = ""
             st.session_state.comparison_messages = []
+            st.session_state.comparison_autostart = True
             st.session_state.activity_view = "browser"
             st.rerun()
 
@@ -84,28 +83,40 @@ def _first_column(frame: pd.DataFrame, names) -> str | None:
     return None
 
 
-def _load_stream_frame(activity_id: str) -> pd.DataFrame:
-    """Haal de stream-CSV op als DataFrame (lokaal of hersteld uit Firestore)."""
+@st.cache_data(show_spinner=False)
+def _fetch_stream_frame(activity_id: str) -> pd.DataFrame:
+    """Haal de streamdata op: eerst GCS/lokaal, anders rechtstreeks van Intervals.icu.
+
+    Nieuw opgehaalde streams worden meteen persistent bewaard.
+    """
+    activity_id = str(activity_id or "").strip()
     if not activity_id:
         return pd.DataFrame()
-    # Zorg dat er lokaal een bestand is (herstel eventueel uit Firestore).
-    if ensure_local_stream is not None:
-        try:
-            path = ensure_local_stream(activity_id)
-            if path is not None:
-                return pd.read_csv(path)
-        except Exception:  # noqa: BLE001
-            pass
-    # Anders rechtstreeks uit de persistente laag lezen.
+
+    # 1) Uit persistente opslag (GCS of lokaal).
     if load_stream_csv is not None:
         try:
-            import io
-
             csv_text = load_stream_csv(activity_id)
-            if csv_text:
+            if csv_text and csv_text.strip():
                 return pd.read_csv(io.StringIO(csv_text))
         except Exception:  # noqa: BLE001
             pass
+
+    # 2) Rechtstreeks van Intervals.icu ophalen en persistent bewaren.
+    try:
+        from AICoach.intervals.client import IntervalsClient
+
+        csv_text = IntervalsClient().get_activity_streams_csv(activity_id)
+        if csv_text and csv_text.strip():
+            if save_stream_csv is not None:
+                try:
+                    save_stream_csv(activity_id, csv_text)
+                except Exception:  # noqa: BLE001
+                    pass
+            return pd.read_csv(io.StringIO(csv_text))
+    except Exception:  # noqa: BLE001
+        pass
+
     return pd.DataFrame()
 
 
@@ -117,7 +128,7 @@ def _x_axis(frame: pd.DataFrame):
     dist_col = _first_column(frame, STREAM_DISTANCE_COLUMNS)
     if dist_col is not None:
         values = pd.to_numeric(frame[dist_col], errors="coerce")
-        if dist_col.lower() == "distance_m" or values.max() and values.max() > 1000:
+        if dist_col.lower() == "distance_m" or (values.max() and values.max() > 1000):
             values = values / 1000.0
         return values, "Afstand (km)"
     return pd.Series(range(len(frame))), "Meetpunt"
@@ -167,7 +178,10 @@ def _render_map(frame: pd.DataFrame) -> bool:
     coords = coords[(coords["lat"].between(-90, 90)) & (coords["lon"].between(-180, 180))]
     if coords.empty:
         return False
-    st.map(coords, latitude="lat", longitude="lon")
+    try:
+        st.map(coords, latitude="lat", longitude="lon")
+    except TypeError:
+        st.map(coords)
     return True
 
 
@@ -201,51 +215,28 @@ def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) ->
     if is_running_sport(selected["sport"]):
         st.metric("Gemiddeld tempo", format_pace(selected.get("distance_km"), selected.get("duration_min")))
 
-    stream_frame = _load_stream_frame(str(selected.get("id") or ""))
+    with st.spinner("Streamdata laden..."):
+        stream_frame = _fetch_stream_frame(str(selected.get("id") or ""))
 
     detail_tabs = st.tabs([
-        "Overzicht",
         "Grafieken",
         "Kaart",
         "Hartslagzones",
+        "Overzicht",
         "Vergelijkbare activiteiten",
     ])
 
     with detail_tabs[0]:
-        details = []
-        for field, label, suffix in [
-            ("cadence", "Gemiddelde cadans", " spm"),
-            ("decoupling", "Decoupling", "%"),
-            ("temperature", "Temperatuur", " °C"),
-            ("elevation_loss", "Daling", " m"),
-            ("resting_hr", "Rusthartslag", " bpm"),
-            ("source", "Bron", ""),
-        ]:
-            value = selected.get(field)
-            if value is not None and not (isinstance(value, float) and pd.isna(value)):
-                if isinstance(value, (int, float)):
-                    value = display_value(value, suffix)
-                details.append({"Onderdeel": label, "Waarde": value})
-        if selected.get("description"):
-            st.write(selected["description"])
-        if selected.get("interval_summary"):
-            st.markdown("**Intervals**")
-            for summary in selected["interval_summary"]:
-                st.write(f"- {summary}")
-        if details:
-            st.dataframe(pd.DataFrame(details), use_container_width=True, hide_index=True)
-
-    with detail_tabs[1]:
         if stream_frame.empty:
             st.info("Geen streamdata beschikbaar voor deze activiteit.")
         else:
             _render_stream_charts(stream_frame)
 
-    with detail_tabs[2]:
+    with detail_tabs[1]:
         if stream_frame.empty or not _render_map(stream_frame):
             st.info("Geen GPS-gegevens beschikbaar om een kaart te tonen.")
 
-    with detail_tabs[3]:
+    with detail_tabs[2]:
         zone_times = selected.get("hr_zone_times")
         zones = selected.get("hr_zones")
         if not isinstance(zone_times, list) or not zone_times:
@@ -269,6 +260,30 @@ def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) ->
             ))
             fig.update_layout(title="Tijd per hartslagzone", yaxis_title="Aandeel (%)", margin=dict(l=8, r=8, t=42, b=8))
             st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+
+    with detail_tabs[3]:
+        details = []
+        for field, label, suffix in [
+            ("cadence", "Gemiddelde cadans", " spm"),
+            ("decoupling", "Decoupling", "%"),
+            ("temperature", "Temperatuur", " °C"),
+            ("elevation_loss", "Daling", " m"),
+            ("resting_hr", "Rusthartslag", " bpm"),
+            ("source", "Bron", ""),
+        ]:
+            value = selected.get(field)
+            if value is not None and not (isinstance(value, float) and pd.isna(value)):
+                if isinstance(value, (int, float)):
+                    value = display_value(value, suffix)
+                details.append({"Onderdeel": label, "Waarde": value})
+        if selected.get("description"):
+            st.write(selected["description"])
+        if selected.get("interval_summary"):
+            st.markdown("**Intervals**")
+            for summary in selected["interval_summary"]:
+                st.write(f"- {summary}")
+        if details:
+            st.dataframe(pd.DataFrame(details), use_container_width=True, hide_index=True)
 
     with detail_tabs[4]:
         peers = similar_activities(all_activities, selected)

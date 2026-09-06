@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Activiteitenpagina van mAICoach.
 
-- Sorteerbare/filterbare tabel (klik kolomkop om te sorteren).
-- Selecteer 1 rij om details te openen (geen dropdown).
-- Selecteer 2 rijen en start de vergelijking via een knop. De vergelijking opent
-  in een aparte tab die je weer kunt sluiten. Het aanvinken zelf doet GEEN AI-call.
+UX-principes:
+- Doorklikken op een activiteit opent meteen de details (elke rij is een knop).
+- Geen detail-/vergelijkknoppen onderaan.
+- Vergelijken gebeurt via een schakelaar bovenaan. In vergelijkmodus krijgt elke
+  activiteit een selectievakje en staat de vergelijkknop prominent bovenaan
+  (goed zichtbaar, ook op mobiel).
 """
 
 from __future__ import annotations
@@ -14,26 +16,32 @@ import streamlit as st
 
 from AICoach.dashboard.activity_detail import render_activity_detail
 from AICoach.dashboard.data_loaders import load_activities_frame
+from AICoach.dashboard.ui_helpers import format_duration
 
 ALL_SPORTS_LABEL = "Alle sporten"
-
-TABLE_COLUMNS = [
-    ("date", "Datum"),
-    ("name", "Naam"),
-    ("sport", "Sport"),
-    ("distance_km", "Afstand (km)"),
-    ("duration_min", "Duur (min)"),
-    ("avg_hr", "Gem. HR"),
-    ("max_hr", "Max HR"),
-    ("training_load", "Load"),
-    ("elevation_gain", "Hoogtewinst (m)"),
-    ("calories", "Calorieen"),
-]
+PAGE_SIZE = 20
 
 
 def _row_by_id(df: pd.DataFrame, activity_id: str):
     matches = df[df["id"].astype(str) == str(activity_id)]
     return None if matches.empty else matches.iloc[0]
+
+
+def _selected_ids() -> list[str]:
+    values = st.session_state.get("activity_comparison_ids", [])
+    return list(dict.fromkeys(str(value) for value in values))[:2]
+
+
+def _toggle_selection(activity_id: str) -> None:
+    ids = _selected_ids()
+    activity_id = str(activity_id)
+    if activity_id in ids:
+        ids.remove(activity_id)
+    elif len(ids) < 2:
+        ids.append(activity_id)
+    else:
+        st.toast("Je kunt exact 2 activiteiten selecteren. Deselecteer er eerst een.")
+    st.session_state.activity_comparison_ids = ids
 
 
 def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -46,28 +54,14 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     if dates.empty:
         return df.copy()
 
-    row1 = st.columns([1.1, 1, 1])
+    row1 = st.columns([1.2, 1, 1])
     with row1[0]:
         sport = st.selectbox("Sport", [ALL_SPORTS_LABEL, *sports], key="activities_sport_filter")
     with row1[1]:
         start = st.date_input("Vanaf", value=dates.min().date(), key="activities_start_date")
     with row1[2]:
         end = st.date_input("Tot en met", value=dates.max().date(), key="activities_end_date")
-
-    max_distance = float(pd.to_numeric(df.get("distance_km"), errors="coerce").max() or 0)
-    row2 = st.columns([1.4, 1.3])
-    with row2[0]:
-        search = st.text_input("Zoeken op naam", key="activities_search").strip()
-    distance_range = None
-    with row2[1]:
-        if max_distance > 0:
-            distance_range = st.slider(
-                "Afstand (km)",
-                min_value=0.0,
-                max_value=round(max_distance + 0.5, 1),
-                value=(0.0, round(max_distance + 0.5, 1)),
-                key="activities_distance_range",
-            )
+    search = st.text_input("Zoeken op naam", key="activities_search").strip()
 
     filtered = df.copy()
     if sport != ALL_SPORTS_LABEL:
@@ -78,84 +72,136 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[
             filtered["name"].fillna("").astype(str).str.contains(search, case=False, regex=False)
         ]
-    if distance_range is not None:
-        distances = pd.to_numeric(filtered["distance_km"], errors="coerce")
-        filtered = filtered[distances.between(distance_range[0], distance_range[1], inclusive="both")]
     return filtered.sort_values("date", ascending=False).reset_index(drop=True)
 
 
-def _display_table(filtered: pd.DataFrame) -> pd.DataFrame:
-    table = pd.DataFrame()
-    for key, label in TABLE_COLUMNS:
-        if key not in filtered.columns:
-            continue
-        if key == "date":
-            table[label] = pd.to_datetime(filtered[key], errors="coerce").dt.strftime("%d/%m/%Y")
-        elif key in ("distance_km", "training_load"):
-            table[label] = pd.to_numeric(filtered[key], errors="coerce").round(2)
-        elif key in ("duration_min", "avg_hr", "max_hr", "elevation_gain", "calories"):
-            table[label] = pd.to_numeric(filtered[key], errors="coerce").round(0)
+def _activity_summary(row: pd.Series) -> str:
+    date_value = pd.to_datetime(row.get("date"), errors="coerce")
+    date_label = date_value.strftime("%d/%m/%Y") if not pd.isna(date_value) else ""
+    parts = [date_label, str(row.get("sport") or "Onbekend")]
+    if pd.notna(row.get("distance_km")):
+        parts.append(f"{float(row['distance_km']):.1f} km")
+    if pd.notna(row.get("duration_min")):
+        parts.append(format_duration(row["duration_min"]))
+    if pd.notna(row.get("avg_hr")):
+        parts.append(f"{float(row['avg_hr']):.0f} bpm")
+    if pd.notna(row.get("training_load")):
+        parts.append(f"load {float(row['training_load']):.0f}")
+    return "  ·  ".join(part for part in parts if part)
+
+
+def _open_detail(activity_id: str) -> None:
+    st.session_state.selected_activity_id = str(activity_id)
+    st.session_state.activity_view = "detail"
+    st.rerun()
+
+
+def _start_comparison() -> None:
+    st.session_state.comparison_active = True
+    st.session_state.comparison_answer = ""
+    st.session_state.comparison_messages = []
+    st.session_state.comparison_autostart = True
+    st.rerun()
+
+
+def _render_compare_bar() -> None:
+    ids = _selected_ids()
+    bar = st.columns([6, 4])
+    with bar[0]:
+        st.caption(f"{len(ids)}/2 geselecteerd. Vink 2 activiteiten aan en start de vergelijking.")
+    with bar[1]:
+        if st.button(
+            "⚖️ Vergelijk 2 activiteiten",
+            disabled=len(ids) != 2,
+            use_container_width=True,
+            type="primary",
+        ):
+            _start_comparison()
+
+
+def _render_list(filtered: pd.DataFrame, compare_mode: bool) -> None:
+    total = len(filtered)
+    page = int(st.session_state.get("activities_page", 1))
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 1), pages)
+    st.session_state.activities_page = page
+    start = (page - 1) * PAGE_SIZE
+    rows = filtered.iloc[start : start + PAGE_SIZE]
+
+    selected = set(_selected_ids())
+
+    for _, row in rows.iterrows():
+        activity_id = str(row.get("id"))
+        name = str(row.get("name") or "Activiteit")
+        summary = _activity_summary(row)
+
+        if compare_mode:
+            columns = st.columns([1, 11])
+            with columns[0]:
+                checked = st.checkbox(
+                    " ",
+                    value=activity_id in selected,
+                    key=f"cmp_{activity_id}",
+                    label_visibility="collapsed",
+                )
+                if checked and activity_id not in selected and len(selected) < 2:
+                    _toggle_selection(activity_id)
+                    st.rerun()
+                elif not checked and activity_id in selected:
+                    _toggle_selection(activity_id)
+                    st.rerun()
+                elif checked and activity_id not in selected and len(selected) >= 2:
+                    st.session_state[f"cmp_{activity_id}"] = False
+            with columns[1]:
+                st.markdown(f"**{name}**")
+                st.caption(summary)
         else:
-            table[label] = filtered[key].astype(str)
-    return table
+            # Elke activiteit is één grote, aantikbare knop -> opent details.
+            if st.button(
+                f"**{name}**\n\n{summary}",
+                key=f"open_{activity_id}",
+                use_container_width=True,
+            ):
+                _open_detail(activity_id)
+
+    if pages > 1:
+        nav = st.columns([2, 3, 2])
+        with nav[0]:
+            if st.button("← Vorige", disabled=page <= 1, use_container_width=True):
+                st.session_state.activities_page = page - 1
+                st.rerun()
+        with nav[1]:
+            st.caption(f"Pagina {page} van {pages}  ·  {total} activiteiten")
+        with nav[2]:
+            if st.button("Volgende →", disabled=page >= pages, use_container_width=True):
+                st.session_state.activities_page = page + 1
+                st.rerun()
 
 
 def _render_browser(df: pd.DataFrame) -> None:
     st.subheader("Activiteiten")
+
+    top = st.columns([7, 5])
+    with top[0]:
+        if not st.session_state.get("compare_mode"):
+            st.caption("Tik op een activiteit om de details te openen.")
+    with top[1]:
+        compare_mode = st.toggle(
+            "Vergelijkmodus",
+            key="compare_mode",
+            help="Selecteer 2 activiteiten om ze met AI te vergelijken.",
+        )
+
     filtered = _apply_filters(df)
+
+    if compare_mode:
+        _render_compare_bar()
+
     if filtered.empty:
         st.info("Geen activiteiten gevonden voor deze filters.")
         return
 
-    st.caption(
-        "Klik op een kolomkop om te sorteren. Selecteer 1 rij voor details, "
-        "of 2 rijen om te vergelijken."
-    )
-    table = _display_table(filtered)
-    event = st.dataframe(
-        table,
-        hide_index=True,
-        use_container_width=True,
-        height=560,
-        on_select="rerun",
-        selection_mode="multi-row",
-        key="activities_dataframe",
-    )
-
-    try:
-        selected_rows = event.selection.rows
-    except AttributeError:
-        selected_rows = event.get("selection", {}).get("rows", []) if event else []
-
-    selected_ids = [str(filtered.iloc[index]["id"]) for index in selected_rows if index < len(filtered)]
-
-    actions = st.columns([3, 3, 6])
-    with actions[0]:
-        if st.button("Open details", disabled=len(selected_ids) != 1, use_container_width=True):
-            st.session_state.selected_activity_id = selected_ids[0]
-            st.session_state.activity_view = "detail"
-            st.rerun()
-    with actions[1]:
-        if st.button(
-            "Vergelijk in aparte tab",
-            disabled=len(selected_ids) != 2,
-            type="primary",
-            use_container_width=True,
-        ):
-            st.session_state.activity_comparison_ids = selected_ids
-            st.session_state.comparison_active = True
-            st.session_state.comparison_answer = ""
-            st.session_state.comparison_messages = []
-            st.rerun()
-    with actions[2]:
-        if len(selected_ids) == 0:
-            st.caption("Niets geselecteerd.")
-        elif len(selected_ids) == 1:
-            st.caption("1 rij geselecteerd — open details of selecteer er nog 1 om te vergelijken.")
-        elif len(selected_ids) == 2:
-            st.caption("2 rijen geselecteerd — klik op 'Vergelijk in aparte tab'.")
-        else:
-            st.caption(f"{len(selected_ids)} rijen geselecteerd — selecteer er exact 2 om te vergelijken.")
+    _render_list(filtered, compare_mode=bool(compare_mode))
 
 
 def render_activities() -> None:
@@ -163,13 +209,15 @@ def render_activities() -> None:
     if df.empty:
         st.info("Er zijn nog geen activiteiten beschikbaar.")
         return
+    if "activity_comparison_ids" not in st.session_state:
+        st.session_state.activity_comparison_ids = []
 
     if st.session_state.get("activity_view") == "detail":
         selected = _row_by_id(df, st.session_state.get("selected_activity_id", ""))
         if selected is None:
             st.session_state.activity_view = "browser"
             st.rerun()
-        if st.button("Terug naar activiteiten", key="detail_back_to_activities"):
+        if st.button("← Terug naar activiteiten", key="detail_back_to_activities"):
             st.session_state.activity_view = "browser"
             st.rerun()
         render_activity_detail(selected, df)

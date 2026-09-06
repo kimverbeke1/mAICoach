@@ -15,6 +15,7 @@ from AICoach.context_builder import build_context
 from AICoach.dashboard.activities_tab import render_activities
 from AICoach.dashboard.best_results_tab import render_best_results
 from AICoach.dashboard.charts import render_time_chart, selected_date_from_event
+from AICoach.dashboard.comparison_tab import render_comparison_tab
 from AICoach.dashboard.daily_update import render_daily_update
 from AICoach.dashboard.data_loaders import load_history
 from AICoach.dashboard.knowledge_tab import render_knowledge
@@ -26,14 +27,9 @@ from AICoach.dashboard.ui_helpers import (
     render_selected_values,
 )
 from AICoach.saved_insights import render_saved_insights, save_insight
-from AICoach.sync_latest import sync_latest_data
 
 
-st.set_page_config(
-    page_title="mAICoach",
-    page_icon="🏃",
-    layout="wide",
-)
+st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
 
 st.markdown(
     """
@@ -79,24 +75,25 @@ st.markdown(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Lichte, gecachete opstart-sync.
+# Draait maximaal één keer per 30 minuten (gedeeld over sessies) en blokkeert de
+# UI niet bij elke rerun. Zo laadt de app op mobiel meteen door.
+# --------------------------------------------------------------------------- #
+@st.cache_resource(ttl=1800, show_spinner=False)
+def _sync_once(bucket: str) -> dict:
+    from AICoach.sync_latest import sync_latest_data
+
+    return sync_latest_data()
+
+
 def ensure_latest_data():
-    """Haalt bij het openen of verversen van de pagina enkel de ontbrekende data op.
-
-    Draait maximaal één keer per sessie. Bij een browser-refresh (F5) start
-    Streamlit een nieuwe sessie, waardoor de lichte sync opnieuw wordt uitgevoerd.
-    """
-    if st.session_state.get("startup_sync_done"):
-        return
-
-    st.session_state.startup_sync_done = True
-    with st.spinner("Nieuwste gegevens ophalen..."):
-        try:
-            st.session_state.startup_sync_result = sync_latest_data()
-            st.session_state.startup_sync_error = None
-            st.cache_data.clear()
-            st.session_state.pop("dashboard_selected_date", None)
-        except Exception as exc:  # noqa: BLE001
-            st.session_state.startup_sync_error = str(exc)
+    # Draai de sync gecachet; bij fouten blijft de app gewoon werken met
+    # de laatst beschikbare data.
+    try:
+        _sync_once("v1")
+    except Exception as exc:  # noqa: BLE001
+        st.session_state.startup_sync_error = str(exc)
 
 
 def render_dashboard():
@@ -112,22 +109,11 @@ def render_dashboard():
 
     st.caption(
         f"Hersteldata: {context.get('current_date') or 'onbekend'} | "
-        f"Trainingsstatus: "
-        f"{context.get('latest_training_status_date') or 'onbekend'}"
+        f"Trainingsstatus: {context.get('latest_training_status_date') or 'onbekend'}"
     )
 
-    period_options = {
-        "30 dagen": 30,
-        "90 dagen": 90,
-        "Dit jaar": 366,
-        "Alles": len(df),
-    }
-    selected_period = st.selectbox(
-        "Periode",
-        list(period_options),
-        index=2,
-        key="dashboard_period",
-    )
+    period_options = {"30 dagen": 30, "90 dagen": 90, "Dit jaar": 366, "Alles": len(df)}
+    selected_period = st.selectbox("Periode", list(period_options), index=2, key="dashboard_period")
     view = df.tail(period_options[selected_period]).copy()
 
     latest_date = view["date"].max() if not view.empty else None
@@ -136,12 +122,8 @@ def render_dashboard():
         selected_date = latest_date
         st.session_state.dashboard_selected_date = latest_date
     selected_row = nearest_row(view, selected_date)
-    render_selected_values(
-        selected_row,
-        ["fitness", "fatigue", "form", "training_load", "resting_hr"],
-    )
+    render_selected_values(selected_row, ["fitness", "fatigue", "form", "training_load", "resting_hr"])
 
-    # Fitness, Fatigue en Form staan bewust samen in één gecombineerde grafiek.
     event = render_time_chart(
         view,
         ["fitness", "fatigue", "form"],
@@ -156,7 +138,6 @@ def render_dashboard():
         st.rerun()
 
     if has_data(view, "training_load"):
-        # Training load staat standaard op maandweergave (periodetotaal).
         render_time_chart(
             view,
             ["training_load"],
@@ -169,7 +150,6 @@ def render_dashboard():
 
 def render_chat():
     st.subheader("mAICoach")
-
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -189,78 +169,62 @@ def render_chat():
             else:
                 st.markdown(message["content"])
 
-    question = st.chat_input(
-        "Stel een vraag over je training, herstel of prestaties..."
-    )
-
+    question = st.chat_input("Stel een vraag over je training, herstel of prestaties...")
     if question:
-        st.session_state.chat_history.append(
-            {"role": "user", "content": question}
-        )
-
+        st.session_state.chat_history.append({"role": "user", "content": question})
         with st.chat_message("user"):
             st.markdown(question)
-
         with st.chat_message("assistant"):
             with st.spinner("mAICoach analyseert je gegevens..."):
                 answer = handle_message(question)
             render_assistant_answer(answer)
-
-        st.session_state.chat_history.append(
-            {"role": "assistant", "content": answer}
-        )
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
 
 
-ensure_latest_data()
-
 st.title("🏃 mAICoach")
+
+# UI eerst tonen; sync draait gecachet en blokkeert niet.
+ensure_latest_data()
 
 context = build_context()
 st.caption(
     f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
-    f"Laatste activiteit: "
-    f"{context.get('latest_activity', {}).get('date') or 'onbekend'}"
+    f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
 )
 
-if st.session_state.get("startup_sync_error"):
-    with st.expander("Synchronisatie gaf een waarschuwing"):
+with st.expander("Gegevens verversen"):
+    st.caption("De nieuwste gegevens worden automatisch opgehaald. Forceer hier indien nodig.")
+    if st.button("Nu verversen"):
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.session_state.pop("dashboard_selected_date", None)
+        st.rerun()
+    if st.session_state.get("startup_sync_error"):
+        st.warning("Automatische synchronisatie gaf een melding:")
         st.code(st.session_state["startup_sync_error"])
 
-(
-    tab_dashboard,
-    tab_chat,
-    tab_recovery,
-    tab_knowledge,
-    tab_best,
-    tab_activities,
-) = st.tabs(
-    [
-        "Dashboard",
-        "AI Coach",
-        "Recovery",
-        "Athlete Knowledge",
-        "Beste resultaten",
-        "Activiteiten",
-    ]
-)
+tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
+comparison_active = bool(st.session_state.get("comparison_active"))
+if comparison_active:
+    tab_labels.append("Vergelijking")
 
-with tab_dashboard:
+tabs = st.tabs(tab_labels)
+
+with tabs[0]:
     render_dashboard()
-
-with tab_chat:
+with tabs[1]:
     render_chat()
-
-with tab_recovery:
+with tabs[2]:
     render_recovery()
-
-with tab_knowledge:
+with tabs[3]:
     render_knowledge()
     st.divider()
     render_saved_insights()
-
-with tab_best:
+with tabs[4]:
     render_best_results()
-
-with tab_activities:
+with tabs[5]:
     render_activities()
+if comparison_active:
+    with tabs[6]:
+        render_comparison_tab()

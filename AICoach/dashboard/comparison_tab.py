@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Aparte, sluitbare vergelijkings-tab voor mAICoach.
 
-Wordt alleen getoond wanneer de gebruiker 2 activiteiten heeft geselecteerd en op
-'Vergelijk in aparte tab' klikt. De AI-analyse start pas na een expliciete knop,
-zodat het aanvinken van activiteiten geen wachttijd veroorzaakt.
+Verschijnt zodra er 2 activiteiten zijn geselecteerd. De AI-analyse start
+automatisch (comparison_autostart), zodat de gebruiker niet nog eens op een knop
+moet drukken. De tab kan worden gesloten met de knop bovenaan.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ def _close_comparison() -> None:
     st.session_state.comparison_active = False
     st.session_state.comparison_answer = ""
     st.session_state.comparison_messages = []
+    st.session_state.comparison_autostart = False
     st.session_state.activity_comparison_ids = []
 
 
@@ -47,6 +48,13 @@ def _overview(selected: pd.DataFrame) -> None:
         st.dataframe(display, use_container_width=True, hide_index=True)
 
 
+def _run_analysis(selected: pd.DataFrame) -> None:
+    with st.spinner("mAICoach vergelijkt de 2 activiteiten..."):
+        st.session_state.comparison_answer = compare_selected_activities(selected)
+    st.session_state.comparison_messages = []
+    st.session_state.comparison_autostart = False
+
+
 def render_comparison_tab() -> None:
     header = st.columns([8, 2])
     with header[0]:
@@ -56,7 +64,7 @@ def render_comparison_tab() -> None:
             "wellness van dezelfde en vorige dag, en Fitness/Fatigue/Form."
         )
     with header[1]:
-        if st.button("Sluit vergelijking", use_container_width=True):
+        if st.button("Sluiten", use_container_width=True):
             _close_comparison()
             st.rerun()
 
@@ -73,41 +81,44 @@ def render_comparison_tab() -> None:
 
     _overview(selected)
 
-    if not st.session_state.get("comparison_answer"):
-        if st.button("Start AI-analyse", type="primary", use_container_width=True):
-            with st.spinner("mAICoach vergelijkt de 2 activiteiten..."):
-                answer = compare_selected_activities(selected)
-            st.session_state.comparison_answer = answer
-            st.session_state.comparison_messages = []
-            st.rerun()
+    # Automatisch starten bij binnenkomst, of wanneer er nog geen antwoord is.
+    if st.session_state.get("comparison_autostart") and not st.session_state.get("comparison_answer"):
+        _run_analysis(selected)
 
     answer = st.session_state.get("comparison_answer", "")
-    if answer:
-        render_assistant_answer(answer)
-        st.markdown("#### Vervolgvragen")
-        for message in st.session_state.get("comparison_messages", []):
-            with st.chat_message(message["role"]):
-                if message["role"] == "assistant":
-                    render_assistant_answer(message["content"])
-                else:
-                    st.markdown(message["content"])
-        question = st.chat_input(
-            "Vraag bijvoorbeeld: wat is TRIMP of welke streamdata ondersteunt dit?",
-            key="comparison_follow_up",
-        )
-        if question:
-            messages = st.session_state.get("comparison_messages", [])
-            conversation = "\n".join(f"{item['role']}: {item['content']}" for item in messages)
-            with st.spinner("mAICoach bekijkt opnieuw de volledige vergelijkingscontext..."):
-                follow_up = compare_selected_activities(
-                    selected,
-                    question=question,
-                    previous_answer=answer,
-                    conversation=conversation,
-                )
-            messages.extend([
-                {"role": "user", "content": question},
-                {"role": "assistant", "content": follow_up},
-            ])
-            st.session_state.comparison_messages = messages
+    if not answer:
+        if st.button("Start AI-analyse", type="primary", use_container_width=True):
+            _run_analysis(selected)
             st.rerun()
+        return
+
+    render_assistant_answer(answer)
+
+    st.markdown("#### Vervolgvragen")
+    for message in st.session_state.get("comparison_messages", []):
+        with st.chat_message(message["role"]):
+            if message["role"] == "assistant":
+                render_assistant_answer(message["content"])
+            else:
+                st.markdown(message["content"])
+
+    question = st.chat_input(
+        "Vraag bijvoorbeeld: wat is TRIMP of welke streamdata ondersteunt dit?",
+        key="comparison_follow_up",
+    )
+    if question:
+        messages = st.session_state.get("comparison_messages", [])
+        conversation = "\n".join(f"{item['role']}: {item['content']}" for item in messages)
+        with st.spinner("mAICoach bekijkt opnieuw de volledige vergelijkingscontext..."):
+            follow_up = compare_selected_activities(
+                selected,
+                question=question,
+                previous_answer=answer,
+                conversation=conversation,
+            )
+        messages.extend([
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": follow_up},
+        ])
+        st.session_state.comparison_messages = messages
+        st.rerun()
