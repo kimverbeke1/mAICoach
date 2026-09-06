@@ -29,7 +29,10 @@ from AICoach.dashboard.ui_helpers import (
 from AICoach.saved_insights import render_saved_insights, save_insight
 
 
-st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
+try:
+    st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
+except Exception:
+    pass
 
 st.markdown(
     """

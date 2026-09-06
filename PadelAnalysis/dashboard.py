@@ -26,12 +26,10 @@ import opponent_scout as osc
 import lineup_quick as lq
 import player_inline_actions as pia
 
-st.set_page_config(
-    page_title="Padel Analysis",
-    page_icon="🎾",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+try:
+    st.set_page_config(page_title="Padel Analysis", page_icon="🎾", layout="wide", initial_sidebar_state="collapsed")
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────
 # Custom CSS
