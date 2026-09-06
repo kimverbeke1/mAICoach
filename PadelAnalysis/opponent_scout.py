@@ -12,8 +12,21 @@ Ontwerpkeuzes (zie gesprek):
 - Standaard 1 periode (huidige) per nieuwe tegenstander, maar parametriseerbaar
   (`lookback_periods`) zodat dit later makkelijk naar bv. 2 uit te breiden is
   zonder de rest van de code aan te passen.
-"""
 
+BELANGRIJKE FIX (cloud-deploy, 2026-09-06):
+`scrape_player` wordt hier bewust LAZY geïmporteerd (pas binnen
+scrape_new_opponent_players), niet meer bovenaan het bestand.
+scrape_player.py importeert op zijn beurt fetch_period_playwright.py, dat
+Playwright vereist. Playwright/browser-binaries zijn niet beschikbaar op
+Streamlit Community Cloud. Een top-level import hiervan liet de volledige
+dashboard.py crashen bij het laden (ModuleNotFoundError: No module named
+'playwright'), ook als er nooit een scrape-knop werd ingedrukt — want
+dashboard.py importeert opponent_scout.py op zijn beurt onvoorwaardelijk
+bovenaan.
+scraper_v2.scrape_uitslagenblad blijft wél bovenaan geïmporteerd: die module
+gebruikt enkel requests + BeautifulSoup, geen Playwright, en is dus altijd
+veilig om te importeren, ook op cloud.
+"""
 import re
 import sys
 import time
@@ -25,8 +38,7 @@ for _p in [str(_ROOT), str(_ROOT / "scraper")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from scraper_v2 import scrape_uitslagenblad  # noqa: E402
-from scrape_player import scrape_player  # noqa: E402
+from scraper_v2 import scrape_uitslagenblad  # noqa: E402  (veilig: geen Playwright)
 import firebase_service as fb  # noqa: E402
 import schedule_scraper as ss  # noqa: E402
 
@@ -49,7 +61,9 @@ def get_opponent_previous_fixtures(
     before = ss._parse_date_text(before_date_text)
     played_before = [
         f for f in team_fixtures
-        if f["played"] and ss._parse_date_text(f["date_text"]) and (before is None or ss._parse_date_text(f["date_text"]) < before)
+        if f["played"] and ss._parse_date_text(f["date_text"]) and (
+            before is None or ss._parse_date_text(f["date_text"]) < before
+        )
     ]
     played_before.sort(key=lambda f: ss._parse_date_text(f["date_text"]))
     return played_before[-lookback:] if lookback else []
@@ -66,26 +80,22 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     """
     import requests
     session = session or requests.Session()
-
     out = {"fixture": fixture, "players": [], "boards": [], "error": None}
     url = fixture.get("uitslagenblad_url")
     if not url:
         out["error"] = "Geen uitslagenblad-link beschikbaar voor deze fixture."
         return out
-
     try:
         data = scrape_uitslagenblad(session, url)
     except Exception as e:
         out["error"] = f"Kon uitslagenblad niet ophalen: {e}"
         return out
-
     is_opponent_home = fixture.get("home_ploeg_id") == opponent_ploeg_id
     # Fallback: vergelijk namen als ploegId-koppeling niet zeker is
     if not is_opponent_home and not (fixture.get("away_ploeg_id") == opponent_ploeg_id):
         home_n = _normalize(data.get("home_team") or "")
         opp_n = _normalize(opponent_name)
         is_opponent_home = bool(opp_n) and opp_n in home_n
-
     seen_ids = set()
     for board in data.get("matches", []):
         players = board.get("players", [])
@@ -107,7 +117,6 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
             if p.get("user_id") and p["user_id"] not in seen_ids:
                 seen_ids.add(p["user_id"])
                 out["players"].append(p)
-
     return out
 
 
@@ -125,7 +134,6 @@ def scout_opponent(
     """
     import requests
     session = requests.Session()
-
     prev_fixtures = get_opponent_previous_fixtures(all_fixtures, opponent_ploeg_id, before_date_text, lookback)
     if not prev_fixtures:
         return {
@@ -136,7 +144,6 @@ def scout_opponent(
             "note": "Geen eerdere, al gespeelde wedstrijden van deze tegenstander gevonden dit seizoen "
                     "(bv. hun eerste match, of nog niet gespeeld).",
         }
-
     results = []
     unique_players = {}
     for fx in prev_fixtures:
@@ -145,7 +152,6 @@ def scout_opponent(
         for p in extracted["players"]:
             unique_players[p["user_id"]] = p["name"]
         time.sleep(1.0)  # zelfde beleefdheids-pauze als de rest van de scraper
-
     return {
         "opponent_name": opponent_name,
         "opponent_ploeg_id": opponent_ploeg_id,
@@ -172,12 +178,19 @@ def scrape_new_opponent_players(
     Geen parallellisatie — bewust, om niet als één plotse vlaag van requests
     op te vallen (zie gesprek over discretie vs. snelheid).
     """
+    # LAZY IMPORT (fix 2026-09-06): scrape_player.py importeert bovenaan
+    # fetch_period_playwright.py, wat Playwright vereist. Op Streamlit Cloud
+    # is dat niet beschikbaar. Door pas hier te importeren, blijft de rest
+    # van dashboard.py/opponent_scout.py gewoon werken op cloud; enkel het
+    # effectief scrapen van nieuwe tegenstander-spelers vereist een lokale
+    # omgeving (waar is_scraping_available() dit al afschermt in dashboard.py).
+    from scrape_player import scrape_player
+
     to_scrape = []
     for p in players:
         existing = fb.get_player_profile(p["user_id"])
         if not existing:
             to_scrape.append(p)
-
     total = len(to_scrape)
     done, failed = [], []
     for i, p in enumerate(to_scrape, start=1):
@@ -196,5 +209,4 @@ def scrape_new_opponent_players(
             failed.append({**p, "error": str(e)})
         if i < total:
             time.sleep(delay)
-
     return {"already_known": len(players) - total, "newly_scraped": done, "failed": failed}
