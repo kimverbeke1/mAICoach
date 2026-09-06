@@ -15,9 +15,17 @@
 #           in private_key — niets extra escapen).
 #
 # Starten: GitHub -> tabblad "Actions" -> "Scrape Padel Data" -> "Run workflow"
-#   - Veld "player_ids" LEEG laten  -> ALLE gekende spelers verversen.
-#   - Veld "player_ids" invullen    -> enkel die speler(s) verversen,
+#   - Veld "player_ids" LEEG laten  -> ALLE gekende spelers in aanmerking.
+#   - Veld "player_ids" invullen    -> enkel die speler(s) in aanmerking,
 #                                      komma-gescheiden, bv. 214435,198221
+#   - Veld "mode" kiezen:
+#       missing    (standaard) -> enkel ontbrekende periodes per speler,
+#                                 reeds up-to-date spelers worden supersnel
+#                                 overgeslagen (geen Playwright-launch nodig).
+#       new_users               -> enkel spelers die NOG NOOIT gescraped
+#                                 zijn (volledig nieuw toegevoegd).
+#       full                    -> forceer volledige herscrape (traag,
+#                                 normaal niet nodig).
 #
 # Dependencies: geinstalleerd in TWEE stappen, bewust gescheiden zoals
 # opgezet in PadelAnalysis/scraper/requirements-scraper.txt:
@@ -32,9 +40,18 @@ on:
   workflow_dispatch:
     inputs:
       player_ids:
-        description: "Player ID's om te verversen, komma-gescheiden (leeg = alle spelers)"
+        description: "Player ID's om in aanmerking te nemen, komma-gescheiden (leeg = alle spelers)"
         required: false
         default: ""
+      mode:
+        description: "Wat scrapen?"
+        required: false
+        default: "missing"
+        type: choice
+        options:
+          - missing
+          - new_users
+          - full
 
 jobs:
   scrape:
@@ -70,4 +87,5 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           PLAYER_IDS: ${{ github.event.inputs.player_ids }}
+          MODE: ${{ github.event.inputs.mode }}
         run: python ci_scrape_all.py
