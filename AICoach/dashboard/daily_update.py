@@ -8,6 +8,13 @@ en Fatigue. Voorzichtig geformuleerd en gericht op wat je er praktisch mee kunt.
 Belangrijk: Form/Fitness/Fatigue komen uit load_history() (dagelijkse waarden op
 basis van wellness, inclusief vandaag), niet uit de laatste activiteit. Zo komt
 de getoonde Form overeen met het dashboard en met Intervals.icu.
+
+Robuuste widget-keys: render_daily_update() kan in sommige app-structuren (bv.
+door dubbele imports of geneste paginanavigatie) meer dan één keer binnen
+dezelfde Streamlit-run worden aangeroepen. Vaste keys zoals "daily_ai_deepdive"
+botsen dan met StreamlitDuplicateElementKey. _unique_key() lost dit op door
+elke aanroep een oplopend, gegarandeerd uniek volgnummer te geven, ongeacht
+hoe vaak of vanwaar deze functie wordt aangeroepen.
 """
 
 from __future__ import annotations
@@ -18,6 +25,20 @@ import streamlit as st
 from AICoach.chat.ai_message_handler import handle_message
 from AICoach.dashboard.charts import form_zone_for
 from AICoach.dashboard.data_loaders import load_history, load_wellness_frame
+
+
+def _unique_key(base: str) -> str:
+    """Geef een key terug die gegarandeerd uniek is, ook bij dubbele renders.
+
+    Gebruikt een oplopende teller in session_state per basisnaam. Dit voorkomt
+    StreamlitDuplicateElementKey-fouten wanneer dezelfde widget-aanroep (bv.
+    door een dubbele import of paginastructuur) meer dan één keer per run
+    wordt uitgevoerd, en werkt ook correct over meerdere reruns heen.
+    """
+    counter_name = f"__key_counter__{base}"
+    count = st.session_state.get(counter_name, 0) + 1
+    st.session_state[counter_name] = count
+    return f"{base}__{count}"
 
 
 def _latest_and_previous(df: pd.DataFrame, column: str):
@@ -117,7 +138,10 @@ def render_daily_update() -> None:
     for line in signals:
         st.markdown(f"- {line}")
 
-    if st.button("Laat de AI meedenken over de recente periode", key="daily_ai_deepdive"):
+    if st.button(
+        "Laat de AI meedenken over de recente periode",
+        key=_unique_key("daily_ai_deepdive"),
+    ):
         with st.spinner("mAICoach analyseert je recente periode..."):
             st.session_state.daily_ai_answer = handle_message(_ai_period_prompt())
 
@@ -126,7 +150,10 @@ def render_daily_update() -> None:
         from AICoach.dashboard.ui_helpers import render_assistant_answer
 
         render_assistant_answer(answer)
-        if st.button("Deze analyse bewaren bij mijn kennis", key="daily_ai_save"):
+        if st.button(
+            "Deze analyse bewaren bij mijn kennis",
+            key=_unique_key("daily_ai_save"),
+        ):
             from AICoach.saved_insights import save_insight
 
             save_insight(answer, source="Dagelijkse update")

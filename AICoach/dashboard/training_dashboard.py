@@ -5,7 +5,6 @@ import sys
 
 import streamlit as st
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -29,53 +28,49 @@ from AICoach.dashboard.ui_helpers import (
 from AICoach.saved_insights import render_saved_insights, save_insight
 
 
-try:
-    st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
-except Exception:
-    pass
-
-st.markdown(
-    """
-    <style>
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 0.2rem;
-        padding-top: 0.65rem;
-        padding-bottom: 0.15rem;
-        overflow-x: auto;
-        overflow-y: visible;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: auto;
-        min-height: 3rem;
-        padding: 0.72rem 0.85rem;
-        white-space: nowrap;
-    }
-    .stTabs [data-baseweb="tab"] p {
-        line-height: 1.25;
-        margin: 0;
-        overflow: visible;
-    }
-    div[data-testid="stMetric"] {
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 0.65rem;
-        padding: 0.65rem;
-    }
-    @media (max-width: 700px) {
-        .block-container {
-            padding-left: 0.55rem;
-            padding-right: 0.55rem;
-            padding-top: 0.8rem;
+def _inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.2rem;
+            padding-top: 0.65rem;
+            padding-bottom: 0.15rem;
+            overflow-x: auto;
+            overflow-y: visible;
         }
         .stTabs [data-baseweb="tab"] {
-            padding-left: 0.6rem;
-            padding-right: 0.6rem;
-            font-size: 0.88rem;
+            height: auto;
+            min-height: 3rem;
+            padding: 0.72rem 0.85rem;
+            white-space: nowrap;
         }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+        .stTabs [data-baseweb="tab"] p {
+            line-height: 1.25;
+            margin: 0;
+            overflow: visible;
+        }
+        div[data-testid="stMetric"] {
+            border: 1px solid rgba(128, 128, 128, 0.22);
+            border-radius: 0.65rem;
+            padding: 0.65rem;
+        }
+        @media (max-width: 700px) {
+            .block-container {
+                padding-left: 0.55rem;
+                padding-right: 0.55rem;
+                padding-top: 0.8rem;
+            }
+            .stTabs [data-baseweb="tab"] {
+                padding-left: 0.6rem;
+                padding-right: 0.6rem;
+                font-size: 0.88rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -185,49 +180,74 @@ def render_chat():
         st.rerun()
 
 
-st.title("🏃 mAICoach")
+def render_health_app() -> None:
+    """Bouwt de volledige mAICoach-pagina (titel, sync, tabs).
 
-# UI eerst tonen; sync draait gecachet en blokkeert niet.
-ensure_latest_data()
+    Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
+    opgebouwd. Zowel de standalone uitvoering (streamlit run
+    training_dashboard.py) als de gecombineerde app (via
+    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
+    Dat voorkomt dubbele rendering van widgets (zoals de knoppen in
+    daily_update.py) en StreamlitDuplicateElementKey-fouten.
+    """
+    try:
+        st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
+    except Exception:
+        pass
 
-context = build_context()
-st.caption(
-    f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
-    f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
-)
+    _inject_css()
 
-with st.expander("Gegevens verversen"):
-    st.caption("De nieuwste gegevens worden automatisch opgehaald. Forceer hier indien nodig.")
-    if st.button("Nu verversen"):
-        st.cache_resource.clear()
-        st.cache_data.clear()
-        st.session_state.pop("dashboard_selected_date", None)
-        st.rerun()
-    if st.session_state.get("startup_sync_error"):
-        st.warning("Automatische synchronisatie gaf een melding:")
-        st.code(st.session_state["startup_sync_error"])
+    st.title("🏃 mAICoach")
 
-tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
-comparison_active = bool(st.session_state.get("comparison_active"))
-if comparison_active:
-    tab_labels.append("Vergelijking")
+    # UI eerst tonen; sync draait gecachet en blokkeert niet.
+    ensure_latest_data()
 
-tabs = st.tabs(tab_labels)
+    context = build_context()
+    st.caption(
+        f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
+        f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
+    )
 
-with tabs[0]:
-    render_dashboard()
-with tabs[1]:
-    render_chat()
-with tabs[2]:
-    render_recovery()
-with tabs[3]:
-    render_knowledge()
-    st.divider()
-    render_saved_insights()
-with tabs[4]:
-    render_best_results()
-with tabs[5]:
-    render_activities()
-if comparison_active:
-    with tabs[6]:
-        render_comparison_tab()
+    with st.expander("Gegevens verversen"):
+        st.caption("De nieuwste gegevens worden automatisch opgehaald. Forceer hier indien nodig.")
+        if st.button("Nu verversen"):
+            st.cache_resource.clear()
+            st.cache_data.clear()
+            st.session_state.pop("dashboard_selected_date", None)
+            st.rerun()
+        if st.session_state.get("startup_sync_error"):
+            st.warning("Automatische synchronisatie gaf een melding:")
+            st.code(st.session_state["startup_sync_error"])
+
+    tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
+    comparison_active = bool(st.session_state.get("comparison_active"))
+    if comparison_active:
+        tab_labels.append("Vergelijking")
+
+    tabs = st.tabs(tab_labels)
+    with tabs[0]:
+        render_dashboard()
+    with tabs[1]:
+        render_chat()
+    with tabs[2]:
+        render_recovery()
+    with tabs[3]:
+        render_knowledge()
+        st.divider()
+        render_saved_insights()
+    with tabs[4]:
+        render_best_results()
+    with tabs[5]:
+        render_activities()
+    if comparison_active:
+        with tabs[6]:
+            render_comparison_tab()
+
+
+# Bouwt de pagina ALLEEN op wanneer dit bestand rechtstreeks wordt uitgevoerd
+# (bv. `streamlit run AICoach/dashboard/training_dashboard.py`). Bij een
+# `import` vanuit app.py (de gecombineerde app) blijft __name__ gelijk aan de
+# modulenaam, niet "__main__", waardoor dit blok dan correct wordt
+# overgeslagen en render_health_app() niet ongewild al bij import draait.
+if __name__ == "__main__":
+    render_health_app()
