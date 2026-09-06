@@ -68,6 +68,8 @@ def start_background_scrape(player_id: str, label: str, full: bool = False) -> b
         "period_label": "",
         "error": None,
         "result_stats": None,
+        "matches_added": None,
+        "verify_warning": None,
         "started_at": time.time(),
     }
 
@@ -92,6 +94,12 @@ def start_background_scrape(player_id: str, label: str, full: bool = False) -> b
             if job is not None:
                 job["status"] = "done"
                 job["result_stats"] = result.get("stats", {})
+                # PADEL_ANALYSIS_MATCHES_ADDED_DIAGNOSTIC_2026-09-06: expliciet
+                # tonen hoeveel matches deze specifieke run heeft toegevoegd,
+                # zodat direct zichtbaar is of "gevonden" ook echt "opgeslagen"
+                # betekent -- i.p.v. enkel het (mogelijk onveranderde) totaal.
+                job["matches_added"] = result.get("matches_added_this_run")
+                job["verify_warning"] = result.get("verify_warning")
                 job["error"] = result.get("error") or result.get("firebase_error")
         except Exception as e:
             job = jobs.get(pid)
@@ -138,13 +146,19 @@ def render_active_jobs_banner() -> None:
         elif status == "done":
             s = job.get("result_stats") or {}
             err = job.get("error")
+            added = job.get("matches_added")
+            verify_warn = job.get("verify_warning")
             if err:
                 st.warning(f"⚠️ **{label}**: verversen afgerond met een fout — {err}")
             else:
+                added_txt = f" (+{added} nieuw deze run)" if added else " (geen nieuwe matches deze run)"
                 st.success(
                     f"✅ **{label}**: verversen klaar — "
-                    f"{s.get('total_matches','?')} matches, winrate {s.get('winrate','?')}%."
+                    f"{s.get('total_matches','?')} matches totaal{added_txt}, "
+                    f"winrate {s.get('winrate','?')}%."
                 )
+                if verify_warn:
+                    st.error(f"⚠️ Let op: {verify_warn} Bekijk de Debug-tab en probeer opnieuw.")
             if st.button("Sluiten", key=f"dismiss_job_{pid}"):
                 to_clear.append(pid)
         elif status == "error":

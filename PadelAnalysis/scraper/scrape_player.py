@@ -93,6 +93,23 @@ def _calc_stats(matches: list[dict]) -> dict:
         "interclub_matches": sum(1 for m in matches if m.get("match_type") == "interclub"),
     }
 
+def _match_identity(m: dict) -> tuple:
+    """
+    Stabiele 'identiteit' van een match-slot, GEEN score/resultaat inbegrepen
+    (die kunnen legitiem achteraf gecorrigeerd worden door TVL). Twee entries
+    met dezelfde identiteit worden beschouwd als "dezelfde wedstrijd" -- de
+    meest recent gescrapete versie wint dan, zie _merge_matches().
+    """
+    return (
+        m.get("player_id"),
+        m.get("period_label"),
+        m.get("match_type"),
+        m.get("round_text"),
+        m.get("opp1_user_id"),
+        m.get("opp2_user_id"),
+        m.get("tournament_name") or m.get("competition_name"),
+    )
+
 def _dedupe(matches: list[dict]) -> list[dict]:
     """Remove duplicate matches by (player_id, period_label, match_type, round_text, score, opp1_user_id)."""
     seen, out = set(), []
@@ -119,7 +136,6 @@ def _periods_to_scrape(
 ) -> list[dict]:
     """
     Determine which periods need scraping.
-
     Rules:
       - force_full=True  → alles
       - geen existing    → alles
@@ -127,23 +143,12 @@ def _periods_to_scrape(
                            PLUS altijd de huidige/meest-recente periode
                            (all_periods[0]) ongeacht refresh_recent,
                            plus alle periodes die nog niet eerder verwerkt zijn.
-
     PADEL_ANALYSIS_ALWAYS_RECHECK_CURRENT_PERIOD_FIX_2026-09-06:
-    BUG (opgelost): met refresh_recent=0 (gebruikt door de "missing"-modus,
-    zowel voor de cloud-knop op één speler als voor ci_scrape_all.py's
-    standaard "ververs alles"-run) werd voorheen ELKE periode die ooit al
-    één keer gescraped is, voorgoed als "klaar" beschouwd -- ook de HUIDIGE,
-    nog lopende periode. TVL groepeert tornooiresultaten in brede periodes
-    van ~22 weken (bv. "week 27 tot en met week 48"); als je vandaag in
-    week 36 zit, is die periode nog volop actief en kunnen er nog steeds
-    NIEUWE (laat gepubliceerde) tornooiresultaten aan toegevoegd worden.
-    Met refresh_recent=0 werd dat nooit meer opgemerkt zodra de periode één
-    keer in periods_scraped stond. We forceren daarom nu ALTIJD een
-    her-check van all_periods[0] (verondersteld de huidige/actieve periode,
-    zie ook scrape_player() se "eerste periode = standaardpagina"-aanname),
-    ongeacht refresh_recent of already_done. Enkel periodes die niet meer de
-    huidige zijn en al eerder gescraped werden, blijven overgeslagen (die
-    liggen typisch al maanden achter ons en veranderen niet meer).
+    BUG (opgelost): met refresh_recent=0 werd voorheen ELKE periode die ooit
+    al gescraped is, voorgoed als "klaar" beschouwd -- ook de HUIDIGE, nog
+    lopende periode. We forceren daarom nu ALTIJD een her-check van
+    all_periods[0] (de huidige/actieve periode), ongeacht refresh_recent of
+    already_done.
     """
     if force_full or existing_doc is None:
         return all_periods
@@ -158,17 +163,44 @@ def _periods_to_scrape(
             result.append(p)
     return result
 
-def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict], refreshed_periods: list[str]) -> list[dict]:
+def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict]) -> tuple[list[dict], int, int]:
     """
-    Merge new matches into existing ones.
-    Periods that were re-scraped replace their old matches; other periods are kept.
+    PADEL_ANALYSIS_UNION_MERGE_FIX_2026-09-06:
+    BUG (opgelost): de vorige aanpak verving bij het herscrapen van een
+    periode ALLE oude matches van die periode volledig door wat de verse
+    parse teruggaf ("kept_old = matches NIET in de herscrapete periodes" +
+    "new_matches"). Dit ging FOUT ervan uit dat een verse parse van een
+    periode altijd de VOLLEDIGE set matches van die periode teruggeeft.
+    Als TVL om welke reden dan ook een KLEINERE/andere subset toont bij een
+    volgende scrape (bv. een paginering- of standaardweergavelimiet op de
+    resultatenpagina van een periode), gingen eerder gekende matches van
+    die periode STILZWIJGEND VERLOREN, ook al meldde de log correct dat er
+    "X nieuwe matches gevonden" waren binnen diezelfde periode -- het
+    NETTO-resultaat kon daardoor gelijk blijven of zelfs dalen.
+    Nieuwe aanpak: UNION in plaats van vervanging. Bestaande matches worden
+    NOOIT zomaar weggegooid. Elke match krijgt een stabiele identiteit
+    (_match_identity, ZONDER score/resultaat) zodat écht dezelfde wedstrijd
+    (bv. bij een latere scorecorrectie door TVL) wel degelijk geüpdatet
+    wordt met de nieuwste versie, maar een oudere match die toevallig niet
+    meer voorkomt in de nieuwste parse van diezelfde periode blijft gewoon
+    bewaard. Dit garandeert dat total_matches bij een normale (niet-force
+    volledige) refresh NOOIT kan dalen -- in het slechtste geval blijft het
+    gelijk, normaal gezien stijgt het met precies het aantal echt nieuwe
+    matches.
+    Returns: (merged_matches, previous_total, new_total) -- de twee tellingen
+    worden meegegeven zodat de aanroeper duidelijk kan loggen/tonen wat er
+    veranderd is.
     """
     existing_matches = []
     if existing_doc:
         existing_matches = existing_doc.get("matches", []) or []
-    replaced = set(refreshed_periods)
-    kept_old = [m for m in existing_matches if m.get("period_label") not in replaced]
-    return _dedupe(kept_old + new_matches)
+    by_identity: dict = {}
+    for m in existing_matches:
+        by_identity[_match_identity(m)] = m
+    for m in new_matches:
+        by_identity[_match_identity(m)] = m  # verse data wint voor exact dezelfde wedstrijd-slot
+    merged = _dedupe(list(by_identity.values()))
+    return merged, len(existing_matches), len(merged)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -184,12 +216,7 @@ def scrape_player_current(player_id: str) -> dict:
 
 # PADEL_ANALYSIS_CLICK_PADEL_TAB_FIX
 def _activate_padel_results_tab(page, debug: bool = False) -> bool:
-    """Ensure the TVL results page is on the Padel tab, not Tennis enkel.
-    TVL opens the results dashboard on tennis results by default for some players.
-    If we scrape immediately, recent padel tournament results can be missed.
-    This helper clicks the Padel tab/link/button when it is present and waits briefly
-    for the JS content to update.
-    """
+    """Ensure the TVL results page is on the Padel tab, not Tennis enkel."""
     candidates = [
         lambda: page.get_by_role("tab", name=re.compile(r"^\s*padel\s*$", re.I)).first,
         lambda: page.get_by_role("link", name=re.compile(r"^\s*padel\s*$", re.I)).first,
@@ -239,45 +266,8 @@ def scrape_player(
 ) -> dict:
     """
     Full scrape of a player across all (or selected) periods.
-    Uses Playwright for period navigation, BeautifulSoup for parsing.
-    Optionally saves to Firebase (Firestore).
-
-    Args:
-        player_id:            userId from tennisenpadelvlaanderen.be
-        max_new_periods:      Max number of NEW periods to scrape this run (None = all)
-        force_full_refresh:   If True, re-scrape all periods regardless of history
-        refresh_recent:       Always re-scrape this many most-recent periods
-                               (de HUIDIGE periode wordt sowieso altijd herchecked,
-                               zie _periods_to_scrape — ongeacht deze waarde)
-        save_to_firebase:     Write result to Firestore
-        headless:             Run Playwright headless
-        delay_between_periods: Seconds between period fetches
-        progress_callback:    optional fn(i, total, label, status) voor live UI-feedback
-                               status: "starting" | "discovering" | "fetching" | "parsing" | "ok" | "empty" | "error" | "done"
-        strict_missing_only:  Als True: negeer de "altijd laatste N periodes
-                               herchecken"-klep (buiten de huidige periode, die
-                               altijd herchecked wordt) en scrape verder ENKEL
-                               periodes die nog nooit gescraped zijn. Spelers
-                               die al volledig up-to-date zijn (incl. de
-                               huidige periode) worden dan supersnel
-                               overgeslagen (geen Playwright-launch nodig).
-
-    Returns:
-        Full result dict (same structure as what gets saved to Firebase)
+    Zie module-docstring voor het volledige datamodel.
     """
-    # PADEL_ANALYSIS_REFRESH_LAST_12_MONTHS
-    # Incremental refresh should not re-scrape all historical periods.
-    # TVL period blocks are roughly half-year ranges, so refreshing the 2 most
-    # recent periods covers about the last 12 months while still catching late
-    # tournament results added inside an already scraped period.
-    #
-    # PADEL_ANALYSIS_STRICT_MISSING_ONLY
-    # Voor geautomatiseerde/CI-runs (zie ci_scrape_all.py) is deze "altijd de
-    # laatste 2 periodes herchecken"-veiligheidsklep vaak ongewenst: als een
-    # speler al volledig up-to-date is, kost het toch telkens een volledige
-    # Playwright-launch + navigatie. strict_missing_only=True schakelt deze
-    # klep uit voor periodes buiten de huidige; de HUIDIGE periode wordt
-    # sinds de 2026-09-06 fix altijd herchecked, zie _periods_to_scrape().
     if not force_full_refresh:
         if strict_missing_only:
             refresh_recent = int(refresh_recent or 0)
@@ -333,15 +323,32 @@ def scrape_player(
             "periods_failed": [],
             "matches": existing_matches,
             "stats": _calc_stats(existing_matches),
+            "matches_added_this_run": 0,
         }
     # --- Step 4: Fetch HTML per period via Playwright ---
-    period_pages = fetch_all_periods_html(
-        player_id,
-        max_periods=len(to_scrape),
-        headless=headless,
-        delay_between_periods=delay_between_periods,
-        progress_callback=_progress,
-    )
+    try:
+        period_pages = fetch_all_periods_html(
+            player_id,
+            max_periods=len(to_scrape),
+            headless=headless,
+            delay_between_periods=delay_between_periods,
+            progress_callback=_progress,
+        )
+    except Exception as e:
+        # PADEL_ANALYSIS_FETCH_EXCEPTION_SAFETY_2026-09-06: deze stap had
+        # voorheen GEEN try/except -- een browsercrash/timeout hier liet de
+        # volledige scrape_player()-aanroep ongevangen crashen, wat via de
+        # achtergrond-thread wel als "mislukt" getoond wordt, maar hier
+        # expliciet afvangen geeft een duidelijkere foutmelding en voorkomt
+        # verrassingen bij toekomstig hergebruik van deze functie.
+        logger.error(f"[{player_id}] Fout bij ophalen periode-HTML (Playwright): {e}")
+        return {
+            "player_id": player_id,
+            "scraped_at": scrape_start,
+            "error": f"Fout bij ophalen periode-HTML: {e}",
+            "matches": existing_doc.get("matches", []) if existing_doc else [],
+            "stats": _calc_stats(existing_doc.get("matches", []) if existing_doc else []),
+        }
     # Align fetched pages to the periods we wanted
     # fetch_all_periods_html always returns from the first available period,
     # so we re-align by label
@@ -375,8 +382,17 @@ def scrape_player(
         except Exception as e:
             logger.error(f"[{player_id}]   Parse fout voor {label}: {e}")
             failed_periods.append({"label": label, "error": str(e)})
-    # --- Step 6: Merge with existing data ---
-    all_matches = _merge_matches(existing_doc, new_matches, scraped_labels)
+    # --- Step 6: Merge with existing data (UNION, zie _merge_matches) ---
+    all_matches, prev_total, new_total = _merge_matches(existing_doc, new_matches)
+    delta = new_total - prev_total
+    if delta > 0:
+        logger.info(f"[{player_id}] Merge: {prev_total} -> {new_total} matches (+{delta} nieuw)")
+    elif delta == 0:
+        logger.info(f"[{player_id}] Merge: {prev_total} -> {new_total} matches (geen netto wijziging)")
+    else:
+        # Zou met de union-merge normaal niet meer mogen voorkomen; loggen
+        # als het toch gebeurt (bv. echte dubbels die nu pas herkend worden).
+        logger.warning(f"[{player_id}] Merge: {prev_total} -> {new_total} matches ({delta})")
     # Merge period metadata with existing
     prev_scraped = set(existing_doc.get("periods_scraped", []) if existing_doc else [])
     prev_empty = set(existing_doc.get("periods_empty", []) if existing_doc else [])
@@ -402,12 +418,32 @@ def scrape_player(
         },
         "matches": all_matches,
         "stats": _calc_stats(all_matches),
+        "matches_added_this_run": max(0, delta),
+        "matches_before_this_run": prev_total,
     }
     # --- Step 8: Save to Firebase ---
     if save_to_firebase:
         try:
             _fb.save_player_v2(player_id, result)
             logger.info(f"[{player_id}] Opgeslagen in Firebase: {len(all_matches)} matches")
+            # PADEL_ANALYSIS_VERIFY_WRITE_2026-09-06: onmiddellijke read-back
+            # ter controle dat de schrijfactie ECHT is doorgekomen met het
+            # verwachte aantal matches -- vangt stille schrijf-/leesfouten
+            # op die anders pas veel later (of nooit) zouden opvallen.
+            try:
+                verify_doc = _fb.get_player(player_id)
+                verify_count = len((verify_doc or {}).get("matches", []))
+                if verify_count != len(all_matches):
+                    warn_msg = (
+                        f"Verificatie na opslaan toont {verify_count} matches, "
+                        f"verwacht {len(all_matches)}."
+                    )
+                    logger.error(f"[{player_id}] {warn_msg}")
+                    result["verify_warning"] = warn_msg
+                else:
+                    logger.info(f"[{player_id}] Verificatie OK: {verify_count} matches bevestigd in Firestore.")
+            except Exception as e:
+                logger.warning(f"[{player_id}] Verificatie-read mislukt (niet kritiek): {e}")
         except Exception as e:
             logger.error(f"[{player_id}] Firebase write fout: {e}")
             result["firebase_error"] = str(e)
@@ -471,12 +507,12 @@ if __name__ == "__main__":
         print(f"  Periodes: {len(result.get('periods_scraped',[]))} gescraped, "
               f"{len(result.get('periods_empty',[]))} leeg, "
               f"{len(result.get('periods_failed',[]))} mislukt")
+        print(f"  Nieuw deze run: +{result.get('matches_added_this_run', 0)} matches")
     if args.out:
         out_path = Path(args.out)
         out_path.write_text(json.dumps(all_results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\nOutput: {out_path}")
     elif len(args.player_ids) == 1:
-        # Single player: toon eerste 2 matches
         pid = args.player_ids[0]
         matches = all_results[pid].get("matches", [])[:2]
         if matches:

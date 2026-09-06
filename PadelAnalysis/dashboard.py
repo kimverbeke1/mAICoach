@@ -489,6 +489,19 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         most_recent = sorted(own_interclub_matches, key=lambda m: m.get("match_date") or "", reverse=True)[0]
         auto_reeks_url = most_recent["reeks_url"]
     reeks_url = st.session_state.get(override_url_key) or auto_reeks_url
+    # PADEL_ANALYSIS_SCHEDULE_TRANSPARENCY_2026-09-06: toont expliciet welke
+    # (laatst gekende eigen) interclubmatch bepaalt welk schema/seizoen we
+    # tonen. Als je huidige/lopende seizoen hier NIET tussen staat, weet je
+    # meteen dat een verversing van je profiel dat seizoen nog niet heeft
+    # opgepikt (i.p.v. te moeten gokken waarom "geen volgende match" getoond
+    # wordt) -- ga dan na via de Debug-tab van je profiel of de laatste
+    # refresh effectief nieuwe matches toevoegde.
+    if own_interclub_matches and not st.session_state.get(override_url_key):
+        st.caption(
+            f"📌 Schema gebaseerd op je laatst gekende interclubmatch: "
+            f"{most_recent.get('match_date','?')} ({len(own_interclub_matches)} interclub-matches gekend totaal). "
+            f"Klopt dit niet meer (nieuw seizoen gestart)? Ververs dan eerst je profiel."
+        )
     if not reeks_url:
         st.info(
             f"Nog geen wedstrijdschema gekend voor {sel_label} (nog geen interclubmatch gescraped "
@@ -1128,6 +1141,15 @@ def _render_player_dashboard(player_id: str, profile: dict):
         st.write(f"**Periodes gescraped:** {player_doc.get('periods_scraped',[])}")
         st.write(f"**Periodes leeg:** {player_doc.get('periods_empty',[])}")
         st.write(f"**Periodes mislukt:** {player_doc.get('periods_failed',[])}")
+        # PADEL_ANALYSIS_MERGE_DIAGNOSTIC_2026-09-06: toont direct of de
+        # laatste refresh ook effectief nieuwe matches heeft TOEGEVOEGD (niet
+        # enkel "gevonden") en of de schrijf-verificatie geslaagd is.
+        if "matches_added_this_run" in player_doc:
+            st.write(f"**Nieuw toegevoegd (laatste run):** +{player_doc.get('matches_added_this_run', 0)}")
+        if "matches_before_this_run" in player_doc:
+            st.write(f"**Totaal vóór laatste run:** {player_doc.get('matches_before_this_run', '?')}")
+        if player_doc.get("verify_warning"):
+            st.error(f"⚠️ {player_doc.get('verify_warning')}")
 
 # ═══════════════════════════════════════════════
 # PAGE: Mijn profiel
