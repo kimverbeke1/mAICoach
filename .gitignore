@@ -3,6 +3,14 @@
 .env.*
 .streamlit/secrets.toml
 
+# Service-account / credentials (NOOIT committen!)
+firebase-key.json
+*-key.json
+*service-account*.json
+*serviceaccount*.json
+gcp*.json
+credentials.json
+
 # Persoonlijke / gegenereerde data (nooit publiek committen)
 data/
 !data/knowledge/
