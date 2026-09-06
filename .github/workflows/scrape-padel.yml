@@ -1,0 +1,55 @@
+# .github/workflows/scrape-padel.yml
+#
+# Automatische PadelAnalysis-scrape via GitHub Actions.
+# Draait Playwright (met browser-binaries, iets wat Streamlit Community
+# Cloud NIET ondersteunt) om alle gekende spelers te verversen en de
+# resultaten rechtstreeks naar Firestore te schrijven. De gedeployde
+# Streamlit-app (mAICoach + PadelAnalysis) leest enkel uit Firestore en
+# hoeft dus zelf niets te scrapen.
+#
+# Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#   Naam:   FIREBASE_SERVICE_ACCOUNT_JSON
+#   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand
+#           (gewoon de hele JSON-tekst plakken, inclusief { } en newlines
+#           in private_key — niets extra escapen).
+
+name: Scrape Padel Data
+
+on:
+  schedule:
+    # 05:00 UTC = 07:00 zomertijd / 06:00 wintertijd in Belgi\u00eb
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}   # laat je ook manueel starten via de Actions-tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ../../requirements.txt
+
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run padel scraper (alle gekende spelers)
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: python ci_scrape_all.py
