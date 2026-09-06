@@ -16,21 +16,13 @@ Toont:
     het bekijken bent (reeks_url-match) — dus specifiek relevant voor de
     komende ontmoeting, niet zomaar "recente" matches.
 
-LET OP (belangrijk onderscheid, zie ook PROJECT_MAP.md):
-Dit bestand is NIET hetzelfde als opponent_scout.py.
+LET OP: dit bestand is NIET hetzelfde als opponent_scout.py.
   - opponent_scout.py    -> vindt de vorige opstelling van een tegenstander
-                            (welke spelers stonden er, via het uitslagenblad)
                             + scrapet ontbrekende tegenstander-spelers.
-                            Gebruikt in dashboard.py via `import opponent_scout as osc`.
+                            Gebruikt via `import opponent_scout as osc`.
   - opponent_dossier.py  -> dit bestand. Toont het volledige dossier van
-                            ÉÉN specifieke tegenstander-speler (stats,
-                            all-time high ranking, matchen deze periode).
-                            Gebruikt in dashboard.py via `import opponent_dossier as od`.
-Beide bestanden horen naast elkaar te bestaan met hun eigen, verschillende
-inhoud -- als een van beide per ongeluk de inhoud van de andere bevat,
-zal dashboard.py falen op een ontbrekende functienaam
-(bv. AttributeError: module 'opponent_dossier' has no attribute
-'render_opponent_dossier_button').
+                            ÉÉN specifieke tegenstander-speler.
+                            Gebruikt via `import opponent_dossier as od`.
 """
 from __future__ import annotations
 
@@ -41,6 +33,36 @@ import pandas as pd
 import streamlit as st
 
 import firebase_service as fb
+
+# PADEL_ANALYSIS_DATE_PARSE_FIX (deze beurt)
+# Zelfde robuuste datum-parser als in dashboard.py/lineup_quick.py. Nodig
+# omdat "Interclubmatchen deze periode" hieronder voorheen op de RUWE
+# match_date-STRING sorteerde (reverse=True), wat een oudere match als
+# "meest recent" kon tonen zodra het datumformaat niet toevallig ISO was
+# (bv. "01/12/2026" > "15/01/2026" als tekst-vergelijking).
+_DUTCH_MONTHS = {
+    "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
+    "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
+}
+
+
+def _parse_match_date(text) -> Optional[tuple]:
+    if not text:
+        return None
+    text = str(text).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return (y, mo, d)
+    m = re.search(r"(\d{1,2})\s+([a-zA-Zàéè]+)\s+(\d{4})", text.lower())
+    if m:
+        mo = _DUTCH_MONTHS.get(m.group(2))
+        if mo:
+            return (int(m.group(3)), mo, int(m.group(1)))
+    return None
 
 
 def _parse_rank(value) -> Optional[int]:
@@ -72,9 +94,9 @@ def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
 
 
 def _best_rank_opportunistic(player_id: str, all_docs: dict) -> Optional[int]:
-    """Doorzoekt ALLE bekende matchlijsten (van al onze gescrapete spelers)
-    naar een moment waarop deze speler als tegenstander optrad, en neemt het
-    beste (laagste) daar geregistreerde klassementscijfer."""
+    """Doorzoekt ALLE bekende matchlijsten naar een moment waarop deze speler
+    als tegenstander optrad, en neemt het beste (laagste) daar geregistreerde
+    klassementscijfer."""
     best = None
     for doc in all_docs.values():
         for m in (doc or {}).get("matches", []) or []:
@@ -135,9 +157,6 @@ def render_opponent_dossier(
             if m.get("match_type") == "interclub" and m.get("reeks_url") == current_reeks_url
         ]
     if not period_matches:
-        # Fallback: toon de meest recente interclub-periode van deze speler,
-        # met duidelijke vermelding dat dit niet noodzakelijk exact dezelfde
-        # periode is als de huidige ontmoeting.
         all_interclub = [m for m in matches if m.get("match_type") == "interclub"]
         if all_interclub:
             latest_label = sorted(
@@ -155,7 +174,10 @@ def render_opponent_dossier(
         st.info("Geen interclubmatches gekend voor deze speler.")
     else:
         rows = []
-        for m in sorted(period_matches, key=lambda x: x.get("match_date") or "", reverse=True):
+        # PADEL_ANALYSIS_DATE_SORT_FIX (deze beurt): echte datum-parse i.p.v.
+        # platte string-sort, zodat de nieuwste match hier ook effectief
+        # bovenaan staat.
+        for m in sorted(period_matches, key=lambda x: _parse_match_date(x.get("match_date")) or (0, 0, 0), reverse=True):
             rows.append({
                 "Datum": m.get("match_date") or "",
                 "Partner": m.get("partner_name") or "",
@@ -173,8 +195,7 @@ def render_opponent_dossier_button(
     current_reeks_url: Optional[str] = None,
     key_prefix: str = "opp_dossier",
 ) -> None:
-    """Klein knopje dat het dossier toont/verbergt (toggle), voor gebruik naast
-    elke naam in een lijst van tegenstander-spelers."""
+    """Klein knopje dat het dossier toont/verbergt (toggle)."""
     state_key = f"{key_prefix}_open_{player_id}"
     if st.button("🗂️ Dossier", key=f"{key_prefix}_btn_{player_id}"):
         st.session_state[state_key] = not st.session_state.get(state_key, False)

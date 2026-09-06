@@ -1,10 +1,14 @@
+# firebase_service.py
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+logger = logging.getLogger(__name__)
 
 SERVICE_ACCOUNT_FILE = "firebase-key.json"
 PLAYERS_COLLECTION = "players"
@@ -97,17 +101,7 @@ def _load_streamlit_secrets_credentials() -> Optional[credentials.Certificate]:
 def _load_env_credentials() -> Optional[credentials.Certificate]:
     """
     Laadt Firebase-credentials uit een environment variable — bedoeld voor
-    CI/CD-omgevingen zoals GitHub Actions, waar geen Streamlit-context en
-    geen lokaal firebase-key.json bestand beschikbaar is.
-
-    Verwacht de VOLLEDIGE inhoud van het service-account JSON-bestand
-    (de hele firebase-key.json), als tekst, in één van deze environment
-    variables (eerste match wint):
-      - FIREBASE_SERVICE_ACCOUNT_JSON
-      - FIREBASE_CREDENTIALS_JSON
-
-    In GitHub Actions zet je dit klaar als repo secret en geef je het door
-    via `env:` in de workflow (zie .github/workflows/scrape-padel.yml).
+    CI/CD-omgevingen zoals GitHub Actions.
     """
     raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON") or os.environ.get("FIREBASE_CREDENTIALS_JSON")
     if not raw:
@@ -115,8 +109,6 @@ def _load_env_credentials() -> Optional[credentials.Certificate]:
     try:
         info = json.loads(raw)
         if "private_key" in info:
-            # Defensief: normaliseer voor het geval de key als losse
-            # "\n"-tekens binnenkwam i.p.v. echte newlines.
             info["private_key"] = str(info["private_key"]).replace("\\n", "\n")
         return credentials.Certificate(info)
     except Exception:
@@ -247,11 +239,57 @@ def get_player_search_cache(name_query: str, club: Optional[str] = None, sport: 
 
 
 def save_player_v2(player_id: str, player_data: dict):
-    """Save v2 schema player data directly, skipping legacy build_minimal_defaults."""
+    """
+    Save v2 schema player data directly, skipping legacy build_minimal_defaults.
+
+    PADEL_ANALYSIS_WRITE_GUARD_FIX (deze beurt):
+    BUG (opgelost): deze functie schreef altijd met merge=False (volledige
+    documentvervanging). Als een scrape-run om welke reden dan ook een
+    RESULTAAT MET MINDER (of 0) matches opleverde dan al in Firestore stond
+    -- bv. een netwerkhik, een Playwright-timeout die stil een lege
+    periodelijst teruggaf, of een gedeeltelijke parse-fout die geen
+    exception opgooide -- dan werd de GOEDE, bestaande data van die speler
+    VOLLEDIG OVERSCHREVEN en dus verloren, zonder enige waarschuwing. Dit is
+    de meest waarschijnlijke verklaring voor "ik had deze speler al
+    gescraped, maar nu toont de app hem plots als niet-gescraped".
+
+    Fix: vóór het schrijven wordt de bestaande data opgehaald. Als de NIEUWE
+    data significant MINDER matches bevat dan wat al gekend was, weigert
+    deze functie de bestaande matches/stats te laten verdwijnen -- de oude
+    matches/stats worden behouden, en er wordt een duidelijke markering
+    ("_write_guard_triggered") in het document gezet zodat dit zichtbaar is
+    in de Debug-tab van de app, in plaats van stil dataverlies te laten
+    gebeuren. Een bewuste, expliciete "force_full_refresh" met een kleinere
+    (correcte) matchset kan dit niet gebruiken om per ongeluk in de val te
+    lopen: force_full_refresh-resultaten van scrape_player.py bevatten altijd
+    de HERSCRAPTE volledige set, dus in de normale, gezonde situatie is dit
+    nooit kleiner dan de vorige (foutieve/onvolledige) data.
+    """
     prepared = sanitize_for_firestore(dict(player_data))
     prepared["player_id"] = str(player_id)
     if "last_updated" not in prepared:
         prepared["last_updated"] = utc_now_iso()
+
+    new_matches = prepared.get("matches") or []
+    try:
+        existing = get_player(player_id, converted=False)
+    except Exception as e:
+        logger.warning(f"[{player_id}] Kon bestaand document niet ophalen voor write-guard check: {e}")
+        existing = None
+    existing_matches = (existing or {}).get("matches") or []
+
+    if existing_matches and len(new_matches) < len(existing_matches):
+        warn_msg = (
+            f"Nieuwe scrape had {len(new_matches)} matches, minder dan de "
+            f"{len(existing_matches)} al gekende matches. Oude matches/stats "
+            f"behouden i.p.v. overschreven, om dataverlies te vermijden."
+        )
+        logger.error(f"[{player_id}] WRITE GUARD: {warn_msg}")
+        prepared["matches"] = existing_matches
+        prepared["stats"] = existing.get("stats", prepared.get("stats", {}))
+        prepared["_write_guard_triggered"] = True
+        prepared["_write_guard_note"] = warn_msg
+
     db.collection(PLAYERS_COLLECTION).document(str(player_id)).set(prepared, merge=False)
     return prepared
 

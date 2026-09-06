@@ -93,6 +93,15 @@ _MONTH_RANK = {
 # datum) en geeft een echt sorteerbare (jaar, maand, dag)-tuple terug.
 # Niet-herkende datums geven None terug (belanden dan onderaan i.p.v. de
 # sortering te breken).
+#
+# LET OP (fix van deze beurt): deze parser was al toegepast in Match Explorer
+# en Klassementshistoriek, maar NIET in _render_volgende_match() (bepaalt
+# welke eigen interclubmatch de "meest recente" is, en dus welk schema/
+# seizoen getoond wordt) en niet in opponent_dossier.py. Een platte
+# string-sort daar kon een OUDERE match als "meest recent" aanzien (bv.
+# "01/12/2025" > "15/01/2026" als tekst), waardoor het verkeerde/oude
+# seizoen-schema gebruikt werd en "Volgende match" dus leeg leek, ook al
+# stond de nieuwste match wel degelijk in Firestore.
 _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
@@ -250,88 +259,147 @@ def _render_metrics(total, wins, losses, t_matches, ic_matches):
     cols[4].metric("Tornooi / Interclub", f"{t_matches} / {ic_matches}")
 
 
-def _summarize_partner(df: pd.DataFrame) -> pd.DataFrame:
+# PADEL_ANALYSIS_PARTNER_OPPONENT_CANONICAL_GROUPING_FIX (deze beurt)
+# BUG (opgelost): deze twee functies groepeerden voorheen strikt op de RUWE
+# NAAMSTRING (df["partner"]/df["opp1"]/df["opp2"]). Als dezelfde persoon in
+# verschillende matches met een licht andere schrijfwijze/spatiëring
+# voorkwam, of als er ergens een partner_user_id ontbrak terwijl die bij een
+# andere match van dezelfde persoon wel aanwezig was, ontstonden er
+# meerdere aparte rijen voor DEZELFDE speler -- elk met een onvolledige
+# (soms toevallig 0% of 100%) winst/verlies-telling. Dit is exact hetzelfde
+# bugpatroon dat al gefixed was in lineup_quick.py's partneranalyse, maar
+# hier in dashboard.py's "Partners"/"Tegenstanders"-tabs (bij een individueel
+# spelersprofiel) stond de oude, kwetsbare naam-gebaseerde groepering nog.
+# Fix: eerst een canoniek player_id resolven via de globale profiel-lookup
+# (dezelfde naam-matching/varianten als de rest van de app), en pas DAARNA
+# groeperen. Levert meteen ook een correcte, resolved ID-kolom op die
+# _render_table() nu rechtstreeks kan gebruiken (geen giswerk meer nodig
+# over welke kolomnaam de ID bevat).
+def _summarize_partner(df: pd.DataFrame, profiles_lookup: Optional[dict] = None) -> pd.DataFrame:
     if df.empty or "partner" not in df.columns:
         return pd.DataFrame()
+    profiles_lookup = profiles_lookup or {}
     sub = df[df["partner"].str.strip().ne("")].copy()
     if sub.empty:
         return pd.DataFrame()
-    g = sub.groupby("partner").agg(
+
+    def _resolve(row):
+        raw_id = row.get("partner_id", "") if "partner_id" in sub.columns else ""
+        canonical = pia.resolve_player_id(row["partner"], profiles_lookup, raw_id) if profiles_lookup else raw_id
+        return canonical or f"__name__:{pia._norm(row['partner'])}"
+
+    sub["_group_key"] = sub.apply(_resolve, axis=1)
+    # Canonieke ID per groep (eerste niet-lege waarde die geen __name__ fallback is)
+    id_by_group = {}
+    for _, r in sub.iterrows():
+        gk = r["_group_key"]
+        if gk not in id_by_group or not id_by_group[gk]:
+            id_by_group[gk] = "" if gk.startswith("__name__:") else gk
+    # Representatieve (langste) naam per groep
+    name_by_group = {}
+    for _, r in sub.iterrows():
+        gk = r["_group_key"]
+        if gk not in name_by_group or len(r["partner"]) > len(name_by_group[gk]):
+            name_by_group[gk] = r["partner"]
+
+    g = sub.groupby("_group_key").agg(
         matches=("won", "count"),
         wins=("won", lambda x: x.eq(True).sum()),
         losses=("won", lambda x: x.eq(False).sum()),
     ).reset_index()
+    g["partner"] = g["_group_key"].map(name_by_group)
+    g["partner ID"] = g["_group_key"].map(id_by_group)
     g["winrate"] = g.apply(lambda r: _winrate_str(r.wins, r.losses), axis=1)
     known = g["wins"] + g["losses"]
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
-    result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
-    return result
+    result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num", "_group_key"])
+    return result[["partner", "partner ID", "matches", "wins", "losses", "winrate"]]
 
 
-def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
+def _summarize_opponents(df: pd.DataFrame, profiles_lookup: Optional[dict] = None) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
+    profiles_lookup = profiles_lookup or {}
     rows = []
     for _, r in df.iterrows():
-        for col in ["opp1", "opp2"]:
-            name = str(r.get(col, "")).strip()
-            if name:
-                rows.append({"tegenstander": name, "won": r.get("won")})
+        for name_col, id_col in [("opp1", "opp1_id"), ("opp2", "opp2_id")]:
+            name = str(r.get(name_col, "")).strip()
+            if not name:
+                continue
+            raw_id = r.get(id_col, "") or ""
+            canonical = pia.resolve_player_id(name, profiles_lookup, raw_id) if profiles_lookup else raw_id
+            group_key = canonical or f"__name__:{pia._norm(name)}"
+            rows.append({"tegenstander": name, "_group_key": group_key, "tegenstander_id": canonical or "", "won": r.get("won")})
     if not rows:
         return pd.DataFrame()
     tmp = pd.DataFrame(rows)
-    g = tmp.groupby("tegenstander").agg(
+    id_by_group = {}
+    name_by_group = {}
+    for _, r in tmp.iterrows():
+        gk = r["_group_key"]
+        if gk not in id_by_group or not id_by_group[gk]:
+            id_by_group[gk] = r["tegenstander_id"]
+        if gk not in name_by_group or len(r["tegenstander"]) > len(name_by_group[gk]):
+            name_by_group[gk] = r["tegenstander"]
+    g = tmp.groupby("_group_key").agg(
         matches=("won", "count"),
         wins=("won", lambda x: x.eq(True).sum()),
         losses=("won", lambda x: x.eq(False).sum()),
     ).reset_index()
+    g["tegenstander"] = g["_group_key"].map(name_by_group)
+    g["tegenstander ID"] = g["_group_key"].map(id_by_group)
     g["winrate"] = g.apply(lambda r: _winrate_str(r.wins, r.losses), axis=1)
     known = g["wins"] + g["losses"]
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
-    result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
-    return result
+    result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num", "_group_key"])
+    return result[["tegenstander", "tegenstander ID", "matches", "wins", "losses", "winrate"]]
 
 
-def _render_table(df: pd.DataFrame, name_col: str, height=400):
-    # PADEL_ANALYSIS_RENDER_TABLE_INLINE_ACTIONS
+# PADEL_ANALYSIS_FLOATING_HEADER_FIX (deze beurt)
+# BUG (opgelost): _render_table gebruikte pia.render_dataframe_with_player_actions,
+# die voor de HEADER en voor ELKE DATA-RIJ een aparte, ONAFHANKELIJKE
+# st.columns(weights)-layout opbouwt. Streamlit lijnt die layouts NIET
+# gegarandeerd pixel-perfect met elkaar uit -- vooral popover-triggerknoppen
+# (variabele breedte/hoogte per naam) laten de kolommen per rij lichtjes
+# verschuiven t.o.v. de headerrij, wat zich uit als "titels zweven boven de
+# andere rijen". Fix: een gewone, native st.dataframe (Streamlit's eigen
+# tabel-component, die dit probleem niet heeft) met rij-selectie, en de
+# interactieve speleracties (scrape-status/knop) enkel tonen voor de
+# GESELECTEERDE rij, in een apart detailblok eronder -- consistent met het
+# patroon dat al gebruikt wordt in Match Explorer en lineup_quick.py.
+def _render_table(df: pd.DataFrame, name_col: str, height: int = 400, key_prefix: Optional[str] = None):
     if df.empty:
         st.info("Geen data beschikbaar.")
         return
-    # The partner/opponent analysis tables use this shared renderer. Make the name
-    # column interactive here so every partner/opponent table gets scrape/refresh.
-    try:
-        display_df = df.copy()
-        id_candidates = [
-            f"{name_col} ID", "Player ID", "player_id", "user_id", "partner_id",
-            "partner_user_id", "opp1_id", "opp1_user_id", "opp2_id", "opp2_user_id",
-        ]
-        for id_col in id_candidates:
-            if id_col in display_df.columns and f"{name_col} ID" not in display_df.columns:
-                display_df[f"{name_col} ID"] = display_df[id_col]
-                break
-        pia.render_dataframe_with_player_actions(
-            display_df,
-            player_columns=[name_col],
-            profiles=_get_all_profiles(),
-            key_prefix=f"render_table_actions_{name_col}",
-            height_limit=80,
-        )
-        return
-    except Exception as e:
-        st.warning(f"Interactieve speleracties niet beschikbaar: {type(e).__name__}: {e}")
-    # Fallback to original dataframe behavior.
-    st.dataframe(
-        df,
+    key_prefix = key_prefix or f"render_table_{name_col}"
+    id_col = f"{name_col} ID"
+    visible_cols = [c for c in df.columns if c != id_col]
+    display_df = df[visible_cols].rename(columns={
+        name_col: name_col.capitalize(),
+        "matches": "M", "wins": "W", "losses": "L", "winrate": "Winrate",
+    })
+    event = st.dataframe(
+        display_df,
         use_container_width=True,
-        height=min(height, 40 + len(df) * 36),
+        height=min(height, 40 + len(display_df) * 36),
         hide_index=True,
         column_config={
-            name_col: st.column_config.TextColumn(name_col, width="large"),
-            "matches": st.column_config.NumberColumn("M", width="small"),
-            "wins":    st.column_config.NumberColumn("W", width="small"),
-            "losses":  st.column_config.NumberColumn("L", width="small"),
-            "winrate": st.column_config.TextColumn("WR", width="small"),
+            name_col.capitalize(): st.column_config.TextColumn(name_col.capitalize(), width="large"),
+            "M": st.column_config.NumberColumn("M", width="small"),
+            "W": st.column_config.NumberColumn("W", width="small"),
+            "L": st.column_config.NumberColumn("L", width="small"),
+            "Winrate": st.column_config.TextColumn("Winrate", width="small"),
         },
+        on_select="rerun", selection_mode="single-row", key=f"{key_prefix}_table",
+    )
+    sel_rows = (event or {}).get("selection", {}).get("rows", [])
+    if not sel_rows:
+        st.caption("👉 Klik op een rij voor speleracties (scrape-status, snel doorklikken).")
+        return
+    row = df.iloc[sel_rows[0]]
+    st.markdown("**Details van geselecteerde rij:**")
+    pia.render_player_name_action(
+        row[name_col], row.get(id_col, ""), key_prefix=f"{key_prefix}_detail_{sel_rows[0]}"
     )
 
 
@@ -379,7 +447,6 @@ for i, p in enumerate(PAGES):
 
 st.divider()
 page = st.session_state["page"]
-
 
 # ═══════════════════════════════════════════════
 # PAGE: Speler toevoegen
@@ -450,7 +517,6 @@ def page_add_player():
                 scrape_key = f"scrape_{i}"
                 do_scrape = st.checkbox("Direct scrapen", key=scrape_key, value=True)
                 if st.button("➕ Toevoegen", key=f"add_{i}", use_container_width=True, type="primary"):
-                    # Save profile
                     fb.save_player_profile(
                         player_id=str(pid),
                         display_name=name,
@@ -517,14 +583,6 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
     """
     Zoekt en toont de volgende (nog te spelen) interclubmatch van de
     geselecteerde speler.
-
-    PADEL_ANALYSIS_MANUAL_SCHEDULE_OVERRIDE:
-    Automatische detectie gebruikt de reeks_url van de MEEST RECENTE reeds
-    GESPEELDE interclubmatch. Dat werkt niet meer zodra een nieuw seizoen is
-    gestart maar het eigen team zijn EERSTE match van dat seizoen nog niet
-    heeft gespeeld. In dat geval bieden we een handmatige override: plak de
-    poule/tabel-URL van het huidige seizoen, en kies (eenmalig) je eigen
-    team uit de lijst als automatische team-herkenning ook niet lukt.
     """
     st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
 
@@ -539,7 +597,18 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
 
     auto_reeks_url = None
     if own_interclub_matches:
-        most_recent = sorted(own_interclub_matches, key=lambda m: m.get("match_date") or "", reverse=True)[0]
+        # PADEL_ANALYSIS_DATE_SORT_FIX (deze beurt): was een platte string-
+        # sort op match_date ("m.get('match_date') or ''"), wat een OUDERE
+        # match als "meest recent" kon aanzien (bv. "01/12/2025" > "15/01/2026"
+        # als tekst-vergelijking). Dat leidde tot het verkeerde/oude
+        # seizoen-schema, waardoor "Volgende match" leeg leek te zijn ook al
+        # stond de nieuwste match wel degelijk in Firestore. Nu een echte
+        # datum-parse i.p.v. string-sort.
+        most_recent = sorted(
+            own_interclub_matches,
+            key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0),
+            reverse=True,
+        )[0]
         auto_reeks_url = most_recent["reeks_url"]
 
     reeks_url = st.session_state.get(override_url_key) or auto_reeks_url
@@ -664,7 +733,6 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
 
     return bundle, opp
 
-
 def page_lineup_lab():
     st.header("🧩 Opstelling-analyse")
     profiles = _get_all_profiles()
@@ -675,7 +743,6 @@ def page_lineup_lab():
     name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
     profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
 
-    # ── Voor wie tonen we dit? ──
     settings = fb.get_app_settings()
     home_id = settings.get("home_player_id")
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
@@ -693,9 +760,6 @@ def page_lineup_lab():
         display_name_fn=_display_name,
     )
 
-    # ═══════════════════════════════════════
-    # Volgende match (incl. handmatige override, zie _render_volgende_match)
-    # ═══════════════════════════════════════
     scout_result = _render_volgende_match(str(sel_player_id), sel_label)
     if not scout_result:
         return
@@ -703,9 +767,6 @@ def page_lineup_lab():
 
     st.divider()
 
-    # ═══════════════════════════════════════
-    # Scenario-analyse: onze beste tegenzet, per mogelijk tegenstander-scenario
-    # ═══════════════════════════════════════
     st.markdown('<div class="section-header">🧮 Opstelling-scenario\'s</div>', unsafe_allow_html=True)
     st.caption(
         "Per scenario (een eerdere opstelling van de tegenstander dit seizoen) tonen we apart wat dan "
@@ -730,7 +791,7 @@ def page_lineup_lab():
         total_boards = st.number_input("Aantal wedstrijden deze ontmoeting", min_value=1, value=int(suggested_boards), step=1)
     with c2:
         st.caption(f"Voorstel gebaseerd op vorige ontmoeting van de tegenstander: {suggested_boards} wedstrijden.")
-    default_max = max(1, -(-2 * total_boards // len(available_ids)))  # ceil(2*T / n)
+    default_max = max(1, -(-2 * total_boards // len(available_ids)))
     st.caption("Max. aantal wedstrijden per speler (wat als...): standaard gelijk verdeeld, zelf aanpasbaar (bv. 0 voor een afwezige speler).")
     cols = st.columns(min(len(available_ids), 6) or 1)
     max_per_player = {}
@@ -794,15 +855,11 @@ def page_lineup_lab():
                             _go_to_player(p1)
     st.divider()
 
-    # ═══════════════════════════════════════
-    # Retrospectieve analyse (eerder gespeelde ontmoetingen van deze speler)
-    # ═══════════════════════════════════════
     st.markdown('<div class="section-header">🕰️ Retrospectieve analyse</div>', unsafe_allow_html=True)
     name_lookup = name_lookup_global
     profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
     docs, index = _load_encounter_index(profile_ids)
     all_encounters = ll.list_encounters(index)
-    # Enkel ontmoetingen waar de gekozen speler effectief in voorkwam
     own_encounters = [
         (key, lbl) for key, lbl in all_encounters
         if any(pid == sel_player_id for pid, _ in index[key])
@@ -864,7 +921,6 @@ def page_lineup_lab():
 # ═══════════════════════════════════════════════
 
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
-    # PADEL_ANALYSIS_FIX_RC_COLUMNS
     if not is_scraping_available():
         render_cloud_scrape_trigger(key_prefix=key_prefix, mode="missing", label="🔄 Data verversen")
         return
@@ -895,7 +951,6 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
-
 
 def _render_player_dashboard(player_id: str, profile: dict):
     """Stats + tabs voor één speler. Herbruikt door 'Mijn profiel' en 'Spelers'."""
@@ -1006,19 +1061,11 @@ def _render_player_dashboard(player_id: str, profile: dict):
             if sel_reeks != "Alle":   fdf = fdf[fdf["reeks"] == sel_reeks]
             if score_q:               fdf = fdf[fdf["score"].str.contains(score_q, case=False, na=False)]
 
-            # PADEL_ANALYSIS_RESULT_FALLBACK_FIX: "result" tekstveld is soms leeg
-            # terwijl "won" (boolean) wel gekend is -- gebruik won als fallback
-            # zodat W/V altijd zichtbaar is wanneer het resultaat gekend is.
             fdf = fdf.copy()
             fdf["result_display"] = fdf.apply(
                 lambda r: r["result"] or ("W" if r["won"] is True else ("V" if r["won"] is False else "-")),
                 axis=1,
             )
-
-            # PADEL_ANALYSIS_DATE_SORT_FIX: datumvelden zijn geen ISO-strings,
-            # dus een platte string-sort zet datums door elkaar. We parsen
-            # elke datum naar een echt sorteerbare tuple en sorteren daarop
-            # -- recentste bovenaan, niet-herkende datums onderaan.
             fdf["_sort_date"] = fdf["datum"].apply(lambda d: _parse_match_date(d) or (0, 0, 0))
             fdf = fdf.sort_values("_sort_date", ascending=False)
 
@@ -1030,9 +1077,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             sm3.metric("L", fl)
             sm4.metric("Winrate", _winrate_str(fw, fl))
 
-            # PADEL_ANALYSIS_HIDE_ID_AND_PERIODE: Periode-kolom en Partner/
-            # Tegenstander-ID's worden niet meer getoond (wel nog intern
-            # beschikbaar in fdf voor filtering/detail-lookup hieronder).
             show_cols = ["type", "datum", "reeks", "ronde", "partner",
                          "opp1", "opp1_ranking", "opp2", "opp2_ranking", "result_display", "score"]
             show_cols = [c for c in show_cols if c in fdf.columns]
@@ -1092,8 +1136,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
                             key_prefix=f"selected_match_{player_id}_{idx}_opp2",
                         )
                         st.write(f"**Score:** {row.get('score','–')}")
-                        # PADEL_ANALYSIS_RESULT_FALLBACK_FIX (detail badge):
-                        # zelfde fallback als in de tabel hierboven.
                         result_val = row.get("result") or ("W" if row.get("won") is True else ("V" if row.get("won") is False else "-"))
                         result_badge = "win" if result_val == "W" else "loss"
                         st.markdown(
@@ -1107,24 +1149,30 @@ def _render_player_dashboard(player_id: str, profile: dict):
                             st.markdown(f"[📄 Uitslagenblad ↗](https://www.tennisenpadelvlaanderen.be{row['uitslagenblad']})")
 
     # ── Partners ──
+    # PADEL_ANALYSIS_PARTNER_TAB_FIX (deze beurt): profiles_lookup nu
+    # meegegeven aan _summarize_partner voor canonieke ID-groepering
+    # (fixt winrate), en _render_table gebruikt de native dataframe-detail
+    # pattern (fixt "titels zweven boven de rijen").
     with tab_partners:
         st.markdown('<div class="section-header">Partneranalyse</div>', unsafe_allow_html=True)
-        partner_df = _summarize_partner(df)
+        profiles_lookup = pia.build_profile_lookup(_get_all_profiles())
+        partner_df = _summarize_partner(df, profiles_lookup=profiles_lookup)
         if not partner_df.empty:
             q = st.text_input("Zoek partner", placeholder="Filter...", label_visibility="collapsed", key=f"pq_{player_id}")
             if q:
                 partner_df = partner_df[partner_df["partner"].str.contains(q, case=False, na=False)]
-        _render_table(partner_df, "partner")
+        _render_table(partner_df, "partner", key_prefix=f"partner_table_{player_id}")
 
     # ── Tegenstanders ──
     with tab_opponents:
         st.markdown('<div class="section-header">Tegenstandersanalyse</div>', unsafe_allow_html=True)
-        opp_df = _summarize_opponents(df)
+        profiles_lookup = pia.build_profile_lookup(_get_all_profiles())
+        opp_df = _summarize_opponents(df, profiles_lookup=profiles_lookup)
         if not opp_df.empty:
             q = st.text_input("Zoek tegenstander", placeholder="Filter...", label_visibility="collapsed", key=f"oq_{player_id}")
             if q:
                 opp_df = opp_df[opp_df["tegenstander"].str.contains(q, case=False, na=False)]
-        _render_table(opp_df, "tegenstander")
+        _render_table(opp_df, "tegenstander", key_prefix=f"opp_table_{player_id}")
 
     # ── Klassement ──
     with tab_klassement:
@@ -1174,8 +1222,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
                 wanted_cols = [c for c in ["datum", "periode", "klassement"] if c in hist_df.columns]
                 hist_df = hist_df[wanted_cols]
                 if "datum" in hist_df.columns:
-                    # PADEL_ANALYSIS_DATE_SORT_FIX: zelfde robuuste datum-parsing
-                    # als in Match Explorer, i.p.v. platte string-sort.
                     hist_df["_sort_date"] = hist_df["datum"].apply(lambda d: _parse_match_date(d) or (0, 0, 0))
                     hist_df = hist_df.sort_values("_sort_date", ascending=False).drop(columns=["_sort_date"])
                 st.caption("Klassement aan het begin van elke periode.")
@@ -1247,6 +1293,14 @@ def _render_player_dashboard(player_id: str, profile: dict):
         st.write(f"**Periodes gescraped:** {player_doc.get('periods_scraped',[])}")
         st.write(f"**Periodes leeg:** {player_doc.get('periods_empty',[])}")
         st.write(f"**Periodes mislukt:** {player_doc.get('periods_failed',[])}")
+        if "matches_added_this_run" in player_doc:
+            st.write(f"**Nieuw toegevoegd (laatste run):** +{player_doc.get('matches_added_this_run', 0)}")
+        if "matches_before_this_run" in player_doc:
+            st.write(f"**Totaal vóór laatste run:** {player_doc.get('matches_before_this_run', '?')}")
+        if player_doc.get("verify_warning"):
+            st.error(f"⚠️ {player_doc.get('verify_warning')}")
+        if player_doc.get("_write_guard_triggered"):
+            st.error(f"⚠️ {player_doc.get('_write_guard_note', 'Schrijfbeveiliging geactiveerd — zie firebase_service.py.')}")
 
 
 # ═══════════════════════════════════════════════
