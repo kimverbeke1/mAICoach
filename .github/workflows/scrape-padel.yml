@@ -18,6 +18,13 @@
 #   - Veld "player_ids" LEEG laten  -> ALLE gekende spelers verversen.
 #   - Veld "player_ids" invullen    -> enkel die speler(s) verversen,
 #                                      komma-gescheiden, bv. 214435,198221
+#
+# Dependencies: geinstalleerd in TWEE stappen, bewust gescheiden zoals
+# opgezet in PadelAnalysis/scraper/requirements-scraper.txt:
+#   1. requirements.txt (repo-root)                 -> algemene dependencies,
+#      ook gebruikt door de Streamlit Cloud-deploy (GEEN playwright hierin).
+#   2. PadelAnalysis/scraper/requirements-scraper.txt -> enkel playwright,
+#      alleen nodig voor deze workflow.
 
 name: Scrape Padel Data
 
@@ -48,10 +55,13 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Python dependencies
+      - name: Install general Python dependencies (repo requirements.txt)
         run: |
           python -m pip install --upgrade pip
           pip install -r ../../requirements.txt
+
+      - name: Install scraper-only Python dependencies (playwright)
+        run: pip install -r requirements-scraper.txt
 
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
