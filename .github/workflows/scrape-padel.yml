@@ -1,20 +1,40 @@
-# Handmatige workflow om Padel-spelersdata te verversen.
-# GitHub -> tabblad "Actions" -> "Padel data verversen" -> "Run workflow"
+# .github/workflows/scrape-padel.yml
 #
-# Vereist repo secret FIREBASE_SERVICE_ACCOUNT_JSON (Settings -> Secrets and
-# variables -> Actions), met de volledige inhoud van firebase-key.json.
-
-name: Padel data verversen
-
+# Automatische PadelAnalysis-scrape via GitHub Actions.
+# Draait Playwright (met browser-binaries, iets wat Streamlit Community
+# Cloud NIET ondersteunt) om spelers te verversen en de resultaten
+# rechtstreeks naar Firestore te schrijven. De gedeployde Streamlit-app
+# (mAICoach + PadelAnalysis) leest enkel uit Firestore en hoeft dus zelf
+# niets te scrapen.
+#
+# Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#   Naam:   FIREBASE_SERVICE_ACCOUNT_JSON
+#   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand.
+#
+# FIX 2026-09-06 — "Mijn profiel ververst alle spelers i.p.v. enkel mezelf":
+# cloud_helpers.py stuurt bij elke trigger al langer "inputs": {player_ids,
+# mode} mee naar de GitHub API, maar dit workflow-bestand declareerde nog
+# geen workflow_dispatch "inputs:", waardoor die waarden nooit ontvangen
+# (en dus ook nooit doorgegeven aan ci_scrape_all.py) werden -- met als
+# gevolg dat élke trigger (ook vanaf "Mijn profiel" voor 1 specifieke
+# speler) gewoon ALLE spelers ververste, want ci_scrape_all.py valt terug
+# op "alle spelers" zodra de PLAYER_IDS env var leeg binnenkomt.
+# Nu correct gekoppeld: inputs.player_ids / inputs.mode -> env PLAYER_IDS /
+# MODE -> ci_scrape_all.py.
+name: Scrape Padel Data
 on:
+  schedule:
+    # 05:00 UTC = 07:00 zomertijd / 06:00 wintertijd in België
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       player_ids:
-        description: "Specifieke speler(s), komma-gescheiden (leeg = iedereen)"
+        description: "Komma-gescheiden player_id's om te verversen (leeg = alle spelers)"
         required: false
         default: ""
       mode:
-        description: "Wat verversen?"
+        description: "missing (enkel ontbrekende/huidige periode, snelst) | new_users | full"
         required: false
         default: "missing"
         type: choice
@@ -22,16 +42,13 @@ on:
           - missing
           - new_users
           - full
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     defaults:
       run:
         working-directory: PadelAnalysis/scraper
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,16 +59,24 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies (algemeen)
         run: |
           python -m pip install --upgrade pip
           pip install -r ../../requirements.txt
-          pip install -r requirements-scraper.txt
-          python -m playwright install --with-deps chromium
 
-      - name: Data verversen
+      - name: Install Playwright (Python package, enkel voor deze workflow)
+        run: pip install -r requirements-scraper.txt
+
+      - name: Install Playwright browsers (Chromium binary + OS-libraries)
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run padel scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # github.event.inputs is leeg bij een 'schedule'-trigger (geen
+          # workflow_dispatch), dan vallen PLAYER_IDS/MODE terug op lege
+          # strings -- ci_scrape_all.py interpreteert dat zelf al correct
+          # als "alle spelers" / mode "missing" (zie DEFAULT_MODE aldaar).
           PLAYER_IDS: ${{ github.event.inputs.player_ids }}
           MODE: ${{ github.event.inputs.mode }}
         run: python ci_scrape_all.py
