@@ -1,11 +1,11 @@
 # .github/workflows/scrape-padel.yml
 #
-# Automatische PadelAnalysis-scrape via GitHub Actions.
-# Draait Playwright (met browser-binaries, iets wat Streamlit Community
-# Cloud NIET ondersteunt) om alle gekende spelers te verversen en de
-# resultaten rechtstreeks naar Firestore te schrijven. De gedeployde
-# Streamlit-app (mAICoach + PadelAnalysis) leest enkel uit Firestore en
-# hoeft dus zelf niets te scrapen.
+# PadelAnalysis-scrape via GitHub Actions — UITSLUITEND handmatig te starten
+# (geen automatische dagelijkse/periodieke run). Draait Playwright (met
+# browser-binaries, iets wat Streamlit Community Cloud NIET ondersteunt) om
+# spelers te verversen en de resultaten rechtstreeks naar Firestore te
+# schrijven. De gedeployde Streamlit-app leest enkel uit Firestore en hoeft
+# zelf niets te scrapen.
 #
 # Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON
 #   Settings -> Secrets and variables -> Actions -> New repository secret
@@ -13,14 +13,21 @@
 #   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand
 #           (gewoon de hele JSON-tekst plakken, inclusief { } en newlines
 #           in private_key — niets extra escapen).
+#
+# Starten: GitHub -> tabblad "Actions" -> "Scrape Padel Data" -> "Run workflow"
+#   - Veld "player_ids" LEEG laten  -> ALLE gekende spelers verversen.
+#   - Veld "player_ids" invullen    -> enkel die speler(s) verversen,
+#                                      komma-gescheiden, bv. 214435,198221
 
 name: Scrape Padel Data
 
 on:
-  schedule:
-    # 05:00 UTC = 07:00 zomertijd / 06:00 wintertijd in Belgi\u00eb
-    - cron: "0 5 * * *"
-  workflow_dispatch: {}   # laat je ook manueel starten via de Actions-tab
+  workflow_dispatch:
+    inputs:
+      player_ids:
+        description: "Player ID's om te verversen, komma-gescheiden (leeg = alle spelers)"
+        required: false
+        default: ""
 
 jobs:
   scrape:
@@ -49,7 +56,8 @@ jobs:
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
 
-      - name: Run padel scraper (alle gekende spelers)
+      - name: Run padel scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          PLAYER_IDS: ${{ github.event.inputs.player_ids }}
         run: python ci_scrape_all.py
