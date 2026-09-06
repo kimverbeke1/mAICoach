@@ -9,4 +9,7 @@ openai>=1.40
 requests>=2.32
 python-dotenv>=1.0
 google-cloud-storage>=2.16
+google-cloud-firestore
 firebase-admin
+beautifulsoup4
+lxml
