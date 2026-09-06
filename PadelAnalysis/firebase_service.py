@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -73,6 +74,13 @@ def build_minimal_defaults(player_id: str, player_data: dict) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Credential loading — 3 mogelijke bronnen, in deze volgorde:
+#   1. Streamlit secrets ([firebase] sectie)     -> Streamlit Community Cloud
+#   2. Environment variable met volledige JSON   -> GitHub Actions / CI
+#   3. Lokaal firebase-key.json bestand          -> lokale ontwikkelmachine
+# ---------------------------------------------------------------------------
+
 def _load_streamlit_secrets_credentials() -> Optional[credentials.Certificate]:
     try:
         import streamlit as st
@@ -82,6 +90,35 @@ def _load_streamlit_secrets_credentials() -> Optional[credentials.Certificate]:
         if "private_key" in firebase_cfg:
             firebase_cfg["private_key"] = str(firebase_cfg["private_key"]).replace("\\n", "\n")
         return credentials.Certificate(firebase_cfg)
+    except Exception:
+        return None
+
+
+def _load_env_credentials() -> Optional[credentials.Certificate]:
+    """
+    Laadt Firebase-credentials uit een environment variable — bedoeld voor
+    CI/CD-omgevingen zoals GitHub Actions, waar geen Streamlit-context en
+    geen lokaal firebase-key.json bestand beschikbaar is.
+
+    Verwacht de VOLLEDIGE inhoud van het service-account JSON-bestand
+    (de hele firebase-key.json), als tekst, in één van deze environment
+    variables (eerste match wint):
+      - FIREBASE_SERVICE_ACCOUNT_JSON
+      - FIREBASE_CREDENTIALS_JSON
+
+    In GitHub Actions zet je dit klaar als repo secret en geef je het door
+    via `env:` in de workflow (zie .github/workflows/scrape-padel.yml).
+    """
+    raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON") or os.environ.get("FIREBASE_CREDENTIALS_JSON")
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw)
+        if "private_key" in info:
+            # Defensief: normaliseer voor het geval de key als losse
+            # "\n"-tekens binnenkwam i.p.v. echte newlines.
+            info["private_key"] = str(info["private_key"]).replace("\\n", "\n")
+        return credentials.Certificate(info)
     except Exception:
         return None
 
@@ -101,9 +138,17 @@ def _load_local_file_credentials() -> Optional[credentials.Certificate]:
 def _init_firebase():
     if firebase_admin._apps:
         return firestore.client()
-    cred = _load_streamlit_secrets_credentials() or _load_local_file_credentials()
+    cred = (
+        _load_streamlit_secrets_credentials()
+        or _load_env_credentials()
+        or _load_local_file_credentials()
+    )
     if cred is None:
-        raise FileNotFoundError("Geen Firebase credentials gevonden. Gebruik lokaal firebase-key.json of Streamlit secrets met [firebase].")
+        raise FileNotFoundError(
+            "Geen Firebase credentials gevonden. Gebruik lokaal firebase-key.json, "
+            "Streamlit secrets met [firebase], of environment variable "
+            "FIREBASE_SERVICE_ACCOUNT_JSON (bv. in GitHub Actions)."
+        )
     firebase_admin.initialize_app(cred)
     return firestore.client()
 
@@ -209,6 +254,7 @@ def save_player_v2(player_id: str, player_data: dict):
         prepared["last_updated"] = utc_now_iso()
     db.collection(PLAYERS_COLLECTION).document(str(player_id)).set(prepared, merge=False)
     return prepared
+
 
 def delete_player(player_id: str) -> dict:
     pid = str(player_id)

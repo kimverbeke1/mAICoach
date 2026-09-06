@@ -1,0 +1,14 @@
+# PadelAnalysis/scraper/requirements-scraper.txt
+#
+# Extra dependency, enkel nodig voor de GitHub Actions scrape-workflow
+# (.github/workflows/scrape-padel.yml). Bewust NIET toegevoegd aan het
+# hoofd-requirements.txt van de repo, want dat bestand wordt ook gebruikt
+# door de Streamlit Cloud-deploy, waar Playwright/browser-binaries niet
+# beschikbaar zijn en dus ook niet horen te worden geïnstalleerd.
+#
+# De workflow installeert EERST requirements.txt (algemene dependencies),
+# DAARNA dit bestand (enkel playwright), en pas DAN `playwright install
+# --with-deps chromium` (dat het bijhorende Chromium-binary + OS-libraries
+# downloadt — dat is een apart, tweede installatiestap, los van het
+# Python-package zelf).
+playwright>=1.45
