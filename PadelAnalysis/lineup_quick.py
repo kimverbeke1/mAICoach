@@ -58,6 +58,38 @@ def _format_rank(avg_rank: Optional[float]) -> str:
     return f"P{int(round(avg_rank / 50) * 50)}"
 
 
+# PADEL_ANALYSIS_DATE_PARSE_FIX
+# Zelfde robuuste datum-parser als in dashboard.py (elk bestand houdt zijn
+# eigen kleine kopie, geen extra gedeelde module nodig voor deze ene
+# helper-functie). Nodig omdat een platte string-sort op "match_date"
+# datums door elkaar zet zodra het formaat niet toevallig ISO is (bv.
+# dd/mm/jjjj: "01/12/2026" komt string-alfabetisch VOOR "15/01/2026",
+# terwijl december net de meest recente maand is).
+_DUTCH_MONTHS = {
+    "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
+    "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
+}
+
+
+def _parse_match_date(text) -> Optional[tuple]:
+    if not text:
+        return None
+    text = str(text).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return (y, mo, d)
+    m = re.search(r"(\d{1,2})\s+([a-zA-Zàéè]+)\s+(\d{4})", text.lower())
+    if m:
+        mo = _DUTCH_MONTHS.get(m.group(2))
+        if mo:
+            return (int(m.group(3)), mo, int(m.group(1)))
+    return None
+
+
 def _match_date_key(m: dict) -> str:
     return str(m.get("match_date") or m.get("tournament_date_start") or "")
 
@@ -78,16 +110,6 @@ def _result_char(m: dict) -> str:
     if m.get("won") is False:
         return "V"
     return "-"
-
-
-def _partner_key(m: dict) -> str:
-    """Stable key for grouping partner stats."""
-    partner_pid = str(m.get("partner_user_id") or "").strip()
-    if partner_pid:
-        return f"id:{partner_pid}"
-    partner_name = str(m.get("partner_name") or "").strip().lower()
-    partner_name = re.sub(r"\s+", " ", partner_name)
-    return f"name:{partner_name}"
 
 
 def _dedupe_match_key(m: dict) -> str:
@@ -170,7 +192,11 @@ def _available_players_df(docs: dict, selected_ids: list[str], name_lookup: dict
 
 def _recent_interclub_df(doc: dict, limit: int = 10) -> pd.DataFrame:
     matches = [m for m in (doc or {}).get("matches", []) or [] if m.get("match_type") == "interclub"]
-    matches = sorted(matches, key=_match_date_key, reverse=True)[:limit]
+    # PADEL_ANALYSIS_DATE_SORT_FIX: was een platte string-sort op de ruwe
+    # datumtekst (_match_date_key), wat "datums door elkaar" gaf zodra het
+    # formaat niet toevallig ISO was. Nu een echte datum-parse, recentste
+    # bovenaan; niet-herkende datums (zeldzaam) belanden onderaan.
+    matches = sorted(matches, key=lambda m: _parse_match_date(_match_date_key(m)) or (0, 0, 0), reverse=True)[:limit]
     rows = []
     for m in matches:
         rows.append({
@@ -189,25 +215,54 @@ def _recent_interclub_df(doc: dict, limit: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _collect_partner_analysis_from_selected_doc(sel_doc: dict, docs: dict, match_type_filter: str = "Alle") -> pd.DataFrame:
-    """Partner analysis based on selected player's own match list, enriched with scraped partner stats."""
+def _collect_partner_analysis_from_selected_doc(
+    sel_doc: dict,
+    docs: dict,
+    profiles_lookup: Optional[dict] = None,
+    match_type_filter: str = "Alle",
+) -> pd.DataFrame:
+    """
+    Partner analysis based on selected player's own match list, enriched with
+    scraped partner stats.
+
+    PADEL_ANALYSIS_PARTNER_GROUPING_FIX (bug: "winrate met mij" toonde 0%
+    ondanks effectieve winsten met die partner, bv. Anneleen Gallant):
+    Vroeger werd er gegroepeerd op partner_user_id ALS die aanwezig was in
+    het match-record, anders op de (genormaliseerde) naam. Niet elk
+    match-record heeft echter consequent een partner_user_id ingevuld (bv.
+    oudere scrapes, of matches toegevoegd via de tegenstander-scout-flow) --
+    hierdoor konden dezelfde partner in TWEE aparte rijen terechtkomen
+    ("id:12345" voor de ene match, "name:anneleen gallant" voor de andere),
+    met elk hun eigen (onvolledige, soms toevallig 0%) winst/verlies-telling.
+
+    Fix: we lossen EERST een canoniek player_id op via de globale profiel-
+    lookup (dezelfde naam-matching als de rest van de app, incl. naam-
+    varianten/volgorde), en groeperen daarop. Enkel als er geen profiel-match
+    mogelijk is (partner nog nooit toegevoegd/gescraped) vallen we terug op
+    een naam-sleutel -- in dat geval blijft correcte totaaltelling sowieso
+    afhankelijk van consistente naamschrijfwijze in de brondata.
+    """
+    profiles_lookup = profiles_lookup or {}
     acc: dict[str, dict] = {}
     seen = set()
     for m in (sel_doc or {}).get("matches", []) or []:
         if match_type_filter != "Alle" and m.get("match_type") != match_type_filter:
             continue
         partner_name = str(m.get("partner_name") or "").strip()
-        partner_pid = str(m.get("partner_user_id") or "").strip()
-        if not partner_name and not partner_pid:
+        partner_pid_raw = str(m.get("partner_user_id") or "").strip()
+        if not partner_name and not partner_pid_raw:
             continue
         key = _dedupe_match_key(m)
         if key in seen:
             continue
         seen.add(key)
-        partner_group = _partner_key(m)
+
+        canonical_pid = pia.resolve_player_id(partner_name, profiles_lookup, partner_pid_raw) if profiles_lookup else partner_pid_raw
+        partner_group = f"id:{canonical_pid}" if canonical_pid else f"name:{pia._norm(partner_name)}"
+
         bucket = acc.setdefault(partner_group, {
-            "Partner": partner_name or partner_pid or "Onbekende partner",
-            "Partner ID": partner_pid,
+            "Partner": partner_name or canonical_pid or "Onbekende partner",
+            "Partner ID": canonical_pid or partner_pid_raw,
             "Matches": 0,
             "W": 0,
             "V": 0,
@@ -221,6 +276,11 @@ def _collect_partner_analysis_from_selected_doc(sel_doc: dict, docs: dict, match
             "interclub": 0,
             "tornooi": 0,
         })
+        # Naam kan per match licht verschillen in schrijfwijze; bewaar de
+        # langste/meest volledige variant als weergavenaam.
+        if partner_name and len(partner_name) > len(bucket["Partner"] or ""):
+            bucket["Partner"] = partner_name
+
         bucket["Matches"] += 1
         if m.get("match_type") == "interclub":
             bucket["interclub"] += 1
@@ -265,7 +325,9 @@ def _collect_partner_analysis_from_selected_doc(sel_doc: dict, docs: dict, match
         if with_me_wr is not None and partner_wr is not None:
             delta = with_me_wr - partner_wr
         if data["last10"]:
-            recent = sorted(data["last10"], key=lambda x: x[0] or "", reverse=True)[:10]
+            # PADEL_ANALYSIS_DATE_SORT_FIX: ook hier recentste-eerst via
+            # echte datum-parse i.p.v. string-sort.
+            recent = sorted(data["last10"], key=lambda x: _parse_match_date(x[0]) or (0, 0, 0), reverse=True)[:10]
             last10 = "".join(x[1] for x in recent)
         else:
             last10 = "-"
@@ -278,6 +340,7 @@ def _collect_partner_analysis_from_selected_doc(sel_doc: dict, docs: dict, match
             reliability = "Hoog"
         elif matches >= 4:
             reliability = "Middel"
+        last_match_sorted = sorted(data["last_dates"], key=lambda d: _parse_match_date(d) or (0, 0, 0), reverse=True)
         rows.append({
             "Partner": data["Partner"],
             "Partner ID": data.get("Partner ID") or "",
@@ -292,7 +355,7 @@ def _collect_partner_analysis_from_selected_doc(sel_doc: dict, docs: dict, match
             "Sterkste winst": _format_rank(data["best_win_rank"]),
             "W tegen P<=200": strong,
             "Laatste 10": last10,
-            "Laatste match": max(data["last_dates"]) if data["last_dates"] else "-",
+            "Laatste match": last_match_sorted[0] if last_match_sorted else "-",
             "Betrouwbaarheid": reliability,
         })
     if not rows:
@@ -319,8 +382,7 @@ def _render_selectable_table_with_detail(
     """Toont een volledig-breed, sorteerbare tabel (alle kolommen zichtbaar,
     ID-kolommen verborgen). Klik op een rij om onderaan de details te zien
     met klikbare speleracties (popover met scrape/refresh-status) — dezelfde
-    UX als de bestaande Match Explorer-tab, i.p.v. de vroegere ingeklemde
-    kolom-per-kolom weergave die onleesbaar werd in een smalle layout.
+    UX als de bestaande Match Explorer-tab.
     """
     if df.empty:
         st.info("Geen data beschikbaar.")
@@ -469,7 +531,9 @@ def render_lineup_quick_results(
         format_func=lambda x: "Alle" if x == "Alle" else _match_type_label(x),
         key=f"quick_partner_type_{sel_player_id}",
     )
-    partner_df = _collect_partner_analysis_from_selected_doc(sel_doc, docs, match_type_filter=match_type_choice)
+    partner_df = _collect_partner_analysis_from_selected_doc(
+        sel_doc, docs, profiles_lookup=profiles_lookup, match_type_filter=match_type_choice
+    )
     if partner_df.empty:
         st.info("Geen partnerhistoriek gevonden voor deze speler binnen de huidige data.")
     else:
