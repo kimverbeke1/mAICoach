@@ -12,32 +12,47 @@
 #   Naam:   FIREBASE_SERVICE_ACCOUNT_JSON
 #   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand.
 #
-# FIX 2026-09-07 — "install-stappen draaien elke run helemaal opnieuw":
-# Elke workflow-run start op een compleet lege GitHub-runner (dat is
-# normaal en onvermijdelijk), maar zonder caching werd bij ELKE run
-# opnieuw (a) alle pip-packages gedownload/geïnstalleerd EN (b) de volledige
-# Playwright Chromium-browser (~150-300MB) gedownload -- veruit de traagste
-# stap, en volledig herhaalbaar/onnodig als er sinds de vorige run niets
-# aan de dependencies veranderd is.
-# Toegevoegd:
-#   1. actions/cache voor de pip-downloadcache (naast de reeds bestaande
-#      lichte 'cache: pip' optie van setup-python, die vooral de
-#      package-index cachet, niet de effectief gedownloade wheels).
-#   2. actions/cache voor de Playwright-browserbinaries (~/.cache/ms-playwright),
-#      met een cache-key gebaseerd op de Playwright-versie EN de OS-naam
-#      (browserbinaries zijn platform-specifiek). Bij een cache-hit wordt
-#      'playwright install --with-deps chromium' overgeslagen; bij een
-#      cache-miss (bv. na een Playwright-versie-upgrade) draait die stap
-#      gewoon zoals voorheen en wordt het resultaat voor de VOLGENDE run
-#      opnieuw gecached.
-# Verwacht effect: een "warme" run (cache-hit op beide) zou een groot deel
-# van de installatietijd moeten overslaan; een "koude" run (eerste keer, of
-# na een dependency-wijziging) duurt ongeveer even lang als voorheen, maar
-# bouwt daarbij de cache op voor alle volgende runs.
+# FIX 2026-09-07 (v2) — "de setup-stappen voor het scrapen mogen dagelijks
+# vooraf draaien zodat een handmatige scrape voor de gebruiker veel sneller
+# gaat":
+# De trage stappen zijn (a) 'pip install' van alle dependencies en (b) de
+# Playwright Chromium-download (~150-300MB). We houden die nu DAGELIJKS warm
+# en slaan ze op een warme run VOLLEDIG over:
+#
+#   1. Volledige VENV-cache (nieuw): de hele geïnstalleerde Python-omgeving
+#      (.venv, incl. alle pip-packages EN playwright) wordt gecached met een
+#      key op basis van de hash van requirements.txt + requirements-scraper.txt.
+#      Bij een cache-hit wordt 'pip install' HELEMAAL overgeslagen (enkel de
+#      map terugzetten), i.p.v. elke keer opnieuw te resolven/installeren.
+#      Bij een cache-miss (eerste keer of na een dependency-wijziging) wordt
+#      de venv 1x opgebouwd en meteen gecached voor alle volgende runs.
+#   2. Playwright-browserbinaries-cache (~/.cache/ms-playwright), key op de
+#      Playwright-versie + OS. Bij een hit wordt de Chromium-download
+#      overgeslagen; enkel de OS-libraries (apt) worden dan nog gezet (die
+#      staan niet in de gebruikerscache en zijn op een verse runner telkens
+#      nodig, maar zijn snel).
+#
+# Waarom dit "vooraf" werkt: de geplande dagelijkse run (cron) draait exact
+# dezelfde install-stappen en ververst zo elke dag beide caches. GitHub
+# verwijdert caches die 7 dagen niet gebruikt zijn; door de dagelijkse run
+# blijft alles gegarandeerd warm. Een handmatige run (workflow_dispatch)
+# hoeft dan enkel de caches terug te zetten -> nagenoeg geen installatietijd
+# meer, en start bijna meteen met scrapen.
+#
+# Verwacht effect:
+#   - Koude run (eerste keer / na dependency-upgrade): ~zelfde duur als
+#     voorheen, maar bouwt de caches op.
+#   - Warme run (dagelijks onderhouden): pip-install volledig overgeslagen,
+#     Chromium-download overgeslagen -> de setup krimpt van minuten naar
+#     seconden.
+
 name: Scrape Padel Data
+
 on:
   schedule:
-    # 05:00 UTC = 07:00 zomertijd / 06:00 wintertijd in België
+    # Dagelijkse "warm + scrape"-run. Houdt zowel de venv- als de
+    # Playwright-browsercache vers EN ververst meteen de data (mode
+    # "missing"). 05:00 UTC = 07:00 zomertijd / 06:00 wintertijd in België.
     - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
@@ -54,6 +69,14 @@ on:
           - missing
           - new_users
           - full
+
+# Voorkom dat een geplande run en een handmatige run tegelijk dezelfde
+# Firestore-data schrijven. We annuleren NIET (cancel-in-progress: false),
+# zodat een lopende scrape netjes mag afronden en de volgende erna start.
+concurrency:
+  group: scrape-padel
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -69,27 +92,50 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # Lichte pip-index/wheel cache van setup-python zelf. Dit maakt een
+          # eventuele KOUDE (cache-miss) venv-installatie extra snel; op een
+          # warme run wordt pip sowieso volledig overgeslagen (zie hieronder).
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
             PadelAnalysis/scraper/requirements-scraper.txt
 
-      - name: Install Python dependencies (algemeen)
+      # ── Volledige venv-cache ────────────────────────────────────────────
+      # Cachet de complete geïnstalleerde omgeving. GEEN restore-keys: enkel
+      # een EXACTE hash-match telt, zodat een warme run gegarandeerd exact de
+      # juiste dependencies terugkrijgt (en we nooit per ongeluk een oude
+      # venv met verkeerde packages hergebruiken na een requirements-wijziging).
+      - name: Cache Python-venv (alle pip-packages + playwright)
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: PadelAnalysis/scraper/.venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('requirements.txt', 'PadelAnalysis/scraper/requirements-scraper.txt') }}
+
+      - name: Bouw venv + installeer dependencies (alleen bij cache-miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install -r ../../requirements.txt
+          pip install -r requirements-scraper.txt
 
-      - name: Install Playwright (Python package, enkel voor deze workflow)
-        run: pip install -r requirements-scraper.txt
+      - name: Bevestig venv aanwezig (warme run)
+        if: steps.cache-venv.outputs.cache-hit == 'true'
+        run: |
+          echo "Venv-cache-hit: pip install volledig overgeslagen."
+          . .venv/bin/activate
+          python -c "import playwright, bs4, requests; print('deps OK uit cache')"
 
-      # Playwright-versie uitlezen zodat de cache-key automatisch verandert
-      # (en dus automatisch een nieuwe download forceert) zodra je ooit de
-      # Playwright-versie in requirements-scraper.txt optrekt -- voorkomt
-      # dat een verouderde/incompatibele gecachete browserversie gebruikt
-      # wordt na een dependency-upgrade.
+      # ── Playwright-browsercache ─────────────────────────────────────────
+      # Playwright-versie uitlezen (uit de venv) zodat de browser-cache-key
+      # automatisch verandert zodra je de Playwright-versie optrekt -> forceert
+      # dan een verse Chromium-download i.p.v. een verouderde gecachte versie.
       - name: Bepaal Playwright-versie (voor cache-key)
         id: playwright-version
         run: |
+          . .venv/bin/activate
           echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright-browserbinaries
@@ -100,26 +146,22 @@ jobs:
           key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
 
       - name: Install Playwright browsers (Chromium binary + OS-libraries)
-        # Bij een cache-hit worden de browserbinaries zelf overgeslagen via
-        # --dry-run false hieronder is NIET van toepassing -- we gebruiken
-        # in plaats daarvan de cache-hit output om de hele stap over te
-        # slaan wanneer de binaries al aanwezig zijn. --with-deps installeert
-        # ook OS-niveau libraries (apt) die niet in de gebruikersspecifieke
-        # cache-map zitten; die zijn op een verse ubuntu-latest runner sowieso
-        # telkens opnieuw nodig (worden door apt zelf al efficiënt afgehandeld
-        # en zijn niet de dominante tijdskost hier -- de browserbinary-download
-        # zelf is dat wel).
+        # Enkel bij een cache-miss: downloadt de Chromium-binary én zet de
+        # OS-libraries. Dit is de dominante tijdskost op een koude run.
         if: steps.cache-playwright.outputs.cache-hit != 'true'
-        run: python -m playwright install --with-deps chromium
+        run: |
+          . .venv/bin/activate
+          python -m playwright install --with-deps chromium
 
-      - name: Installeer enkel ontbrekende OS-libraries (bij cache-hit)
-        # Bij een cache-hit slaan we de VOLLEDIGE install over (incl. de
-        # browserbinary-download), maar de OS-niveau libraries (apt-deps)
-        # staan niet in de gecachete map en moeten op een verse runner
-        # alsnog aanwezig zijn. Dit installeert enkel die system-deps,
-        # zonder de browserbinary opnieuw te downloaden.
+      - name: Installeer enkel OS-libraries (bij browser-cache-hit)
+        # Bij een cache-hit is de browserbinary al aanwezig (uit de cache),
+        # maar de OS-libraries staan niet in die map en zijn op een verse
+        # runner telkens opnieuw nodig. Deze stap zet enkel die system-deps
+        # (snel), zonder de browserbinary opnieuw te downloaden.
         if: steps.cache-playwright.outputs.cache-hit == 'true'
-        run: python -m playwright install-deps chromium
+        run: |
+          . .venv/bin/activate
+          python -m playwright install-deps chromium
 
       - name: Run padel scraper
         env:
@@ -130,4 +172,6 @@ jobs:
           # als "alle spelers" / mode "missing" (zie DEFAULT_MODE aldaar).
           PLAYER_IDS: ${{ github.event.inputs.player_ids }}
           MODE: ${{ github.event.inputs.mode }}
-        run: python ci_scrape_all.py
+        run: |
+          . .venv/bin/activate
+          python ci_scrape_all.py
