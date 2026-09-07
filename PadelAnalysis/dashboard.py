@@ -212,8 +212,8 @@ def _summarize_partner(df: pd.DataFrame) -> pd.DataFrame:
     if sub.empty:
         return pd.DataFrame()
     # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: tel ALLE matchen (ook die met
-    # onbekend resultaat, won=None) via size i.p.v. count("won") -- count()
-    # slaat NaN/None over, waardoor interclubmatchen zonder ingevuld
+    # onbekend resultaat, won=None) via size i.p.v. count("won") -- pandas'
+    # count() slaat None over, waardoor interclubmatchen zonder ingevuld
     # winst/verlies-resultaat uit de telling vielen.
     g = sub.groupby("partner").agg(
         matches=("partner", "size"),
@@ -304,6 +304,17 @@ def _get_all_profiles() -> list:
         return [d.to_dict() for d in docs]
     except Exception:
         return []
+# PADEL_ANALYSIS_VOLGENDE_MATCH_HELPERS_2026-09-07
+def _save_poule_url_to_profile(player_id: str, url: str) -> None:
+    """Bewaar de (handmatig gegeven) poule/tabel-URL op het spelersprofiel,
+    zodat 'Volgende match' die na een reboot/cache-clear automatisch
+    terugvindt (session_state overleeft dat niet)."""
+    try:
+        fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
+            {"interclub_poule_url": url}, merge=True
+        )
+    except Exception:
+        pass
 # ─────────────────────────────────────────────
 # Navigation
 # ─────────────────────────────────────────────
@@ -442,49 +453,45 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     sel_doc = fb.get_player(sel_player_id)
-    all_interclub = [
+    # PADEL_ANALYSIS_VOLGENDE_MATCH_FIX_2026-09-07:
+    # BUG (opgelost): "volgende interclubmatch wordt niet getoond".
+    # Root cause: interclubmatchen krijgen in scraper_v2 NOOIT een 'reeks_url'
+    # (enkel tornooimatchen hebben dat veld). De vorige filter vereiste net
+    # m.get("reeks_url"), waardoor own_interclub_matches voor interclub ALTIJD
+    # leeg was -> (a) geen auto-URL EN (b) identify_own_ploeg_id kreeg geen
+    # datums, kon 'onze' ploeg nooit bepalen en viel altijd terug op de
+    # manuele teamkeuze -> geen volgende match.
+    # Fix:
+    #   - neem ALLE interclubmatchen (voor de datum-gebaseerde teamidentificatie);
+    #   - leid de poule/tabel-URL af in deze volgorde: handmatige sessie-URL ->
+    #     eerder op het profiel opgeslagen URL (overleeft reboot/cache-clear) ->
+    #     een reeks_url op de match als die toevallig toch bestaat;
+    #   - bij handmatige invoer bewaren we de URL op het profiel, zodat je die
+    #     maar één keer hoeft te plakken.
+    own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", [])
         if m.get("match_type") == "interclub"
     ]
-    own_interclub_matches = [m for m in all_interclub if m.get("reeks_url")]
-    # PADEL_ANALYSIS_NEXT_MATCH_DIAG_2026-09-07: expliciete diagnose zodat je
-    # meteen ziet WAAROM een volgende match niet verschijnt (i.p.v. enkel een
-    # lege/generieke melding). Vaakst voorkomende oorzaak: de recentste
-    # interclubmatch mist een reeks_url (poule-link), waardoor de app de
-    # poule-pagina niet automatisch kan openen.
-    if all_interclub and not own_interclub_matches:
-        st.warning(
-            f"Er zijn {len(all_interclub)} interclubmatch(en) gekend voor {sel_label}, "
-            "maar geen enkele bevat een poule/tabel-link (reeks_url). Daardoor kan ik "
-            "de poulepagina niet automatisch openen. Herscrape deze speler (dan wordt "
-            "reeks_url meestal ingevuld), of plak hieronder handmatig de poule-link."
-        )
-    # PADEL_ANALYSIS_NEXT_MATCH_DATE_SORT_FIX_2026-09-07
-    # BUG (opgelost): auto_reeks_url koos de "meest recente" interclubmatch via
-    # een platte STRING-sort op match_date. Bij dd/mm/jjjj klopt dat niet
-    # (bv. "01/12/2025" sorteert string-alfabetisch VOOR "19/09/2026"),
-    # waardoor soms een oude poule-URL werd gekozen -> verkeerde/lege
-    # "volgende match". Nu sorteren we op de ECHT geparste datum (recentste
-    # eerst), zodat de poule-URL van je meest recente interclubmatch (bv.
-    # 05/09) wordt gebruikt.
+    profile_doc = fb.get_player_profile(sel_player_id) or {}
+    saved_poule_url = profile_doc.get("interclub_poule_url")
     auto_reeks_url = None
-    if own_interclub_matches:
-        most_recent = sorted(
-            own_interclub_matches,
-            key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0),
-            reverse=True,
-        )[0]
-        auto_reeks_url = most_recent["reeks_url"]
-    reeks_url = st.session_state.get(override_url_key) or auto_reeks_url
+    for m in sorted(own_interclub_matches,
+                    key=lambda mm: _parse_match_date(mm.get("match_date")) or (0, 0, 0),
+                    reverse=True):
+        if m.get("reeks_url"):
+            auto_reeks_url = m["reeks_url"]
+            break
+    reeks_url = st.session_state.get(override_url_key) or saved_poule_url or auto_reeks_url
     if not reeks_url:
         st.info(
-            f"Nog geen wedstrijdschema gekend voor {sel_label} (nog geen interclubmatch met "
-            "poule-link gescraped in het huidige seizoen). Plak hieronder de poule/tabel-link van "
-            "tennisenpadelvlaanderen.be om je volgende match toch te zien."
+            f"Nog geen wedstrijdschema-URL gekend voor {sel_label}. Interclubmatchen "
+            "bevatten zelf geen poule-link, dus plak hieronder eenmalig de poule/tabel-link "
+            "van tennisenpadelvlaanderen.be. Die wordt bewaard voor de volgende keer."
         )
         manual_url = st.text_input("Poule/tabel-URL (handmatig)", key=f"manual_url_input_{sel_player_id}")
         if manual_url and st.button("Gebruiken", key=f"use_manual_url_{sel_player_id}"):
             st.session_state[override_url_key] = manual_url.strip()
+            _save_poule_url_to_profile(sel_player_id, manual_url.strip())
             st.rerun()
         return
     try:
@@ -493,13 +500,19 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         fixtures, fetch_error = [], str(e)
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
-        if st.session_state.get(override_url_key) and st.button("Reset handmatige link", key=f"reset_manual_{sel_player_id}"):
+        if st.button("Andere poule-URL gebruiken", key=f"reset_manual_{sel_player_id}"):
             st.session_state.pop(override_url_key, None)
             st.session_state.pop(override_team_key, None)
+            _save_poule_url_to_profile(sel_player_id, "")
             st.rerun()
         return
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
+        if st.button("Andere poule-URL gebruiken", key=f"reset_manual_empty_{sel_player_id}"):
+            st.session_state.pop(override_url_key, None)
+            st.session_state.pop(override_team_key, None)
+            _save_poule_url_to_profile(sel_player_id, "")
+            st.rerun()
         return
     home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
     own_ploeg_id = st.session_state.get(override_team_key)
@@ -528,44 +541,17 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             if pid:
                 st.session_state[override_team_key] = pid
                 st.session_state[override_url_key] = reeks_url
+                _save_poule_url_to_profile(sel_player_id, reeks_url)
                 st.rerun()
         return
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)
     if not next_match:
         st.success("Geen nog te spelen wedstrijden gevonden voor dit schema.")
-        # PADEL_ANALYSIS_NEXT_MATCH_DIAG_2026-09-07: toon het herkende schema,
-        # zodat je kunt zien of de app wel de juiste poule/ploeg te pakken heeft
-        # wanneer je nochtans wél nog een match verwacht (bv. 19/09).
-        with st.expander("🔎 Diagnose: herkend wedstrijdschema van jouw ploeg", expanded=False):
-            if team_fixtures:
-                diag_rows = [{
-                    "Datum": f.get("date_text") or "?",
-                    "Thuis": f.get("home_name") or "?",
-                    "Uit": f.get("away_name") or "?",
-                    "Gespeeld": "✅" if f.get("played") else "— (nog te spelen)",
-                    "Score": f.get("score") or "",
-                } for f in team_fixtures]
-                st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
-                st.caption(
-                    "Zie je hier je verwachte match (bv. 19/09) staan als 'nog te spelen' maar toont "
-                    "de app hem niet, dan werd hij op de poulepagina mogelijk toch al als 'gespeeld' "
-                    "gemarkeerd (een matchId/uitslagenblad-link aanwezig). Staat hij hier helemaal "
-                    "niet, dan is de gebruikte poule-link (reeks_url) niet die van jouw huidige reeks — "
-                    "plak dan de juiste link hieronder."
-                )
-            else:
-                st.caption("Geen enkele fixture herkend voor jouw ploegId in dit schema.")
-        if st.session_state.get(override_url_key) and st.button("Reset handmatige link", key=f"reset_manual2_{sel_player_id}"):
+        if st.button("Andere poule-URL gebruiken", key=f"reset_manual2_{sel_player_id}"):
             st.session_state.pop(override_url_key, None)
             st.session_state.pop(override_team_key, None)
-            st.rerun()
-        manual_url = st.text_input(
-            "Andere poule/tabel-URL gebruiken (handmatig)", key=f"manual_url_override_input_{sel_player_id}"
-        )
-        if manual_url and st.button("Deze link gebruiken", key=f"use_manual_override_{sel_player_id}"):
-            st.session_state[override_url_key] = manual_url.strip()
-            st.session_state.pop(override_team_key, None)
+            _save_poule_url_to_profile(sel_player_id, "")
             st.rerun()
         return
     opp = ss.opponent_of(next_match, own_ploeg_id)
