@@ -335,7 +335,7 @@ def _get_saved_schedule(player_id: str):
     Lees het door Playwright (poule_playwright.py, in GitHub Actions)
     voorgekauwde interclub-poule-schema uit het spelerprofiel. Dit is de sleutel
     voor Optie B: de gedeployde Streamlit-app heeft GEEN browser en kan de
-    clubdashboard-SPA niet zelf renderen (WAF/JS). CI doet dat wél en schrijft
+    clubdashboard-SPA (WAF/JS) niet zelf renderen. CI doet dat wél en schrijft
     de fixtures weg als 'interclub_schedule'. Hier lezen we ze gewoon uit.
     Returns (fixtures:list, scraped_at:str|None)."""
     try:
@@ -474,6 +474,31 @@ def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
+def _render_schema_refresh_button(sel_player_id: str) -> None:
+    """PADEL_ANALYSIS_SCHEMA_REFRESH_BUTTON_2026-09-07:
+    Knop op de CLOUD om het interclub-poule-schema meteen te verversen zonder
+    op de dagelijkse update te wachten. Dit scrapet NIET in de app zelf (de
+    cloud heeft geen browser); het triggert de bestaande GitHub Actions-
+    workflow (scrape-padel.yml -> ci_scrape_all.py), die op een ubuntu-runner
+    mét Chromium draait en het schema via poule_playwright.py naar Firestore
+    schrijft. Enkel zichtbaar op cloud én als het GitHub-token geconfigureerd
+    is (render_cloud_scrape_trigger toont anders niets).
+    Na afloop (enkele minuten) verschijnt het verse schema automatisch, want
+    _render_volgende_match leest 'interclub_schedule' uit Firestore."""
+    if is_scraping_available():
+        return  # lokaal draait de scrape gewoon rechtstreeks; geen trigger nodig.
+    with st.expander("🔄 Schema nu verversen (via GitHub Actions)", expanded=False):
+        st.caption(
+            "Start meteen een update van je matchen én het poule-schema op de "
+            "achtergrond (GitHub Actions). Duurt meestal enkele minuten; daarna "
+            "verschijnt de nieuwe volgende match hier automatisch."
+        )
+        render_cloud_scrape_trigger(
+            key_prefix=f"vm_schema_{sel_player_id}",
+            player_ids=str(sel_player_id),
+            mode="missing",
+            label="🔄 Schema nu verversen",
+        )
 def _resolve_and_render_next(sel_player_id, sel_label, fixtures, own_interclub_matches, reeks_url):
     """PADEL_ANALYSIS_NEXT_MATCH_SHARED_2026-09-07: gedeelde afhandeling zodra we
     fixtures hebben (of ze nu uit Firestore of een live fetch komen): bepaal je
@@ -557,6 +582,8 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     load_key = f"vm_loaded_{sel_player_id}"
+    # Cloud-knop om het schema meteen te verversen (triggert GitHub Actions).
+    _render_schema_refresh_button(sel_player_id)
     sel_doc = fb.get_player(sel_player_id)
     own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", [])
@@ -573,8 +600,7 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         reeks_url = _get_saved_poule_url(sel_player_id) or ""
         if sched_at:
             st.caption(f"Schema automatisch opgehaald (via de dagelijkse update) op {_format_scraped_at(sched_at)}.")
-        res = _resolve_and_render_next(sel_player_id, sel_label, saved_fixtures, own_interclub_matches, reeks_url)
-        return res
+        return _resolve_and_render_next(sel_player_id, sel_label, saved_fixtures, own_interclub_matches, reeks_url)
     # FALLBACK (lokaal / geen CI-schema aanwezig): de oude flow met een
     # (eventueel handmatig geplakte) poule-URL die live wordt opgehaald.
     ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
@@ -591,8 +617,8 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
     if not reeks_url:
         st.info(
             f"Nog geen poule/tabel-schema gekend voor {sel_label}. Dit wordt normaal "
-            "automatisch opgehaald door de dagelijkse update. Je kan hieronder ook "
-            "eenmalig de poule/tabel-link plakken."
+            "automatisch opgehaald door de dagelijkse update (of via de knop hierboven "
+            "op de cloud). Je kan hieronder ook eenmalig de poule/tabel-link plakken."
         )
         manual_url = st.text_input("Poule/tabel-URL (eenmalig)", key=f"manual_url_input_{sel_player_id}")
         if manual_url and st.button("Onthouden & laden", key=f"use_manual_url_{sel_player_id}", type="primary"):
