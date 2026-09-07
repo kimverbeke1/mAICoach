@@ -2,10 +2,10 @@
 # PADEL_ANALYSIS_PADel_BEFORE_CAPTURE_FIX_V1
 """
 fetch_period_playwright.py
+
 Playwright helper voor periode-wisseling op het TVL dashboard.
 Geeft per periode de HTML terug; parsing gebeurt via scraper_v2.py.
 """
-
 import time
 import logging
 from typing import Optional
@@ -20,7 +20,6 @@ DEFAULT_PADEL_PARAMS = {
     "tab": "padel", "tspid": "80", "tdpid": "80",
     "ppid": "81", "tscid": "80", "pcid": "79",
 }
-
 
 
 # PADEL_ANALYSIS_FETCH_PERIOD_CLICK_PADEL_FIX
@@ -78,7 +77,6 @@ def _activate_padel_results_tab(page, debug: bool = False) -> bool:
     except Exception as e:
         if debug:
             print(f"[fetch-period/padel] JS click failed: {e}")
-
     # Playwright fallbacks.
     candidates = [
         lambda: page.get_by_role("tab", name=re.compile(r"^\s*padel\s*$", re.I)).first,
@@ -171,6 +169,7 @@ def _wait_after_select(page, timeout_ms: int = 10000):
 def fetch_all_periods_html(
     player_id: str,
     max_periods: Optional[int] = None,
+    target_labels: Optional[list[str]] = None,
     headless: bool = True,
     delay_between_periods: float = 1.0,
     progress_callback=None,
@@ -182,17 +181,45 @@ def fetch_all_periods_html(
     vóór elke periode ("bezig") en erna ("ok"/"empty"/"error"), zodat de UI
     kan tonen waar het scrapen precies staat.
 
+    Args:
+        max_periods:    (legacy gedrag) als target_labels niet gegeven is,
+                         worden enkel de eerste `max_periods` opties uit de
+                         dropdown genomen, IN DROPDOWN-VOLGORDE. Dit gaat
+                         ervan uit dat de gewenste periodes toevallig de
+                         eerste N in de dropdown zijn -- correct voor "de
+                         N meest recente periodes", FOUT zodra een specifieke,
+                         mogelijk niet-recente periode nodig is (zie bug
+                         hieronder).
+        target_labels:  PADEL_ANALYSIS_TARGET_LABEL_FIX (2026-09-07) — als
+                         gegeven, worden ENKEL dropdown-opties bezocht wiens
+                         label exact overeenkomt met een van deze labels,
+                         ongeacht hun positie in de dropdown. Dit lost een
+                         reële bug op: scrape_player.py bepaalt via HTTP
+                         (get_padel_periods) welke periode-LABELS ontbreken,
+                         maar die lijst kan in een andere volgorde staan dan
+                         (of periodes bevatten die niet aan het begin staan
+                         van) de Playwright-dropdown hier. De oude
+                         `max_periods`-aanpak nam simpelweg "de eerste N
+                         dropdown-opties" en negeerde volledig WELKE labels
+                         er effectief gevraagd waren, wat bij scrape_player's
+                         strict_missing_only-modus (enkel echt ontbrekende,
+                         niet per se recente periodes) tot het ophalen van de
+                         VERKEERDE periode leidde (voorbeeld uit productie:
+                         gevraagd "week 49/2025 tot 26/2026", opgehaald werd
+                         i.p.v. daarvan "week 27/2026 tot 48/2026", simpelweg
+                         omdat dat toevallig de eerste dropdown-optie was).
+                         Gebruik dit ALTIJD wanneer je specifieke periodes
+                         nodig hebt i.p.v. "de eerste N".
+
     Returns list of:
         {"label": str, "value": str, "html": str, "status": "ok"|"empty"|"error"}
     """
     results = []
-
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
         page = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"
         ).new_page()
-
         try:
             url = _build_url(player_id)
             logger.info(f"Opening: {url}")
@@ -203,16 +230,23 @@ def fetch_all_periods_html(
             page.wait_for_timeout(3000)
             _dismiss_cookies(page)
             _activate_padel_results_tab(page, debug=bool(globals().get('DEBUG', False)))
-
             padel_select = _get_padel_period_select(page)
             if padel_select is None:
                 logger.error("Geen padel period select gevonden")
                 return results
-
             all_options = _get_period_options(page, padel_select)
             logger.info(f"  {len(all_options)} periodes gevonden")
 
-            if max_periods is not None:
+            if target_labels is not None:
+                # PADEL_ANALYSIS_TARGET_LABEL_FIX: filter op EXACT label-match,
+                # behoud dropdown-volgorde voor de resterende (gefilterde) opties.
+                target_set = set(target_labels)
+                all_options = [o for o in all_options if o["label"] in target_set]
+                found_labels = {o["label"] for o in all_options}
+                missing = target_set - found_labels
+                if missing:
+                    logger.warning(f"  Gevraagde periode(s) niet gevonden in dropdown: {sorted(missing)}")
+            elif max_periods is not None:
                 all_options = all_options[:max_periods]
 
             total = len(all_options)
@@ -221,8 +255,16 @@ def fetch_all_periods_html(
                 logger.info(f"  [{i+1}/{total}] {label}")
                 if progress_callback:
                     progress_callback(i + 1, total, label, "fetching")
-
-                if i > 0:
+                # PADEL_ANALYSIS_TARGET_LABEL_FIX: bij target_labels ALTIJD
+                # expliciet selecteren, ook bij i==0. De oude code sloeg de
+                # selectie bij i==0 over, in de veronderstelling dat de
+                # pagina na het laden toevallig al op de juiste (=eerste
+                # gevraagde) periode stond. Dat klopt enkel wanneer we
+                # simpelweg "de eerste N dropdown-opties" willen; zodra we
+                # een SPECIFIEKE periode nodig hebben (target_labels), is de
+                # paginadefault na het laden niet noodzakelijk die periode.
+                needs_explicit_select = (i > 0) or (target_labels is not None)
+                if needs_explicit_select:
                     try:
                         padel_select.select_option(value=value, timeout=5000)
                         _wait_after_select(page)
@@ -234,20 +276,16 @@ def fetch_all_periods_html(
                         if progress_callback:
                             progress_callback(i + 1, total, label, "error")
                         continue
-
                 _activate_padel_results_tab(page, debug=bool(globals().get('DEBUG', False)))
                 html = page.content()
                 results.append({**opt, "html": html, "status": "ok"})
                 logger.info(f"    → html captured ({len(html)} bytes)")
                 if progress_callback:
                     progress_callback(i + 1, total, label, "ok")
-
                 if i < len(all_options) - 1:
                     time.sleep(delay_between_periods)
-
         finally:
             page.context.browser.close()
-
     return results
 
 
@@ -255,16 +293,13 @@ if __name__ == "__main__":
     import json
     from pathlib import Path
     from bs4 import BeautifulSoup
-
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from scraper_v2 import parse_tournament_section, parse_interclub_section
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-
     print("Test: eerste 5 periodes voor speler 214435...")
     pages = fetch_all_periods_html("214435", max_periods=5, headless=True)
-
     all_matches = []
     for p in pages:
         if not p["html"]:
@@ -275,9 +310,7 @@ if __name__ == "__main__":
         ic = parse_interclub_section(soup, "214435", p["label"])
         all_matches.extend(t + ic)
         print(f"  {p['label'][:55]}: {len(t)} tornooi + {len(ic)} interclub")
-
     print(f"\nTotaal: {len(all_matches)} matches")
-
     out = Path(__file__).parent.parent / "debug_output_v2" / "test_multiperiod_214435.json"
     out.write_text(json.dumps(all_matches, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Output: {out}")

@@ -2,20 +2,27 @@
 # PADEL_ANALYSIS_CLICK_PADEL_AFTER_PERIOD_CHANGE_V3
 """
 scrape_player.py  —  Hoofdorchestrator voor PadelAnalysis
+
 Combineert:
   - fetch_period_playwright.py  : Playwright voor periodeselectie
   - scraper_v2.py               : BeautifulSoup parsing
   - firebase_service.py (root)  : Firestore opslag
+
 Gebruik:
     from scraper.scrape_player import scrape_player, scrape_player_current
+
     # Huidige periode scrapen (snel, geen Playwright nodig)
     result = scrape_player_current("214435")
+
     # Alle periodes (of specifieke selectie)
     result = scrape_player("214435")
     result = scrape_player("214435", max_new_periods=3)
     result = scrape_player("214435", force_full_refresh=True)
+
     # Enkel ontbrekende periodes, GEEN her-check van de laatste 2 periodes
+    # (sneller — bedoeld voor geautomatiseerde/CI-runs, zie ci_scrape_all.py)
     result = scrape_player("214435", refresh_recent=0, strict_missing_only=True)
+
 Data model in Firestore (collection: players, document: player_id):
     {
       player_id, last_updated, scraped_at,
@@ -26,10 +33,13 @@ Data model in Firestore (collection: players, document: player_id):
       matches: [
         {
           player_id, period_label, match_type ("tornooi"|"interclub"),
+          # tornooi:
           tournament_name, tournament_date_start, tournament_date_end, tournament_week,
           reeks_name, reeks_url, reeks_id, tornooi_id,
-          competition_name, match_date, encounter,
+          # interclub:
+          competition_name, match_date, reeks_name, encounter,
           uitslagenblad_url, spelgroep_id, match_id,
+          # gemeenschappelijk:
           partner_name, partner_user_id,
           opp1_name, opp1_user_id, opp1_ranking,
           opp2_name, opp2_user_id, opp2_ranking,
@@ -37,14 +47,29 @@ Data model in Firestore (collection: players, document: player_id):
         }
       ]
     }
+
+BELANGRIJKE FIX (2026-09-07) — periode-mismatch bug:
+`fetch_all_periods_html` werd hier voorheen aangeroepen met enkel
+`max_periods=len(to_scrape)`, wat impliciet aannam dat "de periodes die HTTP
+zegt te ontbreken" toevallig OOK "de eerste N periodes in de Playwright-
+dropdown" zijn. Dat klopte doorgaans toevallig (refresh_recent was altijd
+>=2, dus de gevraagde periodes waren meestal effectief de recentste), maar
+brak volledig zodra strict_missing_only een periode aanwees die NIET aan
+het begin van de dropdown staat: Playwright haalde dan gewoon de verkeerde
+periode op (bv. gevraagd "week 49/2025-26/2026", opgehaald "week
+27/2026-48/2026"), met als gevolg 0 nieuwe matches ondanks een "geslaagde"
+scrape-run. Nu wordt expliciet `target_labels` doorgegeven, zodat Playwright
+exact de gevraagde periode-labels opzoekt in de dropdown, ongeacht positie.
 """
 import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
 from bs4 import BeautifulSoup
 
+# --- path setup so this works when called from project root or scraper/ dir ---
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
 for _p in [str(_HERE), str(_ROOT)]:
@@ -60,12 +85,15 @@ from scraper_v2 import (
 )
 from fetch_period_playwright import fetch_all_periods_html
 
+# Firebase service — lives in project root
 sys.path.insert(0, str(_ROOT))
 import firebase_service as _fb
+
 import re
 
 logger = logging.getLogger(__name__)
 
+# How many of the most recent periods to always re-scrape (to catch late results)
 DEFAULT_REFRESH_RECENT = 2
 
 
@@ -87,22 +115,6 @@ def _calc_stats(matches: list[dict]) -> dict:
         "tournament_matches": sum(1 for m in matches if m.get("match_type") == "tornooi"),
         "interclub_matches": sum(1 for m in matches if m.get("match_type") == "interclub"),
     }
-
-
-def _match_identity(m: dict) -> tuple:
-    """
-    Stabiele 'identiteit' van een match-slot, GEEN score/resultaat inbegrepen
-    (die kunnen legitiem achteraf gecorrigeerd worden door TVL).
-    """
-    return (
-        m.get("player_id"),
-        m.get("period_label"),
-        m.get("match_type"),
-        m.get("round_text"),
-        m.get("opp1_user_id"),
-        m.get("opp2_user_id"),
-        m.get("tournament_name") or m.get("competition_name"),
-    )
 
 
 def _dedupe(matches: list[dict]) -> list[dict]:
@@ -133,62 +145,38 @@ def _periods_to_scrape(
     """
     Determine which periods need scraping.
 
-    PADEL_ANALYSIS_CURRENT_PERIOD_DETECTION_FIX (deze beurt):
-    BUG (opgelost, tweede poging): de vorige fix nam aan dat all_periods[0]
-    altijd de huidige/actieve periode is ("eerste periode = huidige"). Die
-    aanname is NOOIT rechtstreeks tegen de live website geverifieerd, en is
-    de meest waarschijnlijke verklaring waarom nieuw gevonden matchen (bv.
-    bij Stijn Mortier, en bij je eigen profiel) bleven "verdwijnen": als TVL
-    de dropdown in een andere volgorde toont dan verondersteld, werd
-    stelselmatig de VERKEERDE (oude, allang volledig afgeronde) periode
-    herchecked, terwijl de werkelijk huidige periode -- eenmaal in
-    periods_scraped beland na de allereerste (force_full) scrape -- nooit
-    meer opnieuw bekeken werd.
-    Nieuwe, betrouwbare aanpak: scraper_v2.get_padel_periods() geeft nu per
-    periode een 'selected': bool mee, rechtstreeks afgelezen van het HTML
-    'selected'-attribuut op de <option>-tag -- dit is de website's EIGEN
-    aanduiding van de actief getoonde periode, geen gok over volgorde meer.
-    We herchecken nu altijd de periode(s) die als 'selected' gemarkeerd
-    staan; enkel als geen enkele optie 'selected' blijkt (onverwacht/
-    afwijkende pagina-structuur) vallen we terug op index 0 als laatste
-    redmiddel.
+    Rules:
+      - force_full=True  → alles
+      - geen existing    → alles
+      - anders           → laatste `refresh_recent` periodes altijd,
+                           plus alle periodes die nog niet eerder verwerkt zijn.
+                           Met refresh_recent=0 betekent dit: ENKEL periodes
+                           die nog nooit gescraped zijn (echt "missing only").
     """
     if force_full or existing_doc is None:
         return all_periods
     already_done = set(existing_doc.get("periods_scraped", []))
     recent = all_periods[:refresh_recent] if refresh_recent > 0 else []
-    current = [p for p in all_periods if p.get("selected")]
-    if not current and all_periods:
-        current = all_periods[:1]  # laatste redmiddel, enkel als 'selected' nergens gevonden werd
     not_yet = [p for p in all_periods[refresh_recent:] if p["label"] not in already_done]
     seen, result = set(), []
-    for p in recent + current + not_yet:
+    for p in recent + not_yet:
         if p["label"] not in seen:
             seen.add(p["label"])
             result.append(p)
     return result
 
 
-def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict]) -> tuple[list[dict], int, int]:
+def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict], refreshed_periods: list[str]) -> list[dict]:
     """
-    UNION-merge: bestaande matches worden nooit zomaar weggegooid. Elke
-    match krijgt een stabiele identiteit (zonder score) zodat een verse
-    versie van DEZELFDE wedstrijd de oude overschrijft, maar een oudere
-    match die toevallig niet meer in de nieuwste parse voorkomt gewoon
-    bewaard blijft. Garandeert dat total_matches bij een normale refresh
-    nooit kan dalen.
-    Returns: (merged_matches, previous_total, new_total)
+    Merge new matches into existing ones.
+    Periods that were re-scraped replace their old matches; other periods are kept.
     """
     existing_matches = []
     if existing_doc:
         existing_matches = existing_doc.get("matches", []) or []
-    by_identity: dict = {}
-    for m in existing_matches:
-        by_identity[_match_identity(m)] = m
-    for m in new_matches:
-        by_identity[_match_identity(m)] = m
-    merged = _dedupe(list(by_identity.values()))
-    return merged, len(existing_matches), len(merged)
+    replaced = set(refreshed_periods)
+    kept_old = [m for m in existing_matches if m.get("period_label") not in replaced]
+    return _dedupe(kept_old + new_matches)
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +184,24 @@ def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict]) -> tup
 # ---------------------------------------------------------------------------
 
 def scrape_player_current(player_id: str) -> dict:
-    """Scrape only the currently active (default) period using HTTP only."""
+    """
+    Scrape only the currently active (default) period using HTTP only.
+    Fastest option — no Playwright, no Firebase read/write.
+    Useful for quick checks and testing.
+    """
     logger.info(f"[{player_id}] Scraping huidige periode (HTTP only)...")
     return _scrape_current_http(player_id)
 
 
+# PADEL_ANALYSIS_CLICK_PADEL_TAB_FIX
 def _activate_padel_results_tab(page, debug: bool = False) -> bool:
-    """Ensure the TVL results page is on the Padel tab, not Tennis enkel."""
+    """Ensure the TVL results page is on the Padel tab, not Tennis enkel.
+
+    TVL opens the results dashboard on tennis results by default for some players.
+    If we scrape immediately, recent padel tournament results can be missed.
+    This helper clicks the Padel tab/link/button when it is present and waits briefly
+    for the JS content to update.
+    """
     candidates = [
         lambda: page.get_by_role("tab", name=re.compile(r"^\s*padel\s*$", re.I)).first,
         lambda: page.get_by_role("link", name=re.compile(r"^\s*padel\s*$", re.I)).first,
@@ -253,8 +252,43 @@ def scrape_player(
 ) -> dict:
     """
     Full scrape of a player across all (or selected) periods.
-    Zie module-docstring voor het volledige datamodel.
+    Uses Playwright for period navigation, BeautifulSoup for parsing.
+    Optionally saves to Firebase (Firestore).
+
+    Args:
+        player_id:            userId from tennisenpadelvlaanderen.be
+        max_new_periods:      Max number of NEW periods to scrape this run (None = all)
+        force_full_refresh:   If True, re-scrape all periods regardless of history
+        refresh_recent:       Always re-scrape this many most-recent periods
+                               (genegeerd wanneer strict_missing_only=True)
+        save_to_firebase:     Write result to Firestore
+        headless:             Run Playwright headless
+        delay_between_periods: Seconds between period fetches
+        progress_callback:    optional fn(i, total, label, status) voor live UI-feedback
+                               status: "starting" | "discovering" | "fetching" | "parsing" | "ok" | "empty" | "error" | "done"
+        strict_missing_only:  Als True: negeer de "altijd laatste N periodes
+                               herchecken"-klep en scrape ENKEL periodes die
+                               nog nooit gescraped zijn. Spelers die al
+                               volledig up-to-date zijn worden dan supersnel
+                               overgeslagen (geen Playwright-launch nodig).
+
+    Returns:
+        Full result dict (same structure as what gets saved to Firebase)
     """
+    # PADEL_ANALYSIS_REFRESH_LAST_12_MONTHS
+    # Incremental refresh should not re-scrape all historical periods.
+    # TVL period blocks are roughly half-year ranges, so refreshing the 2 most
+    # recent periods covers about the last 12 months while still catching late
+    # tournament results added inside an already scraped period.
+    #
+    # PADEL_ANALYSIS_STRICT_MISSING_ONLY
+    # Voor geautomatiseerde/CI-runs (zie ci_scrape_all.py) is deze "altijd de
+    # laatste 2 periodes herchecken"-veiligheidsklep vaak ongewenst: als een
+    # speler al volledig up-to-date is, kost het toch telkens een volledige
+    # Playwright-launch + navigatie. strict_missing_only=True schakelt deze
+    # klep uit: enkel periodes die nog NOOIT gescraped zijn worden opgehaald.
+    # De interactieve "Vernieuwen"-knop in dashboard.py gebruikt dit bewust
+    # NIET, en behoudt dus zijn bestaande (veiligere) gedrag.
     if not force_full_refresh:
         if strict_missing_only:
             refresh_recent = int(refresh_recent or 0)
@@ -266,11 +300,13 @@ def scrape_player(
             try:
                 progress_callback(i, total, label, status)
             except Exception:
-                pass
+                pass  # feedback mag het scrapen nooit doen crashen
 
     logger.info(f"[{player_id}] === Start scrape ===")
     scrape_start = _utc_now()
     _progress(0, 0, "Voorbereiden...", "starting")
+
+    # --- Step 1: Load existing data from Firebase ---
     existing_doc = None
     if save_to_firebase and not force_full_refresh:
         try:
@@ -281,6 +317,7 @@ def scrape_player(
         except Exception as e:
             logger.warning(f"[{player_id}] Firebase read fout: {e}")
 
+    # --- Step 2: Discover all available periods (HTTP, snel) ---
     import requests
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"})
@@ -290,19 +327,13 @@ def scrape_player(
         logger.error(f"[{player_id}] Geen periodes gevonden")
         return {"player_id": player_id, "error": "Geen periodes gevonden", "scraped_at": scrape_start}
     logger.info(f"[{player_id}] {len(all_periods)} periodes beschikbaar")
-    n_selected = sum(1 for p in all_periods if p.get("selected"))
-    if n_selected == 0:
-        logger.warning(
-            f"[{player_id}] Geen enkele periode gemarkeerd als 'selected' in de HTML — "
-            f"val terug op index 0 als aanname voor de huidige periode."
-        )
-    elif n_selected > 1:
-        logger.warning(f"[{player_id}] {n_selected} periodes gemarkeerd als 'selected' (onverwacht) — allemaal meegenomen.")
 
+    # --- Step 3: Determine which periods to scrape ---
     to_scrape = _periods_to_scrape(all_periods, existing_doc, refresh_recent, force_full_refresh)
     if max_new_periods is not None:
         to_scrape = to_scrape[:max_new_periods]
     logger.info(f"[{player_id}] {len(to_scrape)} periodes te scrapen: {[p['label'][:30] for p in to_scrape]}")
+
     if not to_scrape:
         logger.info(f"[{player_id}] Niets te scrapen — alles up-to-date")
         _progress(0, 0, "Al up-to-date", "done")
@@ -317,28 +348,26 @@ def scrape_player(
             "periods_failed": [],
             "matches": existing_matches,
             "stats": _calc_stats(existing_matches),
-            "matches_added_this_run": 0,
         }
 
-    try:
-        period_pages = fetch_all_periods_html(
-            player_id,
-            max_periods=len(to_scrape),
-            headless=headless,
-            delay_between_periods=delay_between_periods,
-            progress_callback=_progress,
-        )
-    except Exception as e:
-        logger.error(f"[{player_id}] Fout bij ophalen periode-HTML (Playwright): {e}")
-        return {
-            "player_id": player_id,
-            "scraped_at": scrape_start,
-            "error": f"Fout bij ophalen periode-HTML: {e}",
-            "matches": existing_doc.get("matches", []) if existing_doc else [],
-            "stats": _calc_stats(existing_doc.get("matches", []) if existing_doc else []),
-        }
-
+    # --- Step 4: Fetch HTML per period via Playwright ---
+    # PADEL_ANALYSIS_TARGET_LABEL_FIX (2026-09-07): expliciet target_labels
+    # meegeven i.p.v. enkel max_periods. Zie module-docstring bovenaan voor
+    # de volledige uitleg van de bug die dit oplost (verkeerde periode
+    # opgehaald wanneer de ontbrekende periode niet vooraan de Playwright-
+    # dropdown staat, bv. bij strict_missing_only).
+    period_pages = fetch_all_periods_html(
+        player_id,
+        target_labels=[p["label"] for p in to_scrape],
+        headless=headless,
+        delay_between_periods=delay_between_periods,
+        progress_callback=_progress,
+    )
+    # Align fetched pages to the periods we wanted (nu een zuivere label-
+    # match, want fetch_all_periods_html haalt exact deze labels op).
     pages_by_label = {p["label"]: p for p in period_pages}
+
+    # --- Step 5: Parse each period ---
     new_matches: list[dict] = []
     scraped_labels: list[str] = []
     empty_labels: list[str] = []
@@ -368,15 +397,10 @@ def scrape_player(
             logger.error(f"[{player_id}]   Parse fout voor {label}: {e}")
             failed_periods.append({"label": label, "error": str(e)})
 
-    all_matches, prev_total, new_total = _merge_matches(existing_doc, new_matches)
-    delta = new_total - prev_total
-    if delta > 0:
-        logger.info(f"[{player_id}] Merge: {prev_total} -> {new_total} matches (+{delta} nieuw)")
-    elif delta == 0:
-        logger.info(f"[{player_id}] Merge: {prev_total} -> {new_total} matches (geen netto wijziging)")
-    else:
-        logger.warning(f"[{player_id}] Merge: {prev_total} -> {new_total} matches ({delta})")
+    # --- Step 6: Merge with existing data ---
+    all_matches = _merge_matches(existing_doc, new_matches, scraped_labels)
 
+    # Merge period metadata with existing
     prev_scraped = set(existing_doc.get("periods_scraped", []) if existing_doc else [])
     prev_empty = set(existing_doc.get("periods_empty", []) if existing_doc else [])
     all_scraped = sorted(prev_scraped | set(scraped_labels),
@@ -384,6 +408,7 @@ def scrape_player(
     all_empty = sorted(prev_empty | set(empty_labels),
                        key=lambda l: next((i for i, p in enumerate(all_periods) if p["label"] == l), 999))
 
+    # --- Step 7: Build result document ---
     result = {
         "player_id": str(player_id),
         "scraped_at": scrape_start,
@@ -401,31 +426,17 @@ def scrape_player(
         },
         "matches": all_matches,
         "stats": _calc_stats(all_matches),
-        "matches_added_this_run": max(0, delta),
-        "matches_before_this_run": prev_total,
     }
 
+    # --- Step 8: Save to Firebase ---
     if save_to_firebase:
         try:
             _fb.save_player_v2(player_id, result)
             logger.info(f"[{player_id}] Opgeslagen in Firebase: {len(all_matches)} matches")
-            try:
-                verify_doc = _fb.get_player(player_id)
-                verify_count = len((verify_doc or {}).get("matches", []))
-                if verify_count != len(all_matches):
-                    warn_msg = (
-                        f"Verificatie na opslaan toont {verify_count} matches, "
-                        f"verwacht {len(all_matches)}."
-                    )
-                    logger.error(f"[{player_id}] {warn_msg}")
-                    result["verify_warning"] = warn_msg
-                else:
-                    logger.info(f"[{player_id}] Verificatie OK: {verify_count} matches bevestigd in Firestore.")
-            except Exception as e:
-                logger.warning(f"[{player_id}] Verificatie-read mislukt (niet kritiek): {e}")
         except Exception as e:
             logger.error(f"[{player_id}] Firebase write fout: {e}")
             result["firebase_error"] = str(e)
+
     logger.info(f"[{player_id}] === Klaar: {result['stats']} ===")
     _progress(total_to_parse, total_to_parse, "Klaar", "done")
     return result
@@ -435,7 +446,10 @@ def scrape_players(
     player_ids: list[str],
     **kwargs,
 ) -> dict[str, dict]:
-    """Scrape meerdere spelers. Zelfde kwargs als scrape_player()."""
+    """
+    Scrape meerdere spelers. Zelfde kwargs als scrape_player().
+    Returns dict van player_id -> result.
+    """
     results = {}
     for pid in player_ids:
         try:
@@ -453,20 +467,23 @@ def scrape_players(
 if __name__ == "__main__":
     import argparse
     import json
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(message)s",
         datefmt="%H:%M:%S",
     )
+
     parser = argparse.ArgumentParser(description="Scrape padel speler(s)")
     parser.add_argument("player_ids", nargs="+", help="Een of meer userId's")
     parser.add_argument("--full", action="store_true", help="Force volledige refresh")
     parser.add_argument("--max", type=int, default=None, help="Max nieuwe periodes")
     parser.add_argument("--no-firebase", action="store_true", help="Niet opslaan in Firebase")
     parser.add_argument("--show", action="store_true", help="Toon browser (niet headless)")
-    parser.add_argument("--missing-only", action="store_true", help="Enkel echt ontbrekende periodes")
+    parser.add_argument("--missing-only", action="store_true", help="Enkel echt ontbrekende periodes (geen her-check van laatste 2)")
     parser.add_argument("--out", type=str, default=None, help="JSON output bestand")
     args = parser.parse_args()
+
     all_results = {}
     for pid in args.player_ids:
         result = scrape_player(
@@ -486,12 +503,13 @@ if __name__ == "__main__":
         print(f"  Periodes: {len(result.get('periods_scraped',[]))} gescraped, "
               f"{len(result.get('periods_empty',[]))} leeg, "
               f"{len(result.get('periods_failed',[]))} mislukt")
-        print(f"  Nieuw deze run: +{result.get('matches_added_this_run', 0)} matches")
+
     if args.out:
         out_path = Path(args.out)
         out_path.write_text(json.dumps(all_results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\nOutput: {out_path}")
     elif len(args.player_ids) == 1:
+        # Single player: toon eerste 2 matches
         pid = args.player_ids[0]
         matches = all_results[pid].get("matches", [])[:2]
         if matches:
