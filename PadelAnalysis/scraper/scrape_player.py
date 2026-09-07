@@ -8,13 +8,10 @@ Combineert:
   - firebase_service.py (root)  : Firestore opslag
 Gebruik:
     from scraper.scrape_player import scrape_player, scrape_player_current
-    # Huidige periode scrapen (snel, geen Playwright nodig)
     result = scrape_player_current("214435")
-    # Alle periodes (of specifieke selectie)
     result = scrape_player("214435")
     result = scrape_player("214435", max_new_periods=3)
     result = scrape_player("214435", force_full_refresh=True)
-    # Enkel ontbrekende periodes, GEEN her-check van de laatste 2 periodes
     result = scrape_player("214435", refresh_recent=0, strict_missing_only=True)
 Data model in Firestore (collection: players, document: player_id):
     {
@@ -104,7 +101,6 @@ def _match_identity(m: dict) -> tuple:
 
 
 def _dedupe(matches: list[dict]) -> list[dict]:
-    """Remove duplicate matches by (player_id, period_label, match_type, round_text, score, opp1_user_id)."""
     seen, out = set(), []
     for m in matches:
         key = (
@@ -131,17 +127,11 @@ def _periods_to_scrape(
     """
     Determine which periods need scraping.
 
-    PADEL_ANALYSIS_DATE_BASED_CURRENT_PERIOD_FIX (deze beurt, DERDE poging):
-    BUG (opgelost): de vorige 2 pogingen (positie in de lijst; HTML
-    'selected'-attribuut) bleken beide onbetrouwbaar -- zie uitgebreide
-    toelichting in scraper_v2.py. Concreet, uit een live-log: de
-    'selected'-aanpak koos "week 49/2025 - week 26/2026" (allang afgelopen)
-    als "huidige periode", terwijl Playwright zelf standaard "week 27/2026
-    - week 48/2026" opende (de werkelijk actieve periode op dat moment).
-    Nieuwe aanpak: scraper_v2.find_current_period_by_date() parseert elk
-    periode-label naar een concreet datumbereik en vergelijkt met de
-    HUIDIGE kalenderdatum -- volledig onafhankelijk van website-sessie/
-    portlet-eigenaardigheden (ppid e.d.), enkel de labeltekst + systeemklok.
+    De huidige/actieve periode wordt bepaald via echte datumvergelijking
+    (scraper_v2.find_current_period_by_date), onafhankelijk van website-
+    sessie/portlet-eigenaardigheden. Die periode wordt altijd herchecked,
+    plus (bij niet-strict) de laatste `refresh_recent` periodes, plus alle
+    periodes die nog nooit gescraped zijn.
     """
     if force_full or existing_doc is None:
         return all_periods
@@ -279,10 +269,6 @@ def scrape_player(
         return {"player_id": player_id, "error": "Geen periodes gevonden", "scraped_at": scrape_start}
     logger.info(f"[{player_id}] {len(all_periods)} periodes beschikbaar")
 
-    # Diagnostisch loggen: toon expliciet welke periode als "huidig" bepaald
-    # wordt via datumvergelijking, zodat dit voortaan direct zichtbaar is in
-    # de logs (i.p.v. pas achteraf te moeten afleiden uit welke periode
-    # uiteindelijk gescraped werd).
     current_via_date = find_current_period_by_date(all_periods)
     if current_via_date:
         logger.info(f"[{player_id}] Huidige periode (via datumvergelijking): {current_via_date['label']}")
@@ -292,7 +278,8 @@ def scrape_player(
     to_scrape = _periods_to_scrape(all_periods, existing_doc, refresh_recent, force_full_refresh)
     if max_new_periods is not None:
         to_scrape = to_scrape[:max_new_periods]
-    logger.info(f"[{player_id}] {len(to_scrape)} periodes te scrapen: {[p['label'][:30] for p in to_scrape]}")
+    target_labels = [p["label"] for p in to_scrape]
+    logger.info(f"[{player_id}] {len(to_scrape)} periodes te scrapen: {[l[:30] for l in target_labels]}")
     if not to_scrape:
         logger.info(f"[{player_id}] Niets te scrapen — alles up-to-date")
         _progress(0, 0, "Al up-to-date", "done")
@@ -310,10 +297,27 @@ def scrape_player(
             "matches_added_this_run": 0,
         }
 
+    # PADEL_ANALYSIS_TARGET_LABEL_FIX (deze beurt, DEFINITIEVE fix van
+    # "verversen vindt nieuwe matchen niet"):
+    # BUG (opgelost): deze aanroep gebruikte voorheen max_periods=len(to_scrape),
+    # wat fetch_all_periods_html deed vertrouwen op "neem simpelweg de eerste N
+    # dropdown-opties, IN DROPDOWN-VOLGORDE". Dat werkte toevallig voor een
+    # volledige herscrape (alle periodes = alle dropdown-opties), maar FAALDE
+    # in strict_missing_only/"missing"-modus: daar wordt vaak maar 1 specifieke
+    # periode gevraagd (de huidige, correct bepaald via datumvergelijking),
+    # maar max_periods=1 pakte blind de EERSTE dropdown-optie -- die niet
+    # noodzakelijk de gevraagde is (zie live-log: gevraagd "week 49/2025 tot
+    # 26/2026", opgehaald "week 27/2026 tot 48/2026", puur omdat dat de eerste
+    # dropdown-optie was) -> label-mismatch -> "Geen HTML voor periode" ->
+    # 0 nieuwe matchen, ook al staan ze wel degelijk op de site.
+    # fetch_period_playwright.py ondersteunt sinds 2026-09-07 een
+    # `target_labels`-parameter die ENKEL de dropdown-opties bezoekt wiens
+    # label exact overeenkomt met een gevraagd label, ongeacht positie. We
+    # geven nu dus expliciet de gewenste LABELS door i.p.v. een aantal.
     try:
         period_pages = fetch_all_periods_html(
             player_id,
-            max_periods=len(to_scrape),
+            target_labels=target_labels,
             headless=headless,
             delay_between_periods=delay_between_periods,
             progress_callback=_progress,
@@ -329,22 +333,6 @@ def scrape_player(
         }
 
     pages_by_label = {p["label"]: p for p in period_pages}
-
-    # PADEL_ANALYSIS_FETCHED_LABEL_MISMATCH_DIAGNOSTIC (deze beurt):
-    # Als Playwright een periode opende die NIET overeenkomt met wat we
-    # verwachtten te scrapen (bv. door een resterende mismatch in hoe
-    # Playwright zelf zijn standaardperiode kiest), loggen we dit nu
-    # expliciet i.p.v. enkel stil "Geen HTML voor periode" te melden --
-    # dit maakt toekomstige soortgelijke mismatches veel sneller herkenbaar.
-    fetched_labels = set(pages_by_label.keys())
-    expected_labels = {p["label"] for p in to_scrape}
-    unexpected = fetched_labels - expected_labels
-    if unexpected:
-        logger.warning(
-            f"[{player_id}] Playwright opende {len(unexpected)} periode(s) die niet verwacht "
-            f"waren: {sorted(unexpected)}. Dit duidt mogelijk op een resterende mismatch tussen "
-            f"de HTTP-gebaseerde periode-detectie en Playwright's eigen standaardgedrag."
-        )
 
     new_matches: list[dict] = []
     scraped_labels: list[str] = []
@@ -374,34 +362,6 @@ def scrape_player(
         except Exception as e:
             logger.error(f"[{player_id}]   Parse fout voor {label}: {e}")
             failed_periods.append({"label": label, "error": str(e)})
-
-    # PADEL_ANALYSIS_UNEXPECTED_PAGE_FALLBACK (deze beurt):
-    # Als er periode(s) mislukten OMDAT Playwright toch een andere pagina
-    # opende dan gevraagd, en die andere pagina bevat wél bruikbare HTML,
-    # parsen we die alsnog -- onder het label dat Playwright zelf toonde
-    # (niet het label dat we oorspronkelijk verwachtten), zodat een
-    # mismatch niet langer resulteert in 0 nieuwe matches terwijl er wel
-    # degelijk (mogelijk zelfs de juiste!) data opgehaald werd.
-    for unexpected_label in unexpected:
-        page_data = pages_by_label.get(unexpected_label)
-        if not page_data or not page_data.get("html"):
-            continue
-        if unexpected_label in scraped_labels or unexpected_label in already_done_labels(existing_doc):
-            continue
-        try:
-            soup = BeautifulSoup(page_data["html"], "html.parser")
-            t_matches = parse_tournament_section(soup, player_id, unexpected_label)
-            i_matches = parse_interclub_section(soup, player_id, unexpected_label)
-            period_matches = t_matches + i_matches
-            if period_matches:
-                new_matches.extend(period_matches)
-                scraped_labels.append(unexpected_label)
-                logger.info(
-                    f"[{player_id}]   (onverwacht geopend) {unexpected_label[:45]}: "
-                    f"{len(t_matches)}T + {len(i_matches)}IC alsnog verwerkt"
-                )
-        except Exception as e:
-            logger.error(f"[{player_id}]   Parse fout voor onverwachte periode {unexpected_label}: {e}")
 
     all_matches, prev_total, new_total = _merge_matches(existing_doc, new_matches)
     delta = new_total - prev_total
@@ -464,10 +424,6 @@ def scrape_player(
     logger.info(f"[{player_id}] === Klaar: {result['stats']} ===")
     _progress(total_to_parse, total_to_parse, "Klaar", "done")
     return result
-
-
-def already_done_labels(existing_doc: Optional[dict]) -> set:
-    return set((existing_doc or {}).get("periods_scraped", []) or [])
 
 
 def scrape_players(
