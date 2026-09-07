@@ -26,6 +26,7 @@ Data model per match:
 import re
 import time
 import logging
+import datetime as _dt
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,21 @@ HEADERS = {
 }
 
 # Padel tab parameters (uit de URL van het dashboard)
+#
+# PADEL_ANALYSIS_PPID_MISMATCH_NOTE (deze beurt):
+# LET OP: deze waarden (vooral 'ppid') zijn NIET betrouwbaar gegarandeerd
+# hetzelfde als wat een echte browsersessie (Playwright) gebruikt. Uit een
+# live-log bleek dat Playwright zelf navigeerde naar een URL met "ppid=81",
+# terwijl deze module hier "ppid": "79" hardcodeert. Dit portlet-ID lijkt
+# sessie-/contextafhankelijk te zijn, niet universeel. Het praktische gevolg:
+# het "selected"-attribuut op de <option>-tags van een kale, cookie-loze
+# HTTP-request (zoals hier) kan een ANDER (mogelijk verouderd) standaard-
+# aanzicht weerspiegelen dan wat een echte browser standaard toont. Daarom
+# wordt 'selected' NIET meer gebruikt om de huidige periode te bepalen (zie
+# scrape_player.py: _find_current_period_by_date) -- in de plaats daarvan
+# wordt de periode gekozen waarvan het datumbereik (geparsed uit het label
+# zelf) de huidige kalenderdatum bevat, wat volledig onafhankelijk is van
+# ppid/sessie-eigenaardigheden.
 DEFAULT_PADEL_PARAMS = {
     "tab": "padel",
     "tspid": "80",
@@ -104,6 +120,93 @@ def _get_html(session: requests.Session, url: str, params: dict = None, delay: f
 
 
 # ---------------------------------------------------------------------------
+# Period date-range parsing
+# ---------------------------------------------------------------------------
+#
+# PADEL_ANALYSIS_DATE_BASED_CURRENT_PERIOD_FIX (deze beurt)
+# BUG (opgelost, DERDE poging -- voorgaande 2 pogingen bleken onvoldoende):
+#   Poging 1: aanname "all_periods[0] = huidige periode" -- fout, positie in
+#             de lijst bleek niet gegarandeerd chronologisch.
+#   Poging 2: gebruik het HTML 'selected'-attribuut -- bleek OOK onbetrouwbaar,
+#             want een kale HTTP-request (zonder browser-sessie/cookies)
+#             gebruikt een ANDER portlet-ID (ppid=79 hardcoded) dan wat een
+#             echte Playwright-browsersessie gebruikt (ppid=81 gezien in een
+#             live-log), waardoor het standaard/"selected" aanzicht van de
+#             kale HTTP-fetch niet overeenkomt met wat Playwright zelf opent.
+#             Concreet: de HTTP-fetch merkte "week 49/2025 - week 26/2026"
+#             (al afgelopen) aan als 'selected', terwijl Playwright zelf
+#             standaard "week 27/2026 - week 48/2026" opende (de echte
+#             huidige periode, gezien de datum van dat moment).
+# Deze (robuustere) aanpak: parseer het periode-LABEL zelf naar een concreet
+# datumbereik (via ISO-weekberekening) en vergelijk met de HUIDIGE
+# kalenderdatum. Dit is volledig onafhankelijk van sessie/portlet-
+# eigenaardigheden -- enkel de tekst van het label (die wél consistent
+# gescraped wordt) en de systeemklok worden gebruikt.
+_PERIOD_WEEK_RANGE_RE = re.compile(
+    r"week\s+(\d{1,2})[/\s](\d{4})\s+tot\s+en\s+met\s+week\s+(\d{1,2})[/\s](\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _iso_week_to_date(year: int, week: int, weekday: int = 1) -> Optional[_dt.date]:
+    """weekday: 1 = maandag, 7 = zondag (ISO)."""
+    try:
+        return _dt.date.fromisocalendar(year, week, weekday)
+    except Exception:
+        return None
+
+
+def parse_period_date_range(label: str) -> Optional[tuple[_dt.date, _dt.date]]:
+    """
+    Parseert 'Resultaten van week W1/Y1 tot en met week W2/Y2' naar
+    (start_date, end_date) als datetime.date objecten.
+    Returns None als het label niet dat exacte formaat volgt.
+    """
+    if not label:
+        return None
+    m = _PERIOD_WEEK_RANGE_RE.search(label)
+    if not m:
+        return None
+    w1, y1, w2, y2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    start = _iso_week_to_date(y1, w1, 1)   # maandag van de eerste week
+    end = _iso_week_to_date(y2, w2, 7)     # zondag van de laatste week
+    if start and end:
+        return start, end
+    return None
+
+
+def find_current_period_by_date(all_periods: list[dict], today: Optional[_dt.date] = None) -> Optional[dict]:
+    """
+    Bepaalt de werkelijk actieve periode via echte datumvergelijking met
+    vandaag (of een expliciet meegegeven datum, handig voor tests).
+
+    Kiest de periode waarvan [start, end] vandaag bevat. Als geen enkele
+    periode vandaag bevat (bv. korte kloof tussen twee periodes, of een
+    label dat niet in het verwachte weekformaat staat), valt terug op de
+    periode met de meest recente startdatum die niet in de toekomst ligt
+    (dus de laatst gestarte, "lopende of pas afgeronde" periode).
+    Geeft None terug als geen enkel periode-label parsebaar bleek.
+    """
+    today = today or _dt.date.today()
+    parsed = []
+    for p in all_periods:
+        rng = parse_period_date_range(p.get("label", ""))
+        if rng:
+            parsed.append((p, rng[0], rng[1]))
+    if not parsed:
+        return None
+    containing = [p for p, start, end in parsed if start <= today <= end]
+    if containing:
+        return containing[0]
+    past_or_present = [(p, start) for p, start, end in parsed if start <= today]
+    if past_or_present:
+        return max(past_or_present, key=lambda x: x[1])[0]
+    # Alles ligt in de toekomst (zou normaal niet mogen voorkomen) — neem de
+    # vroegste toekomstige periode als beste gok.
+    return min(parsed, key=lambda x: x[1])[0]
+
+
+# ---------------------------------------------------------------------------
 # Period discovery
 # ---------------------------------------------------------------------------
 
@@ -114,17 +217,9 @@ def get_padel_periods(session: requests.Session, player_id: str) -> list[dict]:
     The page has 4 <select> dropdowns (tennis enkel, tennis dubbel, padel, pickleball).
     The padel one is the 3rd (index 2) among those containing period options.
 
-    PADEL_ANALYSIS_CURRENT_PERIOD_DETECTION_FIX (deze beurt):
-    Elk period-dict bevat nu ook 'selected': bool, gebaseerd op het HTML
-    'selected'-attribuut van de <option>-tag zelf. Dit is de enige
-    betrouwbare manier om te weten welke periode de website als "huidig/
-    actief" beschouwt -- de VOLGORDE van de opties in de dropdown (oudste
-    eerst of nieuwste eerst) is namelijk nooit rechtstreeks tegen de live
-    site geverifieerd, en scrape_player.py ging er voorheen ten onrechte
-    van uit dat de EERSTE optie in de lijst altijd de huidige periode is.
-    Als geen enkele optie 'selected' blijkt te zijn (onverwacht geval),
-    laten we het aan de aanroeper (scrape_player.py) over om terug te
-    vallen op index 0 als beste gok.
+    'selected' wordt nog steeds meegegeven ter info/diagnose, maar wordt
+    NIET meer gebruikt om de huidige periode te bepalen (zie module-docstring
+    hierboven en scrape_player.py: find_current_period_by_date).
     """
     params = {"userId": player_id, **DEFAULT_PADEL_PARAMS}
     html = _get_html(session, DASHBOARD_URL, params=params)
@@ -171,15 +266,12 @@ def fetch_period_html(
     """
     Fetch the dashboard HTML for a specific period.
     'period' is a dict with 'label', 'value', 'select_name'.
-    Strategy: find the portlet form for the padel period select and POST to it,
-    or fall back to GET with the select_name as a query param.
     """
     params = {"userId": player_id, **DEFAULT_PADEL_PARAMS}
     html = _get_html(session, DASHBOARD_URL, params=params, delay=0.5)
     soup = BeautifulSoup(html, "html.parser")
     select_name = period.get("select_name", "")
     period_value = period.get("value", "")
-    # Find the select by name and its parent form
     padel_select = soup.find("select", {"name": select_name}) if select_name else None
     padel_form = padel_select.find_parent("form") if padel_select else None
     if padel_form:
@@ -200,7 +292,6 @@ def fetch_period_html(
         resp.raise_for_status()
         return resp.text
     else:
-        # Fallback: GET with select name as param
         if select_name:
             params[select_name] = period_value
         return _get_html(session, DASHBOARD_URL, params=params, delay=1.5)
@@ -211,11 +302,6 @@ def fetch_period_html(
 # ---------------------------------------------------------------------------
 
 def _get_padel_section_container(soup: BeautifulSoup) -> Optional[Tag]:
-    """
-    The padel section is wrapped in a container identified by the 3rd occurrence
-    of 'Uitslagen Tornooien' h3. We return the common ancestor div that contains
-    both the tournament and interclub results.
-    """
     h3s_tornooi = [h for h in soup.find_all("h3") if "uitslagen tornooien" in _clean(h.get_text()).lower()]
     if len(h3s_tornooi) < 3:
         target = h3s_tornooi[-1] if h3s_tornooi else None
@@ -229,9 +315,6 @@ def _get_padel_section_container(soup: BeautifulSoup) -> Optional[Tag]:
 # ---------------------------------------------------------------------------
 
 def parse_tournament_section(soup: BeautifulSoup, player_id: str, period_label: str) -> list[dict]:
-    """
-    Parse all tournament results from the padel section.
-    """
     matches = []
     target_h3 = _get_padel_section_container(soup)
     if target_h3 is None:
@@ -258,7 +341,6 @@ def parse_tournament_section(soup: BeautifulSoup, player_id: str, period_label: 
 
 
 def _parse_tournament_org_div(org_div: Tag, player_id: str, period_label: str) -> list[dict]:
-    """Parse one div.tournament-organization into a list of match dicts."""
     matches = []
     for details_div in org_div.find_all("div", class_="details"):
         header = details_div.find("h4", class_="details-box-title")
@@ -350,9 +432,6 @@ def _parse_tournament_org_div(org_div: Tag, player_id: str, period_label: str) -
 # ---------------------------------------------------------------------------
 
 def parse_interclub_section(soup: BeautifulSoup, player_id: str, period_label: str) -> list[dict]:
-    """
-    Parse all interclub results from the padel section.
-    """
     matches = []
     h3s_interclub = [h for h in soup.find_all("h3") if "uitslagen interclub" in _clean(h.get_text()).lower()]
     if len(h3s_interclub) < 3:
@@ -374,7 +453,6 @@ def parse_interclub_section(soup: BeautifulSoup, player_id: str, period_label: s
 
 
 def _parse_interclub_details_div(details_div: Tag, player_id: str, period_label: str) -> list[dict]:
-    """Parse one div.details interclub block."""
     matches = []
     header = details_div.find("h4", class_="details-box-title")
     if not header:
@@ -454,7 +532,6 @@ def _parse_interclub_details_div(details_div: Tag, player_id: str, period_label:
 
 
 def _is_between(tag: Tag, start: Tag, end: Tag) -> bool:
-    """Check if 'tag' appears in the document after 'start' and before 'end'."""
     all_tags = list(tag.find_all_previous())
     return start in all_tags and end not in all_tags
 
@@ -464,9 +541,6 @@ def _is_between(tag: Tag, start: Tag, end: Tag) -> bool:
 # ---------------------------------------------------------------------------
 
 def scrape_uitslagenblad(session: requests.Session, url: str, delay: float = 1.5) -> dict:
-    """
-    Scrape a full interclub match sheet (uitslagenblad).
-    """
     full_url = BASE_URL + url if url.startswith("/") else url
     html = _get_html(session, full_url, delay=delay)
     soup = BeautifulSoup(html, "html.parser")
@@ -523,9 +597,6 @@ def scrape_player(
     scrape_uitslagenbladeren: bool = False,
     delay_between_periods: float = 2.0,
 ) -> dict:
-    """
-    Scrape all padel results for a player across all (or selected) periods.
-    """
     session = requests.Session()
     logger.info(f"Scraping speler {player_id}...")
     all_periods = get_padel_periods(session, player_id)
