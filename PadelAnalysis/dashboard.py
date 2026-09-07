@@ -171,28 +171,40 @@ def _matches_to_df(matches: list) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 # PADEL_ANALYSIS_STATS_FROM_MATCHES_FIX_2026-09-07
-# BUG (opgelost): "2 interclubmatches van 05/09 tonen wel in Match Explorer,
-# maar total blijft 52 en het periode-overzicht mist ze".
-# Root cause (dashboard-zijde): _render_player_dashboard toonde de bovenste
-# metrics rechtstreeks uit het OPGESLAGEN stats-dict (doc.stats), terwijl
-# Match Explorer/de tabs de EFFECTIEVE matchlijst (doc.matches) gebruiken.
-# Als stats om welke reden dan ook niet meesteeg met matches, dan liep de
-# totaaltelling achter op wat er werkelijk in de lijst zit.
-# Fix: bereken de metrics ALTIJD uit de actuele matchlijst (single source of
-# truth = doc.matches). Zo kan de bovenste teller nooit meer afwijken van
-# Match Explorer/Overzicht.
+# Metrics ALTIJD uit de effectieve matchlijst (single source of truth =
+# doc.matches). Zo kan de bovenste teller nooit meer afwijken van Match
+# Explorer/Overzicht.
 def _calc_stats_from_matches(matches: list) -> dict:
     matches = matches or []
     won = sum(1 for m in matches if m.get("won") is True)
     lost = sum(1 for m in matches if m.get("won") is False)
     total = len(matches)
+    known = won + lost
     return {
         "total_matches": total,
         "wins": won,
         "losses": lost,
+        "unknown": total - known,
+        "winrate": round(won / known * 100, 1) if known else 0.0,
         "tournament_matches": sum(1 for m in matches if m.get("match_type") == "tornooi"),
         "interclub_matches": sum(1 for m in matches if m.get("match_type") == "interclub"),
     }
+def _persist_stats_if_needed(player_id: str, player_doc: dict, live_stats: dict) -> None:
+    """PADEL_ANALYSIS_STATS_SELFHEAL_2026-09-07:
+    Als de opgeslagen stats afwijken van de live telling uit de matchlijst,
+    schrijf de correcte stats één keer terug naar Firestore. Zo wordt de '52'
+    permanent gecorrigeerd (ook voor andere views/sessies), zonder dat een
+    volledige herscrape nodig is."""
+    stored = (player_doc or {}).get("stats", {}) or {}
+    if int(stored.get("total_matches", -1)) == int(live_stats["total_matches"]):
+        return
+    try:
+        fb.db.collection(fb.PLAYERS_COLLECTION).document(str(player_id)).set(
+            {"stats": live_stats}, merge=True
+        )
+    except Exception:
+        # Niet kritiek: de weergave gebruikt sowieso de live telling.
+        pass
 def _winrate_str(wins, losses) -> str:
     known = wins + losses
     if known == 0:
@@ -211,10 +223,8 @@ def _summarize_partner(df: pd.DataFrame) -> pd.DataFrame:
     sub = df[df["partner"].str.strip().ne("")].copy()
     if sub.empty:
         return pd.DataFrame()
-    # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: tel ALLE matchen (ook die met
-    # onbekend resultaat, won=None) via size i.p.v. count("won") -- pandas'
-    # count() slaat None over, waardoor interclubmatchen zonder ingevuld
-    # winst/verlies-resultaat uit de telling vielen.
+    # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: size i.p.v. count("won") zodat
+    # matchen met leeg resultaat (won=None) meetellen.
     g = sub.groupby("partner").agg(
         matches=("partner", "size"),
         wins=("won", lambda x: x.eq(True).sum()),
@@ -237,7 +247,6 @@ def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     tmp = pd.DataFrame(rows)
-    # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: zie _summarize_partner.
     g = tmp.groupby("tegenstander").agg(
         matches=("tegenstander", "size"),
         wins=("won", lambda x: x.eq(True).sum()),
@@ -304,14 +313,20 @@ def _get_all_profiles() -> list:
         return [d.to_dict() for d in docs]
     except Exception:
         return []
-# PADEL_ANALYSIS_VOLGENDE_MATCH_HELPERS_2026-09-07
-def _save_poule_url_to_profile(player_id: str, url: str) -> None:
-    """Bewaar de (handmatig gegeven) poule/tabel-URL op het spelersprofiel,
-    zodat 'Volgende match' die na een reboot/cache-clear automatisch
-    terugvindt (session_state overleeft dat niet)."""
+def _get_saved_poule_url(player_id: str) -> Optional[str]:
+    """PADEL_ANALYSIS_POULE_URL_PERSIST_2026-09-07: lees een eerder bewaarde
+    poule/tabel-URL uit het spelerprofiel (blijft bewaard na reboot)."""
+    try:
+        prof = fb.get_player_profile(player_id) or {}
+        return prof.get("poule_reeks_url") or None
+    except Exception:
+        return None
+def _save_poule_url(player_id: str, url: str) -> None:
+    """Bewaar de poule/tabel-URL permanent in het profiel, zodat de gebruiker
+    hem nooit opnieuw hoeft te plakken."""
     try:
         fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
-            {"interclub_poule_url": url}, merge=True
+            {"poule_reeks_url": url}, merge=True
         )
     except Exception:
         pass
@@ -337,11 +352,6 @@ def page_add_player():
     st.caption("Zoek een speler op de TVL-website en voeg hem/haar toe aan de database.")
     if not is_scraping_available():
         st.info("Nieuwe spelers zoeken kan enkel lokaal. Alle bestaande spelers verversen kan wel hieronder.")
-        # PADEL_ANALYSIS_ALL_PLAYERS_LABEL: hier is player_ids bewust LEEG
-        # (= alle spelers) -- dit is de enige plek waar dat de bedoeling is,
-        # vandaar het expliciete "Alle spelers" in het label, ter
-        # onderscheid met de knop op Mijn profiel/Spelers (die maar 1
-        # specifieke speler verversen, zie _render_refresh_controls).
         render_cloud_scrape_trigger(key_prefix="add_player_page", mode="missing", label="🔄 Alle spelers verversen")
         return
     with st.form("search_form"):
@@ -452,47 +462,62 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
     st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
+    load_key = f"vm_loaded_{sel_player_id}"
     sel_doc = fb.get_player(sel_player_id)
-    # PADEL_ANALYSIS_VOLGENDE_MATCH_FIX_2026-09-07:
-    # BUG (opgelost): "volgende interclubmatch wordt niet getoond".
-    # Root cause: interclubmatchen krijgen in scraper_v2 NOOIT een 'reeks_url'
-    # (enkel tornooimatchen hebben dat veld). De vorige filter vereiste net
-    # m.get("reeks_url"), waardoor own_interclub_matches voor interclub ALTIJD
-    # leeg was -> (a) geen auto-URL EN (b) identify_own_ploeg_id kreeg geen
-    # datums, kon 'onze' ploeg nooit bepalen en viel altijd terug op de
-    # manuele teamkeuze -> geen volgende match.
-    # Fix:
-    #   - neem ALLE interclubmatchen (voor de datum-gebaseerde teamidentificatie);
-    #   - leid de poule/tabel-URL af in deze volgorde: handmatige sessie-URL ->
-    #     eerder op het profiel opgeslagen URL (overleeft reboot/cache-clear) ->
-    #     een reeks_url op de match als die toevallig toch bestaat;
-    #   - bij handmatige invoer bewaren we de URL op het profiel, zodat je die
-    #     maar één keer hoeft te plakken.
+    # Alle eigen interclubmatchen (voor teamidentificatie op datum). We eisen
+    # hier GEEN reeks_url meer -- die zit vaak niet op interclubrecords.
     own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", [])
         if m.get("match_type") == "interclub"
     ]
-    profile_doc = fb.get_player_profile(sel_player_id) or {}
-    saved_poule_url = profile_doc.get("interclub_poule_url")
+    # PADEL_ANALYSIS_POULE_URL_RESOLVE_2026-09-07:
+    # Poule/tabel-URL-resolutie in volgorde van betrouwbaarheid:
+    #   1) handmatige override deze sessie
+    #   2) permanent bewaarde URL in het profiel (blijft na reboot!)
+    #   3) auto: reeks_url van de recentste interclubmatch DIE er een heeft
+    # Zo hoeft de gebruiker de URL max. één keer te plakken -- daarna onthouden.
+    ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
     auto_reeks_url = None
-    for m in sorted(own_interclub_matches,
-                    key=lambda mm: _parse_match_date(mm.get("match_date")) or (0, 0, 0),
-                    reverse=True):
-        if m.get("reeks_url"):
-            auto_reeks_url = m["reeks_url"]
-            break
-    reeks_url = st.session_state.get(override_url_key) or saved_poule_url or auto_reeks_url
+    if ic_with_url:
+        most_recent = sorted(
+            ic_with_url,
+            key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0),
+            reverse=True,
+        )[0]
+        auto_reeks_url = most_recent["reeks_url"]
+    saved_url = _get_saved_poule_url(sel_player_id)
+    reeks_url = st.session_state.get(override_url_key) or saved_url or auto_reeks_url
     if not reeks_url:
         st.info(
-            f"Nog geen wedstrijdschema-URL gekend voor {sel_label}. Interclubmatchen "
-            "bevatten zelf geen poule-link, dus plak hieronder eenmalig de poule/tabel-link "
-            "van tennisenpadelvlaanderen.be. Die wordt bewaard voor de volgende keer."
+            f"Nog geen poule/tabel-link gekend voor {sel_label}. Plak hem hier "
+            "één keer — daarna wordt hij onthouden en hoef je dit nooit meer te doen."
         )
-        manual_url = st.text_input("Poule/tabel-URL (handmatig)", key=f"manual_url_input_{sel_player_id}")
-        if manual_url and st.button("Gebruiken", key=f"use_manual_url_{sel_player_id}"):
-            st.session_state[override_url_key] = manual_url.strip()
-            _save_poule_url_to_profile(sel_player_id, manual_url.strip())
+        manual_url = st.text_input("Poule/tabel-URL (eenmalig)", key=f"manual_url_input_{sel_player_id}")
+        if manual_url and st.button("Onthouden & laden", key=f"use_manual_url_{sel_player_id}", type="primary"):
+            u = manual_url.strip()
+            st.session_state[override_url_key] = u
+            _save_poule_url(sel_player_id, u)   # permanent bewaren
+            st.session_state[load_key] = True
             st.rerun()
+        return
+    # PADEL_ANALYSIS_NO_AUTOFETCH_2026-09-07:
+    # BUG (opgelost): de pagina "bleef laden" omdat het poule-schema bij ELKE
+    # render meteen (en soms traag) van TVL werd opgehaald. Nu gebeurt het
+    # ophalen enkel na een expliciete knopdruk -> geen eeuwige spinner meer.
+    if not st.session_state.get(load_key):
+        src = "handmatig ingesteld" if (st.session_state.get(override_url_key) or saved_url) else "automatisch gevonden via je laatste interclubmatch"
+        st.caption(f"Poule/tabel-link is {src}. Klik om je volgende match te laden.")
+        cbtn1, cbtn2 = st.columns([1, 1])
+        with cbtn1:
+            if st.button("📅 Volgende match laden", key=f"load_vm_{sel_player_id}", type="primary"):
+                st.session_state[load_key] = True
+                st.rerun()
+        with cbtn2:
+            if st.button("✏️ Andere poule-link gebruiken", key=f"change_url_{sel_player_id}"):
+                st.session_state.pop(override_url_key, None)
+                _save_poule_url(sel_player_id, "")  # wis bewaarde URL
+                st.session_state.pop(load_key, None)
+                st.rerun()
         return
     try:
         fixtures, fetch_error = _load_poule_fixtures(reeks_url)
@@ -500,18 +525,22 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         fixtures, fetch_error = [], str(e)
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
-        if st.button("Andere poule-URL gebruiken", key=f"reset_manual_{sel_player_id}"):
+        if st.button("🔁 Opnieuw proberen", key=f"retry_vm_{sel_player_id}"):
+            _load_poule_fixtures.clear()
+            st.rerun()
+        if st.button("✏️ Andere poule-link", key=f"reset_manual_{sel_player_id}"):
             st.session_state.pop(override_url_key, None)
             st.session_state.pop(override_team_key, None)
-            _save_poule_url_to_profile(sel_player_id, "")
+            _save_poule_url(sel_player_id, "")
+            st.session_state.pop(load_key, None)
             st.rerun()
         return
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
-        if st.button("Andere poule-URL gebruiken", key=f"reset_manual_empty_{sel_player_id}"):
+        if st.button("✏️ Andere poule-link", key=f"reset_manual_nofix_{sel_player_id}"):
             st.session_state.pop(override_url_key, None)
-            st.session_state.pop(override_team_key, None)
-            _save_poule_url_to_profile(sel_player_id, "")
+            _save_poule_url(sel_player_id, "")
+            st.session_state.pop(load_key, None)
             st.rerun()
         return
     home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
@@ -524,8 +553,7 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             own_ploeg_id = away_ploeg_id
     if not own_ploeg_id:
         st.warning(
-            "Kon niet automatisch bepalen welke ploeg dit is op de poule-pagina "
-            "(dit gebeurt bv. als je team dit seizoen nog niet gespeeld heeft). "
+            "Kon niet automatisch bepalen welke ploeg dit is op de poule-pagina. "
             "Kies hieronder eenmalig je eigen team."
         )
         team_names = sorted({f["home_name"] for f in fixtures} | {f["away_name"] for f in fixtures})
@@ -540,19 +568,12 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
                 pid = match["away_ploeg_id"] if match else None
             if pid:
                 st.session_state[override_team_key] = pid
-                st.session_state[override_url_key] = reeks_url
-                _save_poule_url_to_profile(sel_player_id, reeks_url)
                 st.rerun()
         return
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)
     if not next_match:
         st.success("Geen nog te spelen wedstrijden gevonden voor dit schema.")
-        if st.button("Andere poule-URL gebruiken", key=f"reset_manual2_{sel_player_id}"):
-            st.session_state.pop(override_url_key, None)
-            st.session_state.pop(override_team_key, None)
-            _save_poule_url_to_profile(sel_player_id, "")
-            st.rerun()
         return
     opp = ss.opponent_of(next_match, own_ploeg_id)
     st.markdown(f"**{next_match['date_text']}** — tegen **{opp['name']}** ({next_match['poule_label']})")
@@ -563,7 +584,7 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         st.session_state[scout_key] = bundle
     bundle = st.session_state.get(scout_key)
     if not bundle:
-        st.stop()
+        return
     if bundle["note"]:
         st.info(bundle["note"])
         st.caption("Zonder historische tegenstander-data kan ik enkel jouw eigen ploeg-sterkte tonen, niet hen inschatten.")
@@ -773,19 +794,7 @@ def page_lineup_lab():
 # Gedeelde dashboard-weergave (gebruikt door Mijn profiel én Spelers)
 # ═══════════════════════════════════════════════
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
-    # PADEL_ANALYSIS_FIX_RC_COLUMNS
     if not is_scraping_available():
-        # PADEL_ANALYSIS_SINGLE_PLAYER_CLOUD_SCRAPE_FIX (bug: "verversen op
-        # Mijn profiel scrapet alle spelers"):
-        # render_cloud_scrape_trigger() heeft een player_ids-parameter die
-        # standaard leeg is. Een lege player_ids betekent voor
-        # ci_scrape_all.py/PLAYER_IDS expliciet "alle spelers" (zie
-        # get_requested_player_ids() daar). Hier op Mijn profiel/Spelers
-        # werd player_id nooit doorgegeven, waardoor de knop altijd de
-        # volledige database ververste in plaats van enkel deze speler.
-        # Fix: player_id expliciet meegeven, en het label aanpassen zodat
-        # het onderscheid met de "Alle spelers verversen"-knop (op de
-        # Speler toevoegen-pagina) ook visueel duidelijk is.
         render_cloud_scrape_trigger(
             key_prefix=key_prefix,
             player_ids=str(player_id),
@@ -826,10 +835,7 @@ def _render_player_dashboard(player_id: str, profile: dict):
         return
     matches = player_doc.get("matches", [])
     df = _matches_to_df(matches)
-    # PADEL_ANALYSIS_STATS_FROM_MATCHES_FIX_2026-09-07: metrics ALTIJD uit de
-    # effectieve matchlijst (single source of truth), niet uit het opgeslagen
-    # stats-dict. Zo blijft de bovenste totaaltelling gegarandeerd gelijk aan
-    # wat Match Explorer/Overzicht tonen.
+    # Metrics ALTIJD uit de effectieve matchlijst (single source of truth).
     live_stats = _calc_stats_from_matches(matches)
     wins = live_stats["wins"]
     losses = live_stats["losses"]
@@ -840,8 +846,10 @@ def _render_player_dashboard(player_id: str, profile: dict):
     if stored_total != total:
         st.caption(
             f"ℹ️ Live telling uit de matchlijst: {total} matchen "
-            f"(opgeslagen stats gaf {stored_total}). De weergave hieronder gebruikt de live telling."
+            f"(opgeslagen stats gaf {stored_total}). Ik corrigeer de opgeslagen telling nu."
         )
+        # Zelf-herstellend: schrijf de juiste stats terug naar Firestore.
+        _persist_stats_if_needed(player_id, player_doc, live_stats)
     _render_metrics(total, wins, losses, t_count, ic_count)
     tab_overview, tab_explorer, tab_partners, tab_opponents, tab_klassement, tab_debug = st.tabs([
         "Overzicht", "Match Explorer", "Partners", "Tegenstanders", "📈 Klassement", "Debug"
@@ -851,10 +859,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             st.info("Geen matches beschikbaar.")
         else:
             st.markdown('<div class="section-header">Per periode</div>', unsafe_allow_html=True)
-            # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: tel ALLE matchen per
-            # periode via size i.p.v. count("won") (count slaat None over,
-            # waardoor interclubmatchen zonder ingevuld resultaat uit het
-            # periode-overzicht verdwenen).
             periods = df.groupby("period").agg(
                 matches=("period", "size"),
                 wins=("won", lambda x: x.eq(True).sum()),
@@ -880,26 +884,40 @@ def _render_player_dashboard(player_id: str, profile: dict):
             if sel_rows:
                 sel_period = periods.iloc[sel_rows[0]]["period"]
                 st.markdown(f"**Matches in periode '{sel_period}':**")
-                period_cols = [
-                    "datum", "type", "reeks",
-                    "partner", "partner_id",
-                    "opp1", "opp1_id", "opp1_user_id",
-                    "opp2", "opp2_id", "opp2_user_id",
+                # Propere, volledig-brede tabel (datum recentste-eerst).
+                period_view_cols = [
+                    "datum", "type", "reeks", "ronde",
+                    "partner", "opp1", "opp1_ranking", "opp2", "opp2_ranking",
                     "score", "result",
                 ]
-                period_cols = [c for c in period_cols if c in df.columns]
-                period_matches = df[df["period"] == sel_period][period_cols].rename(columns={
-                    "datum": "Datum", "type": "Type", "reeks": "Reeks",
-                    "partner": "Partner", "partner_id": "Partner ID",
-                    "opp1": "Tegenstander 1", "opp1_id": "Tegenstander 1 ID", "opp1_user_id": "Tegenstander 1 ID",
-                    "opp2": "Tegenstander 2", "opp2_id": "Tegenstander 2 ID", "opp2_user_id": "Tegenstander 2 ID",
-                    "score": "Score", "result": "W/V",
-                })
-                pia.render_matches_period_table(
-                    period_matches,
-                    profiles=_get_all_profiles(),
-                    key_prefix=f"period_matches_{player_id}_{sel_rows[0]}",
+                period_view_cols = [c for c in period_view_cols if c in df.columns]
+                pdf = df[df["period"] == sel_period].copy()
+                pdf["_sort_date"] = pdf["datum"].apply(lambda d: _parse_match_date(d) or (0, 0, 0))
+                pdf = pdf.sort_values("_sort_date", ascending=False)
+                pdf["result_display"] = pdf.apply(
+                    lambda r: r["result"] or ("W" if r["won"] is True else ("V" if r["won"] is False else "-")),
+                    axis=1,
                 )
+                view_cols = [c for c in period_view_cols if c != "result"] + ["result_display"]
+                pdf_display = pdf[view_cols].rename(columns={
+                    "datum": "Datum", "type": "Type", "reeks": "Reeks", "ronde": "Ronde",
+                    "partner": "Partner", "opp1": "Tegenstander 1", "opp1_ranking": "R1",
+                    "opp2": "Tegenstander 2", "opp2_ranking": "R2",
+                    "score": "Score", "result_display": "W/V",
+                })
+                st.dataframe(
+                    pdf_display, use_container_width=True, hide_index=True,
+                    height=min(500, 40 + len(pdf_display) * 36),
+                    column_config={
+                        "Datum": st.column_config.TextColumn("Datum", width="small"),
+                        "Type": st.column_config.TextColumn("Type", width="small"),
+                        "R1": st.column_config.TextColumn("R1", width="small"),
+                        "R2": st.column_config.TextColumn("R2", width="small"),
+                        "W/V": st.column_config.TextColumn("W/V", width="small"),
+                        "Score": st.column_config.TextColumn("Score", width="small"),
+                    },
+                )
+                st.caption(f"{len(pdf_display)} match(en) in deze periode.")
             st.markdown('<div class="section-header">Tornooi vs Interclub</div>', unsafe_allow_html=True)
             tc1, tc2 = st.columns(2)
             for col, label, filter_val in [(tc1, "Tornooi", "tornooi"), (tc2, "Interclub", "interclub")]:
