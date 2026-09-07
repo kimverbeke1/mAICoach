@@ -12,16 +12,28 @@
 #   Naam:   FIREBASE_SERVICE_ACCOUNT_JSON
 #   Waarde: volledige inhoud van je (geroteerde) firebase-key.json bestand.
 #
-# FIX 2026-09-06 — "Mijn profiel ververst alle spelers i.p.v. enkel mezelf":
-# cloud_helpers.py stuurt bij elke trigger al langer "inputs": {player_ids,
-# mode} mee naar de GitHub API, maar dit workflow-bestand declareerde nog
-# geen workflow_dispatch "inputs:", waardoor die waarden nooit ontvangen
-# (en dus ook nooit doorgegeven aan ci_scrape_all.py) werden -- met als
-# gevolg dat élke trigger (ook vanaf "Mijn profiel" voor 1 specifieke
-# speler) gewoon ALLE spelers ververste, want ci_scrape_all.py valt terug
-# op "alle spelers" zodra de PLAYER_IDS env var leeg binnenkomt.
-# Nu correct gekoppeld: inputs.player_ids / inputs.mode -> env PLAYER_IDS /
-# MODE -> ci_scrape_all.py.
+# FIX 2026-09-07 — "install-stappen draaien elke run helemaal opnieuw":
+# Elke workflow-run start op een compleet lege GitHub-runner (dat is
+# normaal en onvermijdelijk), maar zonder caching werd bij ELKE run
+# opnieuw (a) alle pip-packages gedownload/geïnstalleerd EN (b) de volledige
+# Playwright Chromium-browser (~150-300MB) gedownload -- veruit de traagste
+# stap, en volledig herhaalbaar/onnodig als er sinds de vorige run niets
+# aan de dependencies veranderd is.
+# Toegevoegd:
+#   1. actions/cache voor de pip-downloadcache (naast de reeds bestaande
+#      lichte 'cache: pip' optie van setup-python, die vooral de
+#      package-index cachet, niet de effectief gedownloade wheels).
+#   2. actions/cache voor de Playwright-browserbinaries (~/.cache/ms-playwright),
+#      met een cache-key gebaseerd op de Playwright-versie EN de OS-naam
+#      (browserbinaries zijn platform-specifiek). Bij een cache-hit wordt
+#      'playwright install --with-deps chromium' overgeslagen; bij een
+#      cache-miss (bv. na een Playwright-versie-upgrade) draait die stap
+#      gewoon zoals voorheen en wordt het resultaat voor de VOLGENDE run
+#      opnieuw gecached.
+# Verwacht effect: een "warme" run (cache-hit op beide) zou een groot deel
+# van de installatietijd moeten overslaan; een "koude" run (eerste keer, of
+# na een dependency-wijziging) duurt ongeveer even lang als voorheen, maar
+# bouwt daarbij de cache op voor alle volgende runs.
 name: Scrape Padel Data
 on:
   schedule:
@@ -58,6 +70,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            PadelAnalysis/scraper/requirements-scraper.txt
 
       - name: Install Python dependencies (algemeen)
         run: |
@@ -67,8 +82,44 @@ jobs:
       - name: Install Playwright (Python package, enkel voor deze workflow)
         run: pip install -r requirements-scraper.txt
 
+      # Playwright-versie uitlezen zodat de cache-key automatisch verandert
+      # (en dus automatisch een nieuwe download forceert) zodra je ooit de
+      # Playwright-versie in requirements-scraper.txt optrekt -- voorkomt
+      # dat een verouderde/incompatibele gecachete browserversie gebruikt
+      # wordt na een dependency-upgrade.
+      - name: Bepaal Playwright-versie (voor cache-key)
+        id: playwright-version
+        run: |
+          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright-browserbinaries
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Playwright browsers (Chromium binary + OS-libraries)
+        # Bij een cache-hit worden de browserbinaries zelf overgeslagen via
+        # --dry-run false hieronder is NIET van toepassing -- we gebruiken
+        # in plaats daarvan de cache-hit output om de hele stap over te
+        # slaan wanneer de binaries al aanwezig zijn. --with-deps installeert
+        # ook OS-niveau libraries (apt) die niet in de gebruikersspecifieke
+        # cache-map zitten; die zijn op een verse ubuntu-latest runner sowieso
+        # telkens opnieuw nodig (worden door apt zelf al efficiënt afgehandeld
+        # en zijn niet de dominante tijdskost hier -- de browserbinary-download
+        # zelf is dat wel).
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
         run: python -m playwright install --with-deps chromium
+
+      - name: Installeer enkel ontbrekende OS-libraries (bij cache-hit)
+        # Bij een cache-hit slaan we de VOLLEDIGE install over (incl. de
+        # browserbinary-download), maar de OS-niveau libraries (apt-deps)
+        # staan niet in de gecachete map en moeten op een verse runner
+        # alsnog aanwezig zijn. Dit installeert enkel die system-deps,
+        # zonder de browserbinary opnieuw te downloaden.
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
 
       - name: Run padel scraper
         env:
