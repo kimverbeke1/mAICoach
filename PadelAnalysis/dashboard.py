@@ -616,33 +616,12 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
                         st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
                         st.rerun()
     return bundle, opp
-def page_lineup_lab():
-    st.header("🧩 Opstelling-analyse")
-    profiles = _get_all_profiles()
-    if not profiles:
-        st.info("Nog geen spelers in de database. Voeg eerst spelers toe via '➕ Speler toevoegen'.")
-        return
-    name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
-    profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
-    settings = fb.get_app_settings()
-    home_id = settings.get("home_player_id")
-    home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
-    labels = list(profile_map.keys())
-    default_idx = labels.index(home_label) if home_label in labels else 0
-    sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx)
-    sel_profile = profile_map[sel_label]
-    sel_player_id = sel_profile.get("player_id")
-    lq.render_lineup_quick_results(
-        sel_player_id=str(sel_player_id),
-        sel_label=sel_label,
-        profiles=profiles,
-        name_lookup_global=name_lookup_global,
-        display_name_fn=_display_name,
-    )
-    scout_result = _render_volgende_match(str(sel_player_id), sel_label)
-    if not scout_result:
-        return
-    bundle, opp = scout_result
+# PADEL_ANALYSIS_LINEUP_ORDER_FIX_2026-09-07
+# Scenario-/opstellingsblok als aparte functie zodat 'st.stop()' vervangen
+# kon worden door 'return': zo halteert een onvolledige scenario-invoer enkel
+# DIT blok, niet de hele pagina -- de snelle analyse en retrospectieve eronder
+# blijven dus altijd zichtbaar. Bevat de 'spelers meenemen'-selectie + gegevens.
+def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global):
     st.divider()
     st.markdown('<div class="section-header">🧮 Opstelling-scenario\'s</div>', unsafe_allow_html=True)
     st.caption(
@@ -660,7 +639,7 @@ def page_lineup_lab():
     )
     if len(available_labels) < 2:
         st.info("Selecteer minstens 2 spelers om een opstelling te kunnen berekenen.")
-        st.stop()
+        return
     available_ids = [own_label_to_id[lbl] for lbl in available_labels]
     suggested_boards = max((len(fx.get("boards", [])) for fx in bundle.get("previous_fixtures", [])), default=6) or 6
     c1, c2 = st.columns(2)
@@ -684,10 +663,10 @@ def page_lineup_lab():
             f"Het totaal aantal speler-plaatsen ({total_slots}) moet gelijk zijn aan 2× het aantal "
             f"wedstrijden ({2*total_boards}). Pas de aantallen per speler aan."
         )
-        st.stop()
+        return
     if not bundle.get("previous_fixtures"):
         st.info("Geen scenario's beschikbaar (geen eerdere, al gespeelde wedstrijd van deze tegenstander gevonden).")
-        st.stop()
+        return
     docs_for_synergy = ll.get_docs_for_players(available_ids)
     own_synergy = ll.compute_pairwise_synergy(docs_for_synergy, available_ids)
     synergy_fn = ll.make_pair_score_fn(own_synergy, docs_for_synergy)
@@ -730,7 +709,40 @@ def page_lineup_lab():
                     with bcol2:
                         if st.button("👁️ Bekijk", key=f"jump_{s_idx}_{p1}_{p2}"):
                             _go_to_player(p1)
+
+
+def page_lineup_lab():
+    st.header("🧩 Opstelling-analyse")
+    profiles = _get_all_profiles()
+    if not profiles:
+        st.info("Nog geen spelers in de database. Voeg eerst spelers toe via '➕ Speler toevoegen'.")
+        return
+    name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
+    profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
+    settings = fb.get_app_settings()
+    home_id = settings.get("home_player_id")
+    home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
+    labels = list(profile_map.keys())
+    default_idx = labels.index(home_label) if home_label in labels else 0
+    sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx)
+    sel_profile = profile_map[sel_label]
+    sel_player_id = sel_profile.get("player_id")
+    # PADEL_ANALYSIS_LINEUP_ORDER_FIX_2026-09-07: volgende match BOVENAAN (het
+    # interessantste), met daar direct onder de 'spelers meenemen'-selectie +
+    # scenariogegevens. De algemene snelle analyse (partner/tegenstander) staat
+    # nu daaronder, gevolgd door de retrospectieve analyse.
+    scout_result = _render_volgende_match(str(sel_player_id), sel_label)
+    if scout_result:
+        bundle, opp = scout_result
+        _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global)
     st.divider()
+    lq.render_lineup_quick_results(
+        sel_player_id=str(sel_player_id),
+        sel_label=sel_label,
+        profiles=profiles,
+        name_lookup_global=name_lookup_global,
+        display_name_fn=_display_name,
+    )
     st.markdown('<div class="section-header">🕰️ Retrospectieve analyse</div>', unsafe_allow_html=True)
     name_lookup = name_lookup_global
     profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
