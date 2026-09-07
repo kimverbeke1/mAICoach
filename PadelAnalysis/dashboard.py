@@ -330,6 +330,22 @@ def _save_poule_url(player_id: str, url: str) -> None:
         )
     except Exception:
         pass
+def _get_saved_schedule(player_id: str):
+    """PADEL_ANALYSIS_POULE_SCHEDULE_FROM_FIRESTORE_2026-09-07:
+    Lees het door Playwright (poule_playwright.py, in GitHub Actions)
+    voorgekauwde interclub-poule-schema uit het spelerprofiel. Dit is de sleutel
+    voor Optie B: de gedeployde Streamlit-app heeft GEEN browser en kan de
+    clubdashboard-SPA niet zelf renderen (WAF/JS). CI doet dat wél en schrijft
+    de fixtures weg als 'interclub_schedule'. Hier lezen we ze gewoon uit.
+    Returns (fixtures:list, scraped_at:str|None)."""
+    try:
+        prof = fb.get_player_profile(player_id) or {}
+    except Exception:
+        prof = {}
+    fixtures = prof.get("interclub_schedule") or []
+    if not isinstance(fixtures, list):
+        fixtures = []
+    return fixtures, prof.get("interclub_schedule_scraped_at")
 # ─────────────────────────────────────────────
 # Navigation
 # ─────────────────────────────────────────────
@@ -458,91 +474,11 @@ def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
-def _render_volgende_match(sel_player_id: str, sel_label: str):
-    st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
-    override_url_key = f"manual_reeks_url_{sel_player_id}"
+def _resolve_and_render_next(sel_player_id, sel_label, fixtures, own_interclub_matches, reeks_url):
+    """PADEL_ANALYSIS_NEXT_MATCH_SHARED_2026-09-07: gedeelde afhandeling zodra we
+    fixtures hebben (of ze nu uit Firestore of een live fetch komen): bepaal je
+    ploeg, toon de volgende match en de tegenstander-analyse."""
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
-    load_key = f"vm_loaded_{sel_player_id}"
-    sel_doc = fb.get_player(sel_player_id)
-    # Alle eigen interclubmatchen (voor teamidentificatie op datum). We eisen
-    # hier GEEN reeks_url meer -- die zit vaak niet op interclubrecords.
-    own_interclub_matches = [
-        m for m in (sel_doc or {}).get("matches", [])
-        if m.get("match_type") == "interclub"
-    ]
-    # PADEL_ANALYSIS_POULE_URL_RESOLVE_2026-09-07:
-    # Poule/tabel-URL-resolutie in volgorde van betrouwbaarheid:
-    #   1) handmatige override deze sessie
-    #   2) permanent bewaarde URL in het profiel (blijft na reboot!)
-    #   3) auto: reeks_url van de recentste interclubmatch DIE er een heeft
-    # Zo hoeft de gebruiker de URL max. één keer te plakken -- daarna onthouden.
-    ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
-    auto_reeks_url = None
-    if ic_with_url:
-        most_recent = sorted(
-            ic_with_url,
-            key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0),
-            reverse=True,
-        )[0]
-        auto_reeks_url = most_recent["reeks_url"]
-    saved_url = _get_saved_poule_url(sel_player_id)
-    reeks_url = st.session_state.get(override_url_key) or saved_url or auto_reeks_url
-    if not reeks_url:
-        st.info(
-            f"Nog geen poule/tabel-link gekend voor {sel_label}. Plak hem hier "
-            "één keer — daarna wordt hij onthouden en hoef je dit nooit meer te doen."
-        )
-        manual_url = st.text_input("Poule/tabel-URL (eenmalig)", key=f"manual_url_input_{sel_player_id}")
-        if manual_url and st.button("Onthouden & laden", key=f"use_manual_url_{sel_player_id}", type="primary"):
-            u = manual_url.strip()
-            st.session_state[override_url_key] = u
-            _save_poule_url(sel_player_id, u)   # permanent bewaren
-            st.session_state[load_key] = True
-            st.rerun()
-        return
-    # PADEL_ANALYSIS_NO_AUTOFETCH_2026-09-07:
-    # BUG (opgelost): de pagina "bleef laden" omdat het poule-schema bij ELKE
-    # render meteen (en soms traag) van TVL werd opgehaald. Nu gebeurt het
-    # ophalen enkel na een expliciete knopdruk -> geen eeuwige spinner meer.
-    if not st.session_state.get(load_key):
-        src = "handmatig ingesteld" if (st.session_state.get(override_url_key) or saved_url) else "automatisch gevonden via je laatste interclubmatch"
-        st.caption(f"Poule/tabel-link is {src}. Klik om je volgende match te laden.")
-        cbtn1, cbtn2 = st.columns([1, 1])
-        with cbtn1:
-            if st.button("📅 Volgende match laden", key=f"load_vm_{sel_player_id}", type="primary"):
-                st.session_state[load_key] = True
-                st.rerun()
-        with cbtn2:
-            if st.button("✏️ Andere poule-link gebruiken", key=f"change_url_{sel_player_id}"):
-                st.session_state.pop(override_url_key, None)
-                _save_poule_url(sel_player_id, "")  # wis bewaarde URL
-                st.session_state.pop(load_key, None)
-                st.rerun()
-        return
-    try:
-        fixtures, fetch_error = _load_poule_fixtures(reeks_url)
-    except Exception as e:
-        fixtures, fetch_error = [], str(e)
-    if fetch_error:
-        st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
-        if st.button("🔁 Opnieuw proberen", key=f"retry_vm_{sel_player_id}"):
-            _load_poule_fixtures.clear()
-            st.rerun()
-        if st.button("✏️ Andere poule-link", key=f"reset_manual_{sel_player_id}"):
-            st.session_state.pop(override_url_key, None)
-            st.session_state.pop(override_team_key, None)
-            _save_poule_url(sel_player_id, "")
-            st.session_state.pop(load_key, None)
-            st.rerun()
-        return
-    if not fixtures:
-        st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
-        if st.button("✏️ Andere poule-link", key=f"reset_manual_nofix_{sel_player_id}"):
-            st.session_state.pop(override_url_key, None)
-            _save_poule_url(sel_player_id, "")
-            st.session_state.pop(load_key, None)
-            st.rerun()
-        return
     home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
     own_ploeg_id = st.session_state.get(override_team_key)
     if not own_ploeg_id and matched_fx:
@@ -569,12 +505,12 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             if pid:
                 st.session_state[override_team_key] = pid
                 st.rerun()
-        return
+        return None
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)
     if not next_match:
         st.success("Geen nog te spelen wedstrijden gevonden voor dit schema.")
-        return
+        return None
     opp = ss.opponent_of(next_match, own_ploeg_id)
     st.markdown(f"**{next_match['date_text']}** — tegen **{opp['name']}** ({next_match['poule_label']})")
     scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
@@ -584,7 +520,7 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
         st.session_state[scout_key] = bundle
     bundle = st.session_state.get(scout_key)
     if not bundle:
-        return
+        return None
     if bundle["note"]:
         st.info(bundle["note"])
         st.caption("Zonder historische tegenstander-data kan ik enkel jouw eigen ploeg-sterkte tonen, niet hen inschatten.")
@@ -616,6 +552,96 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
                         st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
                         st.rerun()
     return bundle, opp
+def _render_volgende_match(sel_player_id: str, sel_label: str):
+    st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
+    override_url_key = f"manual_reeks_url_{sel_player_id}"
+    override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
+    load_key = f"vm_loaded_{sel_player_id}"
+    sel_doc = fb.get_player(sel_player_id)
+    own_interclub_matches = [
+        m for m in (sel_doc or {}).get("matches", [])
+        if m.get("match_type") == "interclub"
+    ]
+    # PADEL_ANALYSIS_POULE_SCHEDULE_FROM_FIRESTORE_2026-09-07 (Optie B):
+    # EERST proberen: het door Playwright (GitHub Actions) voorgekauwde
+    # interclub-poule-schema uit Firestore. De cloud-app heeft geen browser en
+    # kan de clubdashboard-SPA (WAF/JS) niet zelf ophalen; CI schrijft die
+    # fixtures weg als 'interclub_schedule'. Zit dat er? Dan tonen we de
+    # volgende match METEEN — geen URL plakken, geen knop, geen live fetch.
+    saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
+    if saved_fixtures:
+        reeks_url = _get_saved_poule_url(sel_player_id) or ""
+        if sched_at:
+            st.caption(f"Schema automatisch opgehaald (via de dagelijkse update) op {_format_scraped_at(sched_at)}.")
+        res = _resolve_and_render_next(sel_player_id, sel_label, saved_fixtures, own_interclub_matches, reeks_url)
+        return res
+    # FALLBACK (lokaal / geen CI-schema aanwezig): de oude flow met een
+    # (eventueel handmatig geplakte) poule-URL die live wordt opgehaald.
+    ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
+    auto_reeks_url = None
+    if ic_with_url:
+        most_recent = sorted(
+            ic_with_url,
+            key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0),
+            reverse=True,
+        )[0]
+        auto_reeks_url = most_recent["reeks_url"]
+    saved_url = _get_saved_poule_url(sel_player_id)
+    reeks_url = st.session_state.get(override_url_key) or saved_url or auto_reeks_url
+    if not reeks_url:
+        st.info(
+            f"Nog geen poule/tabel-schema gekend voor {sel_label}. Dit wordt normaal "
+            "automatisch opgehaald door de dagelijkse update. Je kan hieronder ook "
+            "eenmalig de poule/tabel-link plakken."
+        )
+        manual_url = st.text_input("Poule/tabel-URL (eenmalig)", key=f"manual_url_input_{sel_player_id}")
+        if manual_url and st.button("Onthouden & laden", key=f"use_manual_url_{sel_player_id}", type="primary"):
+            u = manual_url.strip()
+            st.session_state[override_url_key] = u
+            _save_poule_url(sel_player_id, u)
+            st.session_state[load_key] = True
+            st.rerun()
+        return
+    if not st.session_state.get(load_key):
+        src = "handmatig ingesteld" if (st.session_state.get(override_url_key) or saved_url) else "automatisch gevonden via je laatste interclubmatch"
+        st.caption(f"Poule/tabel-link is {src}. Klik om je volgende match te laden.")
+        cbtn1, cbtn2 = st.columns([1, 1])
+        with cbtn1:
+            if st.button("📅 Volgende match laden", key=f"load_vm_{sel_player_id}", type="primary"):
+                st.session_state[load_key] = True
+                st.rerun()
+        with cbtn2:
+            if st.button("✏️ Andere poule-link gebruiken", key=f"change_url_{sel_player_id}"):
+                st.session_state.pop(override_url_key, None)
+                _save_poule_url(sel_player_id, "")
+                st.session_state.pop(load_key, None)
+                st.rerun()
+        return
+    try:
+        fixtures, fetch_error = _load_poule_fixtures(reeks_url)
+    except Exception as e:
+        fixtures, fetch_error = [], str(e)
+    if fetch_error:
+        st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
+        if st.button("🔁 Opnieuw proberen", key=f"retry_vm_{sel_player_id}"):
+            _load_poule_fixtures.clear()
+            st.rerun()
+        if st.button("✏️ Andere poule-link", key=f"reset_manual_{sel_player_id}"):
+            st.session_state.pop(override_url_key, None)
+            st.session_state.pop(override_team_key, None)
+            _save_poule_url(sel_player_id, "")
+            st.session_state.pop(load_key, None)
+            st.rerun()
+        return
+    if not fixtures:
+        st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
+        if st.button("✏️ Andere poule-link", key=f"reset_manual_nofix_{sel_player_id}"):
+            st.session_state.pop(override_url_key, None)
+            _save_poule_url(sel_player_id, "")
+            st.session_state.pop(load_key, None)
+            st.rerun()
+        return
+    return _resolve_and_render_next(sel_player_id, sel_label, fixtures, own_interclub_matches, reeks_url)
 # PADEL_ANALYSIS_LINEUP_ORDER_FIX_2026-09-07
 # Scenario-/opstellingsblok als aparte functie zodat 'st.stop()' vervangen
 # kon worden door 'return': zo halteert een onvolledige scenario-invoer enkel
@@ -709,8 +735,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global):
                     with bcol2:
                         if st.button("👁️ Bekijk", key=f"jump_{s_idx}_{p1}_{p2}"):
                             _go_to_player(p1)
-
-
 def page_lineup_lab():
     st.header("🧩 Opstelling-analyse")
     profiles = _get_all_profiles()
@@ -860,7 +884,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             f"ℹ️ Live telling uit de matchlijst: {total} matchen "
             f"(opgeslagen stats gaf {stored_total}). Ik corrigeer de opgeslagen telling nu."
         )
-        # Zelf-herstellend: schrijf de juiste stats terug naar Firestore.
         _persist_stats_if_needed(player_id, player_doc, live_stats)
     _render_metrics(total, wins, losses, t_count, ic_count)
     tab_overview, tab_explorer, tab_partners, tab_opponents, tab_klassement, tab_debug = st.tabs([
