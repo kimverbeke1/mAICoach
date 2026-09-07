@@ -1,17 +1,23 @@
 """
-schedule_scraper.py — haalt het publieke poule/tabel-schema op
-(https://www.tennisenpadelvlaanderen.be/zoek-een-competitie-organisatie?...)
-Dit is GEEN Elit 2.0 / login-vereiste pagina — gewone server-side gerenderde
-HTML, dus een simpele requests.Session volstaat (geen Playwright nodig).
-Belangrijk: deze pagina toont het volledige schema van een afdeling (alle
-poules), telkens met thuis-/bezoekende ploeg (naam + unieke ploegId), datum,
-score en — bij gespeelde matchen — een link naar het uitslagenblad met een
-matchId. Nog te spelen matchen hebben geen score/uitslagenblad-link; dat is
-hoe we "gespeeld" vs "nog te spelen" onderscheiden.
-Nog te verifiëren in de praktijk (kon ik niet zelf testen):
-- Het exacte uiterlijk van de Status-kolom bij een nog niet gespeelde match.
-- Of `poolTableId` in de URL effectief filtert, of dat altijd de hele
-  afdeling (alle poules) wordt teruggegeven zoals in mijn testvoorbeeld.
+schedule_scraper.py — haalt het poule/tabel-schema op en parseert de fixtures.
+
+Oorspronkelijk gebouwd voor de publieke 'zoek-een-competitie-organisatie'-
+pagina, maar de parser (parse_poule_schedule) werkt op de RUWE/gerenderde HTML
+en wordt nu ook gevoed door poule_playwright.py, dat de clubdashboard-SPA
+(/nl/clubdashboard/interclub-poule-tabel?...) via Playwright rendert.
+
+De pagina toont per rij thuis-/bezoekende ploeg (naam + unieke ploegId), datum,
+score en een uitslagenblad-link (matchId).
+
+PADEL_ANALYSIS_PLAYED_BY_SCORE_FIX_2026-09-07 (CRUCIAAL voor "Volgende match"):
+BUG (opgelost): 'played' werd bepaald als bool(match_id). Op de publieke pagina
+klopte dat (nog te spelen matchen hadden geen matchId), MAAR op de
+clubdashboard-poule-tabel heeft ELKE rij — ook nog te spelen matchen — een
+matchId/uitslagenblad-link. Daardoor werd elke fixture als 'gespeeld'
+gemarkeerd en vond get_next_match() NOOIT een volgende match.
+Fix: bepaal 'played' op basis van de SCORE. Een rij met een ingevulde
+ontmoetingsscore is gespeeld; een rij met lege score is nog te spelen. Dit
+klopt voor beide paginatypes (publiek én clubdashboard).
 """
 import re
 import time
@@ -30,7 +36,7 @@ def _param_from_url(href: Optional[str], param: str) -> Optional[str]:
 def _clean(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 def fetch_poule_schedule_html(url: str, session: Optional[requests.Session] = None, delay: float = 1.0) -> str:
-    """Fetch the raw HTML of a 'zoek-een-competitie-organisatie' poule page."""
+    """Fetch the raw HTML of a poule page (publieke variant, requests-only)."""
     session = session or requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     if delay > 0:
@@ -43,12 +49,9 @@ def parse_poule_schedule(html: str) -> list[dict]:
     """
     Parse every poule table on the page into a flat list of fixtures:
     {poule_label, date_text, home_name, home_ploeg_id, away_name,
-     away_ploeg_id, score, spelgroep_id, match_id, played}
-    Robuust opgezet (zoals de bestaande scrape_uitslagenblad-functie): we
-    zoeken op linkpatronen (ploegId=, matchId=) en tekstpatronen in de rij,
-    in plaats van te steunen op een vaste kolomvolgorde — die kon ik niet
-    rechtstreeks verifiëren in de ruwe HTML (mijn fetch-tool toont enkel een
-    al omgezette/leesbare versie van de pagina).
+     away_ploeg_id, score, spelgroep_id, match_id, uitslagenblad_url, played}
+    Robuust: we zoeken op linkpatronen (ploegId=, matchId=) en tekstpatronen in
+    de rij, in plaats van te steunen op een vaste kolomvolgorde.
     """
     soup = BeautifulSoup(html, "html.parser")
     fixtures = []
@@ -75,19 +78,22 @@ def parse_poule_schedule(html: str) -> list[dict]:
             match_link = next((a for a in all_links if _param_from_url(a.get("href"), "matchId")), None)
             match_id = _param_from_url(match_link.get("href"), "matchId") if match_link else None
             uitslagenblad_url = match_link.get("href") if match_link else None
-            played = bool(match_id)
             date_text = ""
             m_date = re.search(r"\b\d{1,2}/\d{1,2}/\d{4}(\s+\d{1,2}:\d{2})?\b", row_text)
             if m_date:
                 date_text = m_date.group(0)
-            score = None
-            if played:
-                # tekst die overblijft na het weghalen van datum + ploegnamen geeft de beste kans op de score
-                remainder = row_text.replace(home_name, "").replace(away_name, "")
-                if date_text:
-                    remainder = remainder.replace(date_text, "")
-                score_candidates = re.findall(r"\d+[-/]\d+(?:\s*/\s*\d+[-/]\d+)*", remainder)
-                score = score_candidates[0] if score_candidates else None
+            # PADEL_ANALYSIS_PLAYED_BY_SCORE_FIX_2026-09-07: bepaal de score
+            # ALTIJD (niet enkel 'if played'), en leid 'played' vervolgens af
+            # uit de aanwezigheid van een score. Zo werkt de detectie zowel op
+            # de publieke pagina (nog te spelen = geen matchId én geen score)
+            # als op de clubdashboard-poule-tabel (nog te spelen = wél matchId,
+            # maar GEEN score).
+            remainder = row_text.replace(home_name, "").replace(away_name, "")
+            if date_text:
+                remainder = remainder.replace(date_text, "")
+            score_candidates = re.findall(r"\d+[-/]\d+(?:\s*/\s*\d+[-/]\d+)*", remainder)
+            score = score_candidates[0] if score_candidates else None
+            played = bool(score)
             fixtures.append({
                 "poule_label": poule_label,
                 "date_text": date_text,
@@ -110,7 +116,7 @@ def _find_preceding_label(table) -> str:
         if el is None:
             break
         text = _clean(el.get_text())
-        if 0 < len(text) <= 40 and re.search(r"poule|eindronde|klassement", text, re.I):
+        if 0 < len(text) <= 40 and re.search(r"poule|eindronde|klassement|finale|ronde", text, re.I):
             return text
     return "Poule ?"
 _MONTHS_NL = {
@@ -127,27 +133,8 @@ def _parse_date_text(date_text: str):
 def identify_own_ploeg_id(fixtures: list[dict], own_known_matches: list[dict]):
     """
     Bepaalt welke ploegId 'wij' zijn door de poule-fixtures te matchen met de
-    interclubmatchen die we al van onszelf kennen.
-
-    PADEL_ANALYSIS_IDENTIFY_PLOEG_DATE_FIX_2026-09-07 (CRUCIAAL voor "Volgende
-    match"):
-    BUG (opgelost): de vorige aanpak matchte op (datum + SCORE-prefix). Dat
-    kon per definitie bijna nooit werken, want:
-      - onze eigen opgeslagen interclub-'score' is een PER-BORD padelscore
-        (bv. "6-3 6-4"), terwijl de poule-pagina een ONTMOETINGS-score toont
-        (het teamtotaal, bv. "3-2"). Die twee zijn niet gelijk -> geen match
-        -> we konden 'onze' ploeg nooit automatisch identificeren -> de app
-        viel telkens terug op de handmatige teamkeuze en toonde geen
-        volgende match.
-    Fix: match op DATUM. Onze ploeg speelt op een gegeven interclubdatum
-    precies één ontmoeting; de gespeelde fixture op diezelfde datum IS dus
-    onze ontmoeting. We geven (home_ploeg_id, away_ploeg_id, fixture) terug;
-    de caller (dashboard) bepaalt daarna via de gekende tegenstander-namen aan
-    welke kant (thuis/weg) wij stonden. De score wordt enkel nog als extra
-    (optionele) bevestiging gebruikt, niet meer als vereiste.
-
-    own_known_matches: lijst van match-dicts uit jouw eigen Firestore-doc
-    (match_type == 'interclub'), met minstens 'match_date'.
+    interclubmatchen die we al van onszelf kennen, op DATUM (onze ploeg speelt
+    op een gegeven interclubdatum precies één ontmoeting).
     Returns: (home_ploeg_id, away_ploeg_id, fixture) of (None, None, None).
     """
     own_dates = set()
@@ -161,15 +148,16 @@ def identify_own_ploeg_id(fixtures: list[dict], own_known_matches: list[dict]):
         return None, None, None
     candidates = []
     for f in fixtures:
-        if not f["played"]:
+        # Enkel al gespeelde fixtures kunnen matchen met een reeds gekende
+        # (gescrapete) eigen match; die hebben immers een score.
+        if not f.get("played"):
             continue
         d = _parse_date_text(f["date_text"])
         if d and d in own_dates:
             candidates.append((d, f))
     if not candidates:
         return None, None, None
-    # Bij meerdere kandidaten (bv. datumcollisie tussen poules op de pagina):
-    # neem de meest recente gespeelde ontmoeting als beste identiteits-anker.
+    # Bij meerdere kandidaten: neem de meest recente gespeelde ontmoeting.
     candidates.sort(key=lambda t: t[0], reverse=True)
     f = candidates[0][1]
     return f["home_ploeg_id"], f["away_ploeg_id"], f
