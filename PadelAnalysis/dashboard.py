@@ -1,6 +1,5 @@
 """
 dashboard.py  —  PadelAnalysis v2 Streamlit dashboard
-
 Schema v2: matches zitten in doc.matches (niet doc.raw_data.matches)
 Stats: total_matches, tournament_matches, interclub_matches, wins, losses, winrate
 """
@@ -8,17 +7,14 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
-
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-
 # Path setup
 _ROOT = Path(__file__).parent
 for _p in [str(_ROOT), str(_ROOT / "scraper")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
 import firebase_service as fb
 import lineup_lab as ll
 import schedule_scraper as ss
@@ -27,12 +23,10 @@ import lineup_quick as lq
 import player_inline_actions as pia
 import opponent_dossier as od
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
-
 try:
     st.set_page_config(page_title="Padel Analysis", page_icon="🎾", layout="wide", initial_sidebar_state="collapsed")
 except Exception:
     pass
-
 # ─────────────────────────────────────────────
 # Custom CSS
 # ─────────────────────────────────────────────
@@ -47,29 +41,21 @@ st.markdown("""
 }
 [data-testid="stMetricLabel"] { font-size: 0.75rem; color: #666; }
 [data-testid="stMetricValue"] { font-size: 1.5rem; font-weight: 700; }
-
 /* Tab styling */
 .stTabs [data-baseweb="tab"] { font-size: 0.85rem; padding: 6px 14px; }
 .stTabs [aria-selected="true"] { border-bottom: 3px solid #1a73e8 !important; }
-
 /* Win badge */
 .badge-win  { background:#d4edda; color:#155724; border-radius:4px; padding:2px 8px; font-size:0.8rem; font-weight:600; }
 .badge-loss { background:#f8d7da; color:#721c24; border-radius:4px; padding:2px 8px; font-size:0.8rem; font-weight:600; }
-
 /* Section header */
 .section-header { font-size:1.1rem; font-weight:700; margin-bottom:8px; color:#1a1a1a; border-bottom:2px solid #e0e0e0; padding-bottom:4px; }
 </style>
 """, unsafe_allow_html=True)
-
-
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
-
 def _clean(text) -> str:
     return " ".join(str(text or "").split()).strip()
-
-
 # PADEL_ANALYSIS_PERIOD_SORT_FIX
 _SEASON_START_MONTH = {
     "winter": 9,
@@ -81,13 +67,10 @@ _MONTH_RANK = {
     "jan": 1, "feb": 2, "mrt": 3, "maart": 3, "apr": 4, "mei": 5, "jun": 6, "juni": 6,
     "jul": 7, "juli": 7, "aug": 8, "sep": 9, "sept": 9, "okt": 10, "nov": 11, "dec": 12,
 }
-
 _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
 }
-
-
 def _parse_match_date(text) -> Optional[tuple]:
     if not text:
         return None
@@ -105,8 +88,6 @@ def _parse_match_date(text) -> Optional[tuple]:
         if mo:
             return (int(m.group(3)), mo, int(m.group(1)))
     return None
-
-
 def _format_scraped_at(value):
     if not value:
         return "onbekend"
@@ -120,12 +101,8 @@ def _format_scraped_at(value):
         return str(value)
     except Exception:
         return str(value)
-
-
 def _short_period_label(label: str) -> str:
     return str(label or "").replace("Resultaten van ", "").strip()
-
-
 def _period_sort_key(label: str):
     text = str(label or "").lower()
     year_m = re.search(r"(20\d{2})", text)
@@ -134,8 +111,6 @@ def _period_sort_key(label: str):
     if month is None:
         month = next((m for kw, m in _MONTH_RANK.items() if kw in text), 6)
     return (year, month)
-
-
 def _display_name(profile_or_id, name_lookup: Optional[dict] = None) -> str:
     if isinstance(profile_or_id, dict):
         return profile_or_id.get("display_name") or f"Onbekende speler ({profile_or_id.get('player_id','?')})"
@@ -145,17 +120,12 @@ def _display_name(profile_or_id, name_lookup: Optional[dict] = None) -> str:
         if name:
             return name
     return f"Onbekende speler ({pid})"
-
-
 def _go_to_player(player_id: str):
     st.session_state["jump_to_player_id"] = str(player_id)
     st.session_state["page"] = "🔍 Spelers"
     st.rerun()
-
-
 def _scrape_progress_widget(label_prefix: str = ""):
     bar = st.progress(0.0, text=f"{label_prefix}Starten...")
-
     def _cb(i, total, label, status):
         if total > 0:
             frac = min(1.0, i / total)
@@ -168,10 +138,7 @@ def _scrape_progress_widget(label_prefix: str = ""):
         }.get(status, status)
         suffix = f" ({i}/{total})" if total else ""
         bar.progress(frac, text=f"{label_prefix}{status_txt}{suffix} — {label[:50]}")
-
     return bar, _cb
-
-
 def _matches_to_df(matches: list) -> pd.DataFrame:
     if not matches:
         return pd.DataFrame()
@@ -203,15 +170,36 @@ def _matches_to_df(matches: list) -> pd.DataFrame:
             "uitslagenblad":   m.get("uitslagenblad_url") or "",
         })
     return pd.DataFrame(rows)
-
-
+# PADEL_ANALYSIS_STATS_FROM_MATCHES_FIX_2026-09-07
+# BUG (opgelost): "2 interclubmatches van 05/09 tonen wel in Match Explorer,
+# maar total blijft 52 en het periode-overzicht mist ze".
+# Root cause (dashboard-zijde): _render_player_dashboard toonde de bovenste
+# metrics rechtstreeks uit het OPGESLAGEN stats-dict (doc.stats), terwijl
+# Match Explorer/de tabs de EFFECTIEVE matchlijst (doc.matches) gebruiken.
+# Als stats om welke reden dan ook niet meesteeg met matches (bv. een oudere
+# merge die de matchlijst wel maar stats niet correct bijwerkte, of een
+# document geschreven door een oudere codeversie), dan liep de totaaltelling
+# achter op wat er werkelijk in de lijst zit.
+# Fix: bereken de metrics ALTIJD uit de actuele matchlijst (single source of
+# truth = doc.matches). Zo kan de bovenste teller nooit meer afwijken van
+# Match Explorer/Overzicht.
+def _calc_stats_from_matches(matches: list) -> dict:
+    matches = matches or []
+    won = sum(1 for m in matches if m.get("won") is True)
+    lost = sum(1 for m in matches if m.get("won") is False)
+    total = len(matches)
+    return {
+        "total_matches": total,
+        "wins": won,
+        "losses": lost,
+        "tournament_matches": sum(1 for m in matches if m.get("match_type") == "tornooi"),
+        "interclub_matches": sum(1 for m in matches if m.get("match_type") == "interclub"),
+    }
 def _winrate_str(wins, losses) -> str:
     known = wins + losses
     if known == 0:
         return "–"
     return f"{round(wins / known * 100, 1)}%"
-
-
 def _render_metrics(total, wins, losses, t_matches, ic_matches):
     cols = st.columns(5)
     cols[0].metric("Totaal matches", total)
@@ -219,16 +207,18 @@ def _render_metrics(total, wins, losses, t_matches, ic_matches):
     cols[2].metric("Verlies", losses)
     cols[3].metric("Winrate", _winrate_str(wins, losses))
     cols[4].metric("Tornooi / Interclub", f"{t_matches} / {ic_matches}")
-
-
 def _summarize_partner(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "partner" not in df.columns:
         return pd.DataFrame()
     sub = df[df["partner"].str.strip().ne("")].copy()
     if sub.empty:
         return pd.DataFrame()
+    # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: tel ALLE matchen (ook die met
+    # onbekend resultaat, won=None) i.p.v. count op "won" -- pandas' count()
+    # slaat NaN/None over, waardoor interclubmatchen zonder ingevuld
+    # winst/verlies-resultaat uit de telling vielen.
     g = sub.groupby("partner").agg(
-        matches=("won", "count"),
+        matches=("partner", "size"),
         wins=("won", lambda x: x.eq(True).sum()),
         losses=("won", lambda x: x.eq(False).sum()),
     ).reset_index()
@@ -237,8 +227,6 @@ def _summarize_partner(df: pd.DataFrame) -> pd.DataFrame:
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
     result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
     return result
-
-
 def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -251,8 +239,9 @@ def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     tmp = pd.DataFrame(rows)
+    # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: zie _summarize_partner.
     g = tmp.groupby("tegenstander").agg(
-        matches=("won", "count"),
+        matches=("tegenstander", "size"),
         wins=("won", lambda x: x.eq(True).sum()),
         losses=("won", lambda x: x.eq(False).sum()),
     ).reset_index()
@@ -261,8 +250,6 @@ def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
     result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
     return result
-
-
 def _render_table(df: pd.DataFrame, name_col: str, height=400):
     if df.empty:
         st.info("Geen data beschikbaar.")
@@ -300,12 +287,9 @@ def _render_table(df: pd.DataFrame, name_col: str, height=400):
             "winrate": st.column_config.TextColumn("WR", width="small"),
         },
     )
-
-
 # ─────────────────────────────────────────────
 # State helpers
 # ─────────────────────────────────────────────
-
 @st.cache_data(ttl=600, show_spinner="Wedstrijdschema ophalen...")
 def _load_poule_fixtures(reeks_url: str):
     try:
@@ -314,46 +298,34 @@ def _load_poule_fixtures(reeks_url: str):
         return fixtures, None
     except Exception as e:
         return [], str(e)
-
-
 def _clean_name(text: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
-
-
 def _get_all_profiles() -> list:
     try:
         docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()
         return [d.to_dict() for d in docs]
     except Exception:
         return []
-
-
 # ─────────────────────────────────────────────
 # Navigation
 # ─────────────────────────────────────────────
 PAGES = ["👤 Mijn profiel", "🔍 Spelers", "➕ Speler toevoegen", "🧩 Opstelling-analyse"]
 if "page" not in st.session_state:
     st.session_state["page"] = PAGES[0]
-
 nav_col = st.columns(len(PAGES))
 for i, p in enumerate(PAGES):
     if nav_col[i].button(p, use_container_width=True,
                           type="primary" if st.session_state["page"] == p else "secondary"):
         st.session_state["page"] = p
         st.rerun()
-
 st.divider()
 page = st.session_state["page"]
-
-
 # ═══════════════════════════════════════════════
 # PAGE: Speler toevoegen
 # ═══════════════════════════════════════════════
-
 def page_add_player():
     st.header("➕ Speler toevoegen")
     st.caption("Zoek een speler op de TVL-website en voeg hem/haar toe aan de database.")
-
     if not is_scraping_available():
         st.info("Nieuwe spelers zoeken kan enkel lokaal. Alle bestaande spelers verversen kan wel hieronder.")
         # PADEL_ANALYSIS_ALL_PLAYERS_LABEL: hier is player_ids bewust LEEG
@@ -363,19 +335,16 @@ def page_add_player():
         # specifieke speler verversen, zie _render_refresh_controls).
         render_cloud_scrape_trigger(key_prefix="add_player_page", mode="missing", label="🔄 Alle spelers verversen")
         return
-
     with st.form("search_form"):
         c1, c2, c3 = st.columns([2, 2, 2])
         first = c1.text_input("Voornaam")
         last  = c2.text_input("Achternaam")
         club  = c3.text_input("Club (optioneel)")
         submitted = st.form_submit_button("🔍 Zoek op TVL-website", use_container_width=True, type="primary")
-
     if submitted:
         if not _clean(first) and not _clean(last):
             st.warning("Geef minstens een voornaam of achternaam in.")
             return
-
         with st.spinner("Zoeken op tennisenpadelvlaanderen.be..."):
             try:
                 from player_search import search_players
@@ -389,23 +358,18 @@ def page_add_player():
             except Exception as e:
                 st.error(f"Zoekfout: {e}")
                 return
-
     candidates = st.session_state.get("add_candidates", [])
     if not st.session_state.get("add_search_done"):
         return
-
     if not candidates:
         st.warning("Geen spelers gevonden op TVL.")
         return
-
     st.success(f"{len(candidates)} kandidaat(en) gevonden")
-
     for i, c in enumerate(candidates):
         name = c.get("display_name") or "?"
         club_str = c.get("club") or ""
         pid = c.get("player_id") or "?"
         url = c.get("dashboard_url") or ""
-
         with st.container(border=True):
             col_info, col_btn = st.columns([4, 1])
             with col_info:
@@ -443,7 +407,6 @@ def page_add_player():
                             st.warning(f"Profiel opgeslagen, scrape mislukt: {e}")
                     else:
                         st.success(f"✅ {name} toegevoegd (nog niet gescraped)")
-
     st.divider()
     st.subheader("🔄 Meerdere spelers verversen")
     st.caption("Voor onderhoud: vernieuw in bulk (enkel nieuwe periodes per speler, sequentieel met pauze).")
@@ -454,7 +417,6 @@ def page_add_player():
             for p in sorted(all_profiles, key=lambda x: x.get("display_name") or "")
         }
         bulk_chosen = st.multiselect("Kies spelers", list(bulk_options.keys()), key="bulk_scrape_select")
-
         if bulk_chosen and st.button("▶️ Verversen", type="primary", use_container_width=True):
             overall = st.progress(0.0, text="Starten...")
             for i, label in enumerate(bulk_chosen):
@@ -469,38 +431,28 @@ def page_add_player():
                     st.write(f"  ❌ {label}: {e}")
                 overall.progress((i + 1) / len(bulk_chosen), text=f"({i+1}/{len(bulk_chosen)}) spelers verwerkt")
             st.success("Bulk-verversing voltooid.")
-
-
 # ═══════════════════════════════════════════════
 # PAGE: Opstelling-analyse (Fase 1 — retrospectieve test-tool)
 # ═══════════════════════════════════════════════
-
 @st.cache_data(ttl=600, show_spinner="Ontmoetingen ophalen...")
 def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
-
-
 def _render_volgende_match(sel_player_id: str, sel_label: str):
     st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
-
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
-
     sel_doc = fb.get_player(sel_player_id)
     own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", [])
         if m.get("match_type") == "interclub" and m.get("reeks_url")
     ]
-
     auto_reeks_url = None
     if own_interclub_matches:
         most_recent = sorted(own_interclub_matches, key=lambda m: m.get("match_date") or "", reverse=True)[0]
         auto_reeks_url = most_recent["reeks_url"]
-
     reeks_url = st.session_state.get(override_url_key) or auto_reeks_url
-
     if not reeks_url:
         st.info(
             f"Nog geen wedstrijdschema gekend voor {sel_label} (nog geen interclubmatch gescraped "
@@ -512,12 +464,10 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             st.session_state[override_url_key] = manual_url.strip()
             st.rerun()
         return
-
     try:
         fixtures, fetch_error = _load_poule_fixtures(reeks_url)
     except Exception as e:
         fixtures, fetch_error = [], str(e)
-
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
         if st.session_state.get(override_url_key) and st.button("Reset handmatige link", key=f"reset_manual_{sel_player_id}"):
@@ -525,21 +475,17 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             st.session_state.pop(override_team_key, None)
             st.rerun()
         return
-
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
         return
-
     home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
     own_ploeg_id = st.session_state.get(override_team_key)
-
     if not own_ploeg_id and matched_fx:
         opp_names_known = {_clean_name(m.get("opp1_name")) for m in own_interclub_matches if m.get("opp1_name")}
         if any(_clean_name(matched_fx["away_name"]) in n or n in _clean_name(matched_fx["away_name"]) for n in opp_names_known):
             own_ploeg_id = home_ploeg_id
         else:
             own_ploeg_id = away_ploeg_id
-
     if not own_ploeg_id:
         st.warning(
             "Kon niet automatisch bepalen welke ploeg dit is op de poule-pagina "
@@ -561,7 +507,6 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
                 st.session_state[override_url_key] = reeks_url
                 st.rerun()
         return
-
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)
     if not next_match:
@@ -571,24 +516,19 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
             st.session_state.pop(override_team_key, None)
             st.rerun()
         return
-
     opp = ss.opponent_of(next_match, own_ploeg_id)
     st.markdown(f"**{next_match['date_text']}** — tegen **{opp['name']}** ({next_match['poule_label']})")
-
     scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
     if st.button("🔍 Tegenstander analyseren", key="btn_scout", type="primary"):
         with st.spinner("Vorige wedstrijd(en) van de tegenstander opzoeken..."):
             bundle = osc.scout_opponent(fixtures, opp["name"], opp["ploeg_id"], next_match["date_text"], lookback=1)
         st.session_state[scout_key] = bundle
-
     bundle = st.session_state.get(scout_key)
     if not bundle:
         st.stop()
-
     if bundle["note"]:
         st.info(bundle["note"])
         st.caption("Zonder historische tegenstander-data kan ik enkel jouw eigen ploeg-sterkte tonen, niet hen inschatten.")
-
     unknown = [p for p in bundle["unique_players"] if not fb.get_player_profile(p["user_id"])]
     if bundle["unique_players"]:
         with st.expander(f"👥 Gevonden tegenstander-spelers ({len(bundle['unique_players'])})", expanded=False):
@@ -610,28 +550,21 @@ def _render_volgende_match(sel_player_id: str, sel_label: str):
                 if is_scraping_available():
                     if st.button(f"📥 Scrape {len(unknown)} nieuwe tegenstander(s) (verrijkt toekomstige analyses)", key="btn_scrape_opp"):
                         progress = st.progress(0.0, text="Starten...")
-
                         def _cb(i, total, name):
                             progress.progress(i / total if total else 0, text=f"({i}/{total}) {name} scrapen...")
-
                         result = osc.scrape_new_opponent_players(unknown, lookback_periods=1, delay=1.5, progress_callback=_cb)
                         progress.progress(1.0, text="Klaar.")
                         st.success(f"{len(result['newly_scraped'])} gescraped, {len(result['failed'])} mislukt.")
                         st.rerun()
-
     return bundle, opp
-
-
 def page_lineup_lab():
     st.header("🧩 Opstelling-analyse")
     profiles = _get_all_profiles()
     if not profiles:
         st.info("Nog geen spelers in de database. Voeg eerst spelers toe via '➕ Speler toevoegen'.")
         return
-
     name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
     profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
-
     settings = fb.get_app_settings()
     home_id = settings.get("home_player_id")
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
@@ -640,7 +573,6 @@ def page_lineup_lab():
     sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx)
     sel_profile = profile_map[sel_label]
     sel_player_id = sel_profile.get("player_id")
-
     lq.render_lineup_quick_results(
         sel_player_id=str(sel_player_id),
         sel_label=sel_label,
@@ -648,14 +580,11 @@ def page_lineup_lab():
         name_lookup_global=name_lookup_global,
         display_name_fn=_display_name,
     )
-
     scout_result = _render_volgende_match(str(sel_player_id), sel_label)
     if not scout_result:
         return
     bundle, opp = scout_result
-
     st.divider()
-
     st.markdown('<div class="section-header">🧮 Opstelling-scenario\'s</div>', unsafe_allow_html=True)
     st.caption(
         "Per scenario (een eerdere opstelling van de tegenstander dit seizoen) tonen we apart wat dan "
@@ -743,7 +672,6 @@ def page_lineup_lab():
                         if st.button("👁️ Bekijk", key=f"jump_{s_idx}_{p1}_{p2}"):
                             _go_to_player(p1)
     st.divider()
-
     st.markdown('<div class="section-header">🕰️ Retrospectieve analyse</div>', unsafe_allow_html=True)
     name_lookup = name_lookup_global
     profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
@@ -803,12 +731,9 @@ def page_lineup_lab():
                     for pair in pairs:
                         p1, p2 = tuple(pair)
     st.divider()
-
-
 # ═══════════════════════════════════════════════
 # Gedeelde dashboard-weergave (gebruikt door Mijn profiel én Spelers)
 # ═══════════════════════════════════════════════
-
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
     # PADEL_ANALYSIS_FIX_RC_COLUMNS
     if not is_scraping_available():
@@ -830,9 +755,7 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
             label="🔄 Dit profiel verversen",
         )
         return
-
     rc1, rc2 = st.columns(2)
-
     with rc1:
         if st.button("🔄 Vernieuwen (enkel nieuwe periodes)", type="primary", key=f"{key_prefix}_refresh"):
             bar, cb = _scrape_progress_widget()
@@ -857,8 +780,6 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
-
-
 def _render_player_dashboard(player_id: str, profile: dict):
     """Stats + tabs voor één speler. Herbruikt door 'Mijn profiel' en 'Spelers'."""
     player_doc = fb.get_player(player_id)
@@ -866,26 +787,38 @@ def _render_player_dashboard(player_id: str, profile: dict):
         st.warning("Geen data in Firebase voor deze speler. Gebruik de vernieuw-knop hierboven.")
         return
     matches = player_doc.get("matches", [])
-    stats = player_doc.get("stats", {})
     df = _matches_to_df(matches)
-    wins = int(stats.get("wins", 0))
-    losses = int(stats.get("losses", 0))
-    total = int(stats.get("total_matches", len(df)))
-    t_count = int(stats.get("tournament_matches", 0))
-    ic_count = int(stats.get("interclub_matches", 0))
+    # PADEL_ANALYSIS_STATS_FROM_MATCHES_FIX_2026-09-07: metrics ALTIJD uit de
+    # effectieve matchlijst (single source of truth), niet uit het opgeslagen
+    # stats-dict. Zo blijft de bovenste totaaltelling gegarandeerd gelijk aan
+    # wat Match Explorer/Overzicht tonen.
+    live_stats = _calc_stats_from_matches(matches)
+    wins = live_stats["wins"]
+    losses = live_stats["losses"]
+    total = live_stats["total_matches"]
+    t_count = live_stats["tournament_matches"]
+    ic_count = live_stats["interclub_matches"]
+    stored_total = int((player_doc.get("stats", {}) or {}).get("total_matches", total))
+    if stored_total != total:
+        st.caption(
+            f"ℹ️ Live telling uit de matchlijst: {total} matchen "
+            f"(opgeslagen stats gaf {stored_total}). De weergave hieronder gebruikt de live telling."
+        )
     _render_metrics(total, wins, losses, t_count, ic_count)
-
     tab_overview, tab_explorer, tab_partners, tab_opponents, tab_klassement, tab_debug = st.tabs([
         "Overzicht", "Match Explorer", "Partners", "Tegenstanders", "📈 Klassement", "Debug"
     ])
-
     with tab_overview:
         if df.empty:
             st.info("Geen matches beschikbaar.")
         else:
             st.markdown('<div class="section-header">Per periode</div>', unsafe_allow_html=True)
+            # PADEL_ANALYSIS_MATCH_COUNT_FIX_2026-09-07: tel ALLE matchen per
+            # periode via size i.p.v. count("won") (count slaat None over,
+            # waardoor interclubmatchen zonder ingevuld resultaat uit het
+            # periode-overzicht verdwenen).
             periods = df.groupby("period").agg(
-                matches=("won", "count"),
+                matches=("period", "size"),
                 wins=("won", lambda x: x.eq(True).sum()),
                 losses=("won", lambda x: x.eq(False).sum()),
             ).reset_index()
@@ -936,7 +869,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
                 sub_w = int(sub["won"].eq(True).sum())
                 sub_l = int(sub["won"].eq(False).sum())
                 col.metric(f"{label} ({len(sub)})", _winrate_str(sub_w, sub_l), f"{sub_w}W – {sub_l}L")
-
     with tab_explorer:
         if df.empty:
             st.info("Geen matches.")
@@ -957,7 +889,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
                     reeks_opts = ["Alle"] + sorted(df["reeks"].replace("", pd.NA).dropna().unique().tolist())
                     sel_reeks = st.selectbox("Reeks", reeks_opts, key=f"flt_reeks_{player_id}")
                     score_q = st.text_input("Zoek in score", key=f"flt_score_{player_id}")
-
             fdf = df.copy()
             if sel_type != "Alle":    fdf = fdf[fdf["type"] == sel_type]
             if sel_period != "Alle":  fdf = fdf[fdf["period"] == sel_period]
@@ -965,16 +896,13 @@ def _render_player_dashboard(player_id: str, profile: dict):
             if sel_partner != "Alle": fdf = fdf[fdf["partner"] == sel_partner]
             if sel_reeks != "Alle":   fdf = fdf[fdf["reeks"] == sel_reeks]
             if score_q:               fdf = fdf[fdf["score"].str.contains(score_q, case=False, na=False)]
-
             fdf = fdf.copy()
             fdf["result_display"] = fdf.apply(
                 lambda r: r["result"] or ("W" if r["won"] is True else ("V" if r["won"] is False else "-")),
                 axis=1,
             )
-
             fdf["_sort_date"] = fdf["datum"].apply(lambda d: _parse_match_date(d) or (0, 0, 0))
             fdf = fdf.sort_values("_sort_date", ascending=False)
-
             fw = int(fdf["won"].eq(True).sum())
             fl = int(fdf["won"].eq(False).sum())
             sm1, sm2, sm3, sm4 = st.columns(4)
@@ -982,7 +910,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             sm2.metric("W", fw)
             sm3.metric("L", fl)
             sm4.metric("Winrate", _winrate_str(fw, fl))
-
             show_cols = ["type", "datum", "reeks", "ronde", "partner",
                          "opp1", "opp1_ranking", "opp2", "opp2_ranking", "result_display", "score"]
             show_cols = [c for c in show_cols if c in fdf.columns]
@@ -1053,7 +980,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
                             st.markdown(f"[📋 Poule/tabel ↗](https://www.tennisenpadelvlaanderen.be{row['reeks_url']})")
                         if row.get("uitslagenblad"):
                             st.markdown(f"[📄 Uitslagenblad ↗](https://www.tennisenpadelvlaanderen.be{row['uitslagenblad']})")
-
     with tab_partners:
         st.markdown('<div class="section-header">Partneranalyse</div>', unsafe_allow_html=True)
         partner_df = _summarize_partner(df)
@@ -1062,7 +988,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             if q:
                 partner_df = partner_df[partner_df["partner"].str.contains(q, case=False, na=False)]
         _render_table(partner_df, "partner")
-
     with tab_opponents:
         st.markdown('<div class="section-header">Tegenstandersanalyse</div>', unsafe_allow_html=True)
         opp_df = _summarize_opponents(df)
@@ -1071,7 +996,6 @@ def _render_player_dashboard(player_id: str, profile: dict):
             if q:
                 opp_df = opp_df[opp_df["tegenstander"].str.contains(q, case=False, na=False)]
         _render_table(opp_df, "tegenstander")
-
     with tab_klassement:
         st.markdown('<div class="section-header">📈 Klassementshistoriek</div>', unsafe_allow_html=True)
         profile_doc_for_klassement = fb.get_player_profile(player_id) or {}
@@ -1182,19 +1106,15 @@ def _render_player_dashboard(player_id: str, profile: dict):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
-
     with tab_debug:
         st.json(player_doc, expanded=False)
         st.write(f"**Schema:** {player_doc.get('schema_version','?')}")
         st.write(f"**Periodes gescraped:** {player_doc.get('periods_scraped',[])}")
         st.write(f"**Periodes leeg:** {player_doc.get('periods_empty',[])}")
         st.write(f"**Periodes mislukt:** {player_doc.get('periods_failed',[])}")
-
-
 # ═══════════════════════════════════════════════
 # PAGE: Mijn profiel
 # ═══════════════════════════════════════════════
-
 def page_my_profile():
     st.header("👤 Mijn profiel")
     profiles = _get_all_profiles()
@@ -1234,12 +1154,9 @@ def page_my_profile():
     _render_refresh_controls(home_id, home_profile, key_prefix="myprofile")
     st.divider()
     _render_player_dashboard(home_id, home_profile)
-
-
 # ═══════════════════════════════════════════════
 # PAGE: Spelers (eender wie opzoeken)
 # ═══════════════════════════════════════════════
-
 def page_players():
     st.header("🔍 Spelers")
     profiles = _get_all_profiles()
@@ -1290,12 +1207,9 @@ def page_players():
     _render_refresh_controls(player_id, profile, key_prefix="players")
     st.divider()
     _render_player_dashboard(player_id, profile)
-
-
 # ═══════════════════════════════════════════════
 # RENDER
 # ═══════════════════════════════════════════════
-
 if page == "➕ Speler toevoegen":
     page_add_player()
 elif page == "🧩 Opstelling-analyse":

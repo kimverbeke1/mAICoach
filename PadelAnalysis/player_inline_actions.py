@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 import firebase_service as fb
 import scrape_jobs as sj
-
 # PADEL_ANALYSIS_COMPACT_INLINE_ACTIONS_V2
 def _inject_compact_css() -> None:
     """Reduce whitespace around inline player action tables/popovers."""
@@ -41,28 +40,17 @@ def _inject_compact_css() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-def _small_text(value) -> None:
-    txt = _clean(value) if '_clean' in globals() else str(value or "")
-    st.markdown(f"<small>{txt if txt else '-'}</small>", unsafe_allow_html=True)
-
-def _small_header(value) -> None:
-    st.markdown(f"<small><b>{value}</b></small>", unsafe_allow_html=True)
-
 # -----------------------------------------------------------------------------
 # Normalization / lookup
 # -----------------------------------------------------------------------------
 def _clean(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
-
 def _strip_rank_suffix(value: str) -> str:
     return re.sub(r"\s*\([^)]*\)\s*$", "", _clean(value)).strip()
-
 def _norm(value: Any) -> str:
     value = _strip_rank_suffix(str(value or "")).lower()
     value = re.sub(r"[^a-z0-9à-ÿ]+", " ", value)
     return _clean(value)
-
 def _variants(name: str) -> set[str]:
     base = _norm(name)
     parts = base.split()
@@ -73,13 +61,11 @@ def _variants(name: str) -> set[str]:
         out.add(" ".join(parts[1:] + parts[:1]))
         out.add(" ".join(parts[-1:] + parts[:-1]))
     return {x for x in out if x}
-
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value or default)
     except Exception:
         return default
-
 def _try_call_noargs(names: list[str]) -> Any:
     for name in names:
         fn = getattr(fb, name, None)
@@ -89,7 +75,6 @@ def _try_call_noargs(names: list[str]) -> Any:
             except Exception:
                 continue
     return None
-
 def _load_profiles_from_firebase() -> list[dict]:
     data = _try_call_noargs([
         "get_player_profiles",
@@ -112,7 +97,6 @@ def _load_profiles_from_firebase() -> list[dict]:
     if isinstance(data, list):
         return [p for p in data if isinstance(p, dict)]
     return []
-
 def _candidate_names_from_profile(profile: dict) -> list[str]:
     candidates: list[str] = []
     keys = [
@@ -136,7 +120,6 @@ def _candidate_names_from_profile(profile: dict) -> list[str]:
         add(f"{first} {last}")
         add(f"{last} {first}")
     return candidates
-
 def _profile_name(profile: dict) -> str:
     return _clean(
         profile.get("display_name")
@@ -145,10 +128,8 @@ def _profile_name(profile: dict) -> str:
         or profile.get("full_name")
         or profile.get("player_id")
     )
-
 def _profile_id(profile: dict) -> str:
     return _clean(profile.get("player_id") or profile.get("user_id") or profile.get("id"))
-
 def build_profile_lookup(profiles: Optional[list[dict]] = None) -> dict[str, dict]:
     if not profiles:
         profiles = _load_profiles_from_firebase()
@@ -169,7 +150,6 @@ def build_profile_lookup(profiles: Optional[list[dict]] = None) -> dict[str, dic
             for key in _variants(str(alias)):
                 lookup[key] = p
     return lookup
-
 def resolve_player_id(name: str, lookup: dict[str, dict], explicit_id: Any = None) -> str:
     explicit = _clean(explicit_id)
     if explicit and explicit.lower() not in {"nan", "none", "-", "–", "?"}:
@@ -179,7 +159,6 @@ def resolve_player_id(name: str, lookup: dict[str, dict], explicit_id: Any = Non
         if profile:
             return _profile_id(profile)
     return ""
-
 # -----------------------------------------------------------------------------
 # Scrape / status
 # -----------------------------------------------------------------------------
@@ -203,7 +182,6 @@ def player_status(player_id: str) -> dict:
         "label": "Gescraped" if scraped else "Niet gescraped",
         "scraped_at": doc.get("scraped_at") or doc.get("last_updated") or doc.get("updated_at") or "-",
     }
-
 # -----------------------------------------------------------------------------
 # PADEL_ANALYSIS_SEARCH_BEFORE_SCRAPE_FALLBACK_2026-09-06
 # -----------------------------------------------------------------------------
@@ -213,14 +191,29 @@ def _split_name_guess(full_name: str) -> tuple[str, str]:
     if len(parts) < 2:
         return "", _clean(full_name)
     return parts[-1], " ".join(parts[:-1])
-
 def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None:
+    # PADEL_ANALYSIS_CLOUD_SEARCH_FALLBACK_FIX_2026-09-07
+    # BUG/wens (opgelost): op Streamlit Community Cloud toonde deze fallback
+    # enkel de dode melding "Opzoeken op TVL kan enkel lokaal (vereist een
+    # browser)" wanneer er nog geen player_id gekend was voor een naam. Dat
+    # is technisch juist (de cloud-app zelf heeft geen Playwright/browser),
+    # maar misleidend: het lijkt alsof je niets kunt doen, terwijl de app
+    # WEL een externe GitHub Actions-workflow kan triggeren die dat op een
+    # ubuntu-runner mét browser doet (zie cloud_helpers.py /
+    # scrape-padel.yml). Vandaar dat "opzoeken vroeger al eens lukte".
+    #
+    # Fix: als scrapen lokaal niet kan (cloud) maar de GitHub-trigger wél
+    # geconfigureerd is, tonen we nu een knop die de bestaande workflow start
+    # in "new_users"-modus (spelers zoeken/toevoegen op TVL). Zo verdwijnt de
+    # misleidende melding en kan het opzoeken/toevoegen ook vanaf de cloud.
+    # We gebruiken ENKEL de reeds ondersteunde workflow-inputs (player_ids +
+    # mode), zodat er niets aan de workflow-definitie hoeft te wijzigen.
     try:
         from cloud_helpers import is_scraping_available
     except Exception:
         is_scraping_available = lambda: True  # noqa: E731
     if not is_scraping_available():
-        st.caption("Opzoeken op TVL kan enkel lokaal (vereist een browser).")
+        _render_cloud_search_trigger(display_name, key_prefix)
         return
     search_key = f"{key_prefix}_search_results"
     if st.button("🔍 Opzoeken op TVL", key=f"{key_prefix}_search_btn"):
@@ -260,7 +253,34 @@ def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None
             sj.start_background_scrape(str(cand_pid), cand_name, full=True)
             st.success(f"Gekoppeld. {cand_name} wordt nu op de achtergrond gescraped (zie melding bovenaan).")
             st.rerun()
-
+def _render_cloud_search_trigger(display_name: str, key_prefix: str) -> None:
+    """Cloud-variant van de opzoek-fallback: geen lokale browser, maar wel de
+    bestaande GitHub Actions-workflow triggeren (indien geconfigureerd)."""
+    try:
+        from cloud_helpers import is_github_trigger_configured, render_cloud_scrape_trigger
+    except Exception:
+        is_github_trigger_configured = lambda: False  # noqa: E731
+        render_cloud_scrape_trigger = None
+    if not (render_cloud_scrape_trigger and is_github_trigger_configured()):
+        # Geen GitHub-trigger geconfigureerd -> eerlijk blijven over de
+        # cloud-beperking, maar met een duidelijk alternatief.
+        st.caption(
+            "Nieuwe spelers opzoeken vereist een browser en kan daarom niet "
+            "rechtstreeks vanaf de cloud. Doe dit lokaal via '➕ Speler "
+            "toevoegen', of configureer de GitHub Actions-trigger om het "
+            "vanaf de cloud te kunnen starten."
+        )
+        return
+    st.caption(
+        f"'{_clean(display_name)}' is nog niet gekend. Op de cloud gebeurt het "
+        "opzoeken/toevoegen via GitHub Actions (ubuntu-runner met browser)."
+    )
+    # "new_users"-modus laat de workflow nieuwe spelers zoeken/toevoegen op TVL.
+    render_cloud_scrape_trigger(
+        key_prefix=f"{key_prefix}_cloud_search",
+        mode="new_users",
+        label="🔍 Opzoeken & toevoegen via GitHub Actions",
+    )
 # -----------------------------------------------------------------------------
 # Render components
 # -----------------------------------------------------------------------------
@@ -269,7 +289,7 @@ def render_player_name_action(name: str, player_id: str, key_prefix: str) -> Non
     raw_name = _clean(name) or "-"
     display_name = _strip_rank_suffix(raw_name) or raw_name
     if display_name == "-":
-        _small_text("-")
+        st.caption("-")
         return
     status = player_status(player_id)
     icon = "✅" if status["scraped"] else ("⚠️" if status["known"] else "❓")
@@ -280,7 +300,6 @@ def render_player_name_action(name: str, player_id: str, key_prefix: str) -> Non
     else:
         st.write(label)
         _render_action_body(display_name, player_id, status, key_prefix)
-
 def _render_action_body(name: str, player_id: str, status: dict, key_prefix: str) -> None:
     """
     PADEL_ANALYSIS_BACKGROUND_SCRAPE_2026-09-06:
@@ -312,7 +331,16 @@ def _render_action_body(name: str, player_id: str, status: dict, key_prefix: str
     if st.button(action, key=f"{key_prefix}_{player_id}_{'full' if full else 'refresh'}"):
         sj.start_background_scrape(str(player_id), name, full=full)
         st.rerun()
-
+def _dataframe_kwargs(**kwargs):
+    """Use Streamlit's new width API, with fallback for older versions."""
+    try:
+        if "width" in inspect.signature(st.dataframe).parameters:
+            kwargs["width"] = "stretch"
+        else:
+            kwargs["use_container_width"] = True
+    except Exception:
+        kwargs["use_container_width"] = True
+    return kwargs
 def render_dataframe_with_player_actions(
     df: pd.DataFrame,
     player_columns: list[str],
@@ -320,7 +348,26 @@ def render_dataframe_with_player_actions(
     key_prefix: str = "inline_df_actions",
     height_limit: int = 60,
 ) -> None:
-    """Render a compact dataframe-like table with interactive player name cells."""
+    """
+    Render a compact, sortable table with interactive player-name actions.
+    PADEL_ANALYSIS_TABLE_RENDER_FIX_2026-09-06:
+    BUG (opgelost): deze tabel werd voorheen rij per rij opgebouwd met een
+    APARTE st.columns()-aanroep voor de header EN nog eens een aparte
+    st.columns()-aanroep per databader ("titels zweven boven de rijen").
+    Streamlit behandelt elke st.columns()-aanroep als een onafhankelijk
+    layout-blok; zodra de popover-knoppen in de datarijen een andere hoogte
+    hadden dan de headertekst (wat bij deze speleracties-popovers vrijwel
+    altijd het geval is), kwam de header visueel los van de rest van de
+    tabel te staan.
+    Fix: gebruik nu hetzelfde, al werkende patroon als de Match
+    Explorer-tab (zie lineup_quick.py: _render_selectable_table_with_detail):
+    één enkele st.dataframe(...) voor de volledige tabel (header en rijen
+    horen dan gegarandeerd bij elkaar, correcte sortering inbegrepen), met
+    rijselectie. Klik je op een rij, dan verschijnen de klikbare
+    speleracties (scrape-status, refresh-knop, opzoeken...) voor de
+    spelerskolommen van DIE rij eronder — functioneel identiek aan
+    voorheen, maar zonder het layout-probleem.
+    """
     _inject_compact_css()
     if df is None or df.empty:
         st.info("Geen data beschikbaar.")
@@ -329,34 +376,38 @@ def render_dataframe_with_player_actions(
     shown = df.head(height_limit).copy()
     if len(df) > height_limit:
         st.caption(f"Toont eerste {height_limit} van {len(df)} rijen voor interactieve speleracties.")
-    cols = list(shown.columns)
-    visible_cols = [c for c in cols if not c.endswith(" ID")]
-    weights = []
-    for c in visible_cols:
-        if c in player_columns:
-            weights.append(1.6)
-        elif c.lower() in {"score", "w/v", "result", "r1", "r2"}:
-            weights.append(0.65)
-        elif c.lower() in {"periode"}:
-            weights.append(1.6)
-        else:
-            weights.append(1.0)
-    header = st.columns(weights, gap="small")
-    for col, label in zip(header, visible_cols):
-        _small_header(label)
-    for ridx, row in shown.reset_index(drop=True).iterrows():
-        row_cols = st.columns(weights, gap="small")
-        for cidx, col_name in enumerate(visible_cols):
+    shown = shown.reset_index(drop=True)
+    visible_cols = [c for c in shown.columns if not c.endswith(" ID")]
+    display_df = shown[visible_cols]
+    event = st.dataframe(
+        display_df,
+        **_dataframe_kwargs(
+            hide_index=True,
+            height=min(360, 40 + len(display_df) * 36),
+            on_select="rerun",
+            selection_mode="single-row",
+        ),
+        key=f"{key_prefix}_table",
+    )
+    sel_rows = (event or {}).get("selection", {}).get("rows", [])
+    if not sel_rows:
+        st.caption("👉 Klik op een rij voor speleracties (scrape-status, refresh, opzoeken).")
+        return
+    idx = sel_rows[0]
+    row = shown.iloc[idx]
+    st.markdown("**Speleracties voor geselecteerde rij:**")
+    relevant_player_cols = [c for c in player_columns if c in shown.columns]
+    if not relevant_player_cols:
+        return
+    action_cols = st.columns(min(len(relevant_player_cols), 3) or 1)
+    for i, col_name in enumerate(relevant_player_cols):
+        with action_cols[i % len(action_cols)]:
+            st.caption(col_name)
             value = _clean(row.get(col_name))
-            with row_cols[cidx]:
-                if col_name in player_columns:
-                    pid_col = f"{col_name} ID"
-                    explicit_id = row.get(pid_col, "") if pid_col in shown.columns else ""
-                    pid = resolve_player_id(value, lookup, explicit_id)
-                    render_player_name_action(value, pid, f"{key_prefix}_{ridx}_{cidx}")
-                else:
-                    _small_text(value if value else "-")
-
+            pid_col = f"{col_name} ID"
+            explicit_id = row.get(pid_col, "") if pid_col in shown.columns else ""
+            pid = resolve_player_id(value, lookup, explicit_id)
+            render_player_name_action(value, pid, key_prefix=f"{key_prefix}_detail_{idx}_{i}")
 def render_matches_period_table(period_matches: pd.DataFrame, profiles: Optional[list[dict]], key_prefix: str) -> None:
     render_dataframe_with_player_actions(
         period_matches,
