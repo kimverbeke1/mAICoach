@@ -86,7 +86,7 @@ def list_encounters(index: Dict[Tuple, List[Tuple[str, dict]]]) -> List[Tuple[Tu
 
 
 # ─────────────────────────────────────────────
-# Boards (individuele matchen binnen 1 ontmoeting) reconstrueren
+# Dubbels (individuele matchen binnen 1 ontmoeting) reconstrueren
 # ─────────────────────────────────────────────
 
 def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
@@ -104,7 +104,7 @@ def reconstruct_boards(entries: List[Tuple[str, dict]]) -> List[dict]:
     """
     entries: lijst van (player_id, match_dict) voor 1 ontmoeting (kan beide
     perspectieven van hetzelfde board bevatten — wordt hier ontdubbeld).
-    Returns: lijst van unieke boards:
+    Returns: lijst van unieke dubbels:
       {pair: frozenset({p1,p2}), round_text, opp1_name, opp2_name,
        opp1_user_id, opp2_user_id, score, result, won, match_id}
     """
