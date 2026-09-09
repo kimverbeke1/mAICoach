@@ -76,6 +76,12 @@ def _history_summary(doc: dict):
     return current["rank"], best["rank"], best.get("datum") or best.get("periode"), rows
 
 
+def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
+    """Behouden voor compatibiliteit met bestaande aanroepen."""
+    rows = _history_rows(doc)
+    return min((row["rank"] for row in rows), default=None)
+
+
 def _best_rank_opportunistic(player_id: str, all_docs: dict) -> Optional[int]:
     values = []
     for doc in all_docs.values():
