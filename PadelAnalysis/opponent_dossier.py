@@ -1,5 +1,5 @@
 """
-opponent_dossier.py - scoutingdossier voor een tegenstander (v3).
+opponent_dossier.py - scoutingdossier voor een tegenstander (v4).
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 Waarom deze versie bestaat:
@@ -15,6 +15,13 @@ v3 splitst expliciet in TWEE lagen:
                       duidelijk gelabeld als context uit een andere poule.
 Beide lagen worden apart berekend en apart getoond. Er wordt nooit stilzwijgend
 teruggevallen van laag 1 op laag 2.
+
+PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-10 (v4):
+BELANGRIJKE CORRECTIE: in dit klassementsysteem geldt HOE HOGER HET GETAL,
+HOE BETER (het omgekeerde van wat v1-v3 aannamen). v3 behandelde het laagste
+getal als "beste ooit" en toonde de grafiek-as omgekeerd - dat was dus fout.
+v4 neemt overal het HOOGSTE getal als beste klassement, en de tijdlijngrafiek
+gebruikt een normale (niet-omgekeerde) as.
 
 reeks_url is in de praktijk None in alle opgeslagen matchrecords; de filter
 steunt daarom op spelgroep_id, met reeks_url enkel als optionele extra.
@@ -92,16 +99,6 @@ def _period_sort_key(label) -> tuple:
     return 0, 0, 0, text
 
 
-def _period_start_key(label) -> tuple:
-    """Startgrens van een periode, gebruikt om de huidige periode te herkennen."""
-    text = str(label or "")
-    weeks = re.findall(r"week\s+(\d{1,2})/(\d{4})", text.lower())
-    if weeks:
-        week, year = weeks[0]
-        return int(year), int(week)
-    return 0, 0
-
-
 def _is_interclub(match: dict) -> bool:
     value = str(match.get("match_type") or match.get("type") or "").strip().lower()
     return value == "interclub" or "interclub" in value
@@ -126,13 +123,11 @@ def _winrate_display(wins: int, losses: int) -> str:
 
 # ─────────────────────────────────────────────
 # Klassementshistoriek
+# LET OP (v4): hoe HOGER het klassementsgetal, hoe BETER de speler.
 # ─────────────────────────────────────────────
 def _history_rows(doc: dict) -> list[dict]:
-    """Leest klassement_history en sorteert RECENTSTE EERST.
-
-    v2-fix behouden: vroeger werd rows[0] blind als 'huidig' genomen, wat fout
-    is zodra de bron oud->nieuw aanlevert.
-    """
+    """Leest klassement_history en sorteert RECENTSTE EERST (chronologisch,
+    niet op ranggetal)."""
     history_doc = (doc or {}).get("klassement_history") or {}
     rows = []
     for index, row in enumerate(history_doc.get("history") or []):
@@ -166,22 +161,24 @@ def _history_rows(doc: dict) -> list[dict]:
 
 
 def _history_summary(doc: dict):
+    """Geeft (huidig, beste, wanneer_beste, alle_rijen) terug.
+    v4: 'beste' = HOOGSTE klassementsgetal (hoger = sterker)."""
     rows = _history_rows(doc)
     if not rows:
         return None, None, None, []
     current = rows[0]
-    best = min(rows, key=lambda row: row["rank"])
+    best = max(rows, key=lambda row: row["rank"])
     return current["rank"], best["rank"], best.get("datum") or best.get("periode"), rows
 
 
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
-    """Behouden voor compatibiliteit met bestaande aanroepen."""
-    return min((row["rank"] for row in _history_rows(doc)), default=None)
+    """Behouden voor compatibiliteit met bestaande aanroepen. v4: hoogste getal."""
+    return max((row["rank"] for row in _history_rows(doc)), default=None)
 
 
 def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]:
     """Leidt een klassement af uit matchrecords van ANDERE spelers waarin deze
-    persoon als tegenstander voorkwam. search_docs moet zo breed mogelijk zijn."""
+    persoon als tegenstander voorkwam. v4: hoogste gevonden waarde = beste."""
     values = []
     target = _normalize_id(player_id)
     for doc in (search_docs or {}).values():
@@ -194,10 +191,11 @@ def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]
                 continue
             if rank is not None:
                 values.append(rank)
-    return min(values) if values else None
+    return max(values) if values else None
 
 
 def _current_rank_fallback(player_id: str, matches: list[dict], search_docs: dict) -> Optional[int]:
+    """Meest recente bekende klassement (chronologisch, niet op hoogte)."""
     dated = []
     target = _normalize_id(player_id)
     for doc in (search_docs or {}).values():
@@ -228,13 +226,14 @@ def _render_ranking_timeline(rows: list[dict]) -> None:
         label = row.get("datum") or row.get("periode") or str(reverse_index + 1)
         chart_rows.append({"Moment": str(label), "Klassement": row["rank"]})
     chart = pd.DataFrame(chart_rows).set_index("Moment")
-    st.caption("Lager klassementscijfer betekent sterker. De Y-as wordt daarom omgekeerd weergegeven waar ondersteund.")
+    # v4: hoger getal = sterker, dus GEEN omgekeerde as meer.
+    st.caption("Hoger klassementscijfer betekent sterker.")
     try:
         import altair as alt
         source = chart.reset_index()
         visual = alt.Chart(source).mark_line(point=True).encode(
             x=alt.X("Moment:N", sort=None, title="Periode"),
-            y=alt.Y("Klassement:Q", scale=alt.Scale(reverse=True), title="P-klassement"),
+            y=alt.Y("Klassement:Q", title="Klassement"),
             tooltip=["Moment:N", alt.Tooltip("Klassement:Q", format=".0f")],
         ).properties(height=240)
         st.altair_chart(visual, use_container_width=True)
@@ -243,7 +242,7 @@ def _render_ranking_timeline(rows: list[dict]) -> None:
 
 
 # ─────────────────────────────────────────────
-# Tweelaagse poulefilter (kern van v3)
+# Tweelaagse poulefilter
 # ─────────────────────────────────────────────
 def split_matches(
     matches: list[dict],
@@ -414,11 +413,12 @@ def build_player_summary(
     current_rank, best_rank, best_when, history_rows = _history_summary(ranking_doc)
     current_rank = current_rank or _current_rank_fallback(player_id, matches, rank_search_docs)
     best_rank = best_rank or _best_rank_opportunistic(player_id, rank_search_docs)
-    if current_rank is not None and (best_rank is None or current_rank < best_rank):
+    # v4: 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
+    if current_rank is not None and (best_rank is None or current_rank > best_rank):
         best_rank = current_rank
 
     return {
-        "schema": 3,
+        "schema": 4,
         "player_id": str(player_id),
         "name": name,
 

@@ -1,15 +1,12 @@
 """
 team_ai_advisor.py - AI-vragen, automatische inzichten en opstellingsadvies
-over een tegenploeg-analyse (v3).
+over een tegenploeg-analyse (v4).
 
-PADEL_ANALYSIS_TWO_LAYER_2026-09-10
-- De verwijzing naar 'board_positions' is verwijderd: dat veld bestaat niet
-  meer sinds de bordpositie-heuristiek geschrapt werd, dus dat blok leverde
-  altijd lege context op.
-- De context bevat nu expliciet BEIDE lagen (huidige poule + historiek uit
-  vorige periodes), met een duidelijk label per laag. Zo kan het model niet
-  per ongeluk historiek presenteren als resultaten in de lopende poule.
-- "board" is in de prompts vervangen door "dubbel" (padel-terminologie).
+Ongewijzigd t.o.v. v3, behalve dat de context-tekst nu meegaat met de
+klassement-richtingfix uit opponent_dossier.py: hoger getal = beter. Dit
+bestand doet zelf geen berekeningen op ranggetallen, enkel weergave, dus er
+was hier zelf geen bug - maar de systeeminstructie is verduidelijkt zodat het
+taalmodel niet per ongeluk aanneemt dat een lager getal beter is.
 
 Vereist een OpenAI API-key. Zoekt in deze volgorde:
   1. st.secrets["openai"]["api_key"]   (Streamlit secrets, lokaal of cloud)
@@ -63,7 +60,9 @@ def _report_to_context(report: dict) -> str:
         "",
         "BELANGRIJK: 'deze poule' = de lopende competitieperiode. "
         "'historiek' = vorige periodes/andere poules, enkel bruikbaar als "
-        "niveau-inschatting. Vermeng deze twee niet in je antwoord.",
+        "niveau-inschatting. Vermeng deze twee niet in je antwoord. "
+        "Klassement: HOE HOGER HET GETAL, HOE STERKER DE SPELER "
+        "(bv. P450 is sterker dan P200).",
         "",
     ]
 
@@ -134,9 +133,9 @@ def _report_to_context(report: dict) -> str:
 _BASE_RULES = (
     "Antwoord in het Nederlands, uitsluitend op basis van de gegeven data. "
     "Maak altijd een duidelijk onderscheid tussen resultaten in de huidige poule "
-    "en historiek uit vorige periodes. Als een winrate op minder dan 3 matchen "
-    "berust, benoem die dan expliciet als onbetrouwbaar. Vermeld wat onbekend is "
-    "in plaats van te verzinnen."
+    "en historiek uit vorige periodes. Onthoud dat een HOGER klassementsgetal "
+    "STERKER is. Als een winrate op minder dan 3 matchen berust, benoem die dan "
+    "expliciet als onbetrouwbaar. Vermeld wat onbekend is in plaats van te verzinnen."
 )
 
 

@@ -1,30 +1,19 @@
 """
-opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v3).
+opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v4).
+
+Ongewijzigd t.o.v. v3, behalve dat dit bestand nu samenhoort met de
+klassement-richtingfix in opponent_dossier.py (hoger getal = beter). Dit
+bestand doet zelf geen rank-vergelijkingen, het toont enkel wat
+build_player_summary() teruggeeft.
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
-De overzichtstabel toont nu per speler ZOWEL de huidige poule als de historiek
-uit vorige periodes, in aparte kolommen. Reden: de huidige competitieperiode is
-pas gestart, dus strikt filteren op spelgroep_id levert 0-2 matchen per speler
-op. Die feitelijke leegte verbergen (v1) of stilzwijgend aanvullen met een
-andere poule (ook v1) waren allebei fout - v3 toont beide lagen expliciet.
+De overzichtstabel toont per speler ZOWEL de huidige poule als de historiek
+uit vorige periodes, in aparte kolommen.
 
 Verder in deze versie:
-- "board" hernoemd naar "dubbel" (padel-terminologie, geen schaakterm);
+- "board" hernoemd naar "dubbel";
 - bordpositie-heuristiek volledig verwijderd;
-- de opstelling-editor toont altijd minstens 2 dubbels, ook als er maar 1
-  gereconstrueerd kon worden uit de laatste ontmoeting.
-
-Gebruik (vanuit opponent_scout_ui.py):
-    import opponent_analysis as oa
-    oa.render_team_analysis(
-        bundle, opp, all_docs,
-        current_reeks_url=reeks_url,
-        current_spelgroep_id=spelgroep_id,
-        home_player_id=sel_player_id,
-        global_docs=global_docs,
-        go_to_player_fn=_go_to_player,
-        key_prefix=f"scout_team_{sel_player_id}",
-    )
+- de opstelling-editor toont altijd minstens 2 dubbels.
 """
 from __future__ import annotations
 
@@ -44,7 +33,7 @@ except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 4  # v3-datamodel; verhoogd om oude rapporten te forceren
+REPORT_SCHEMA_VERSION = 4  # v4-datamodel; verhoogd om oude rapporten te forceren
 
 
 def _now_iso() -> str:
@@ -243,7 +232,7 @@ def _render_own_lineup_editor(home_player_id: Optional[str], key_prefix: str, pl
     labels = sorted({(p.get("display_name") or p.get("player_id") or "?") for p in profiles})
     options = [""] + labels
 
-    prefill_key = f"{key_prefix}_lineup_prefill_v3_{ploeg_id}"
+    prefill_key = f"{key_prefix}_lineup_prefill_v4_{ploeg_id}"
     if prefill_key not in st.session_state:
         st.session_state[prefill_key] = _infer_recent_own_lineup(home_player_id)
     prefill = st.session_state[prefill_key]
@@ -257,7 +246,7 @@ def _render_own_lineup_editor(home_player_id: Optional[str], key_prefix: str, pl
     n_doubles = st.number_input(
         "Aantal dubbels in deze ontmoeting",
         min_value=1, max_value=8, value=max(2, len(prefill)), step=1,
-        key=f"{key_prefix}_ndoubles_v3_{ploeg_id}",
+        key=f"{key_prefix}_ndoubles_v4_{ploeg_id}",
     )
 
     lines = []
@@ -270,13 +259,13 @@ def _render_own_lineup_editor(home_player_id: Optional[str], key_prefix: str, pl
             a = st.selectbox(
                 f"Dubbel {i} - speler A", options,
                 index=options.index(pair[0]) if pair[0] in options else 0,
-                key=f"{key_prefix}_double_{i}_a_v3_{ploeg_id}",
+                key=f"{key_prefix}_double_{i}_a_v4_{ploeg_id}",
             )
         with c2:
             b = st.selectbox(
                 f"Dubbel {i} - speler B", options,
                 index=options.index(pair[1]) if pair[1] in options else 0,
-                key=f"{key_prefix}_double_{i}_b_v3_{ploeg_id}",
+                key=f"{key_prefix}_double_{i}_b_v4_{ploeg_id}",
             )
         if a or b:
             lines.append(f"Dubbel {i}: {a or '?'} / {b or '?'}")
@@ -292,16 +281,16 @@ def _render_ai_section(report: dict, own_team_context: str, ploeg_id: str, key_p
         st.caption("AI-module niet beschikbaar (team_ai_advisor kon niet geladen worden).")
         return
 
-    answer_key = f"{key_prefix}_answer_v3_{ploeg_id}"
+    answer_key = f"{key_prefix}_answer_v4_{ploeg_id}"
     b1, b2 = st.columns(2)
     with b1:
         insights_clicked = st.button(
-            "💡 Genereer inzichten", key=f"{key_prefix}_insights_v3_{ploeg_id}",
+            "💡 Genereer inzichten", key=f"{key_prefix}_insights_v4_{ploeg_id}",
             type="primary", use_container_width=True,
         )
     with b2:
         lineup_clicked = st.button(
-            "🧩 Stel onze opstelling voor", key=f"{key_prefix}_lineup_ai_v3_{ploeg_id}",
+            "🧩 Stel onze opstelling voor", key=f"{key_prefix}_lineup_ai_v4_{ploeg_id}",
             use_container_width=True,
         )
 
@@ -323,10 +312,10 @@ def _render_ai_section(report: dict, own_team_context: str, ploeg_id: str, key_p
 
     st.caption("Of stel een eigen vraag:")
     question = st.text_area(
-        "Jouw vraag", key=f"{key_prefix}_question_v3_{ploeg_id}", height=70,
+        "Jouw vraag", key=f"{key_prefix}_question_v4_{ploeg_id}", height=70,
         label_visibility="collapsed", placeholder="Bv. Wie is hun sterkste dubbel?",
     )
-    if st.button("💬 Vraag AI", key=f"{key_prefix}_ask_v3_{ploeg_id}"):
+    if st.button("💬 Vraag AI", key=f"{key_prefix}_ask_v4_{ploeg_id}"):
         if not question.strip():
             st.warning("Typ eerst een vraag.")
         else:
@@ -357,7 +346,7 @@ def render_team_analysis(
 ) -> dict:
     """Toont het volledige teamanalysescherm en geeft het gebruikte rapport terug."""
     ploeg_id = opp.get("ploeg_id")
-    state_key = f"{key_prefix}_report_v3_{ploeg_id}"
+    state_key = f"{key_prefix}_report_v4_{ploeg_id}"
     if state_key not in st.session_state:
         st.session_state[state_key] = _load_report(ploeg_id)
     report = st.session_state[state_key]
@@ -375,7 +364,7 @@ def render_team_analysis(
             f"laatst berekend op {_format_ts(report.get('updated_at'))}"
         )
     with refresh_col:
-        if st.button("🔄 Verversen", key=f"{key_prefix}_refresh_v3_{ploeg_id}", use_container_width=True):
+        if st.button("🔄 Verversen", key=f"{key_prefix}_refresh_v4_{ploeg_id}", use_container_width=True):
             report = _build_report(bundle, opp, all_docs, current_reeks_url, current_spelgroep_id, global_docs)
             _save_report(report)
             st.session_state[state_key] = report
@@ -409,13 +398,13 @@ def render_team_analysis(
 
     st.markdown("#### 🔎 Detail per speler")
     names = [p.get("name", "?") for p in players]
-    sel_name = st.selectbox("Bekijk details van:", names, key=f"{key_prefix}_detail_v3_{ploeg_id}")
+    sel_name = st.selectbox("Bekijk details van:", names, key=f"{key_prefix}_detail_v4_{ploeg_id}")
     selected = next((p for p in players if p.get("name") == sel_name), None)
     if selected:
         od.render_player_summary_inline(selected)
         if go_to_player_fn and st.button(
             "👁️ Volledige spelerpagina",
-            key=f"{key_prefix}_jump_v3_{selected.get('player_id')}",
+            key=f"{key_prefix}_jump_v4_{selected.get('player_id')}",
         ):
             go_to_player_fn(selected.get("player_id"))
 
