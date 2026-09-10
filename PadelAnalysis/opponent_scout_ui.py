@@ -1,14 +1,22 @@
 """
 opponent_scout_ui.py - UI-blok voor de tegenstander-analyse bij 'Volgende match'.
 
-Doel van dit bestand (2026-09-09):
-- De tussenstap verdwijnt. Na een klik op 'Tegenstander analyseren' wordt de
-  opstelling van de tegenstander opgezocht EN worden de nog onbekende spelers
-  meteen gescrapet, in een doorlopende voortgangsweergave (st.status).
-- Op Streamlit Community Cloud kan de app zelf niet scrapen (geen Playwright/
-  browser). Daar wordt de bestaande GitHub Actions-trigger getoond in plaats van
-  een lokale scrape. Dat verklaart ook waarom de scrape-knop lokaal wel en op de
-  cloud niet zichtbaar was.
+Doel van dit bestand:
+- 2026-09-09 (v1): de tussenstap verdwijnt. Na een klik op 'Tegenstander
+  analyseren' wordt de opstelling van de tegenstander opgezocht EN worden de
+  nog onbekende spelers meteen gescrapet, in een doorlopende
+  voortgangsweergave (st.status).
+- 2026-09-09 (v2): het volledige teamanalysescherm zit nu in
+  opponent_analysis.render_team_analysis() (overzichtstabel, opstelling-editor,
+  AI-sectie). Dit bestand geeft er nu ook spelgroep_id (voor precieze
+  poule-filtering), home_player_id (voor de opstelling-editor) en een brede
+  cache van alle gekende spelersdocumenten (voor een betere ranking-fallback)
+  aan door. Daarnaast: optionele automatische klassementshistoriek-scrape
+  (lokaal, per speler ~30-60s) zodat 'ranking onbekend' niet blijft hangen.
+
+Op Streamlit Community Cloud kan de app zelf niet scrapen (geen Playwright/
+browser). Daar wordt de bestaande GitHub Actions-trigger getoond in plaats van
+een lokale scrape.
 
 Bedoeld om aangeroepen te worden vanuit dashboard.py, binnen
 _resolve_and_render_next:
@@ -28,13 +36,14 @@ zodat _render_opstelling_scenario ongewijzigd blijft werken.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import streamlit as st
 
 import firebase_service as fb
 import lineup_lab as ll
-import opponent_dossier as od
+import opponent_analysis as oa
 import opponent_scout as osc
 import schedule_scraper as ss
 
@@ -46,6 +55,20 @@ except Exception:  # pragma: no cover
 
     def render_cloud_scrape_trigger(**_kwargs) -> None:
         st.caption("Cloud-trigger niet beschikbaar (cloud_helpers ontbreekt).")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_all_player_docs() -> dict:
+    """Bredere set van ALLE gekende spelersdocumenten (niet enkel de
+    tegenstander-roster), gebruikt als 'global_docs' voor de opportunistische
+    ranking-fallback in opponent_dossier. Klein en goedkoop bij het huidige
+    aantal spelers; 5 minuten gecached om herhaalde Firestore-reads binnen
+    dezelfde sessie te vermijden."""
+    try:
+        docs = fb.db.collection(fb.PLAYERS_COLLECTION).stream()
+        return {d.id: (d.to_dict() or {}) for d in docs}
+    except Exception:
+        return {}
 
 
 def _is_known(player_id: str) -> bool:
@@ -77,14 +100,69 @@ def _unknown_players(bundle: dict) -> list[dict]:
     ]
 
 
+def _ensure_klassement(player_ids: list[str], progress_label: str = "Klassement") -> None:
+    """Haalt de klassementshistoriek op voor spelers die deze nog niet hebben.
+
+    Enkel lokaal (Playwright vereist, zie is_scraping_available()). Duurt
+    ongeveer 30-60s per speler; slaat spelers over die al klassement_history
+    hebben, dus een herhaald bezoek kost niets voor reeds gekende spelers."""
+    if not is_scraping_available():
+        return
+
+    to_fetch = []
+    for pid in player_ids:
+        try:
+            prof = fb.get_player_profile(pid) or {}
+        except Exception:
+            prof = {}
+        try:
+            doc = fb.get_player(pid) or {}
+        except Exception:
+            doc = {}
+        if not (doc.get("klassement_history") or prof.get("klassement_history")):
+            to_fetch.append(pid)
+
+    if not to_fetch:
+        return
+
+    try:
+        from scrape_klassement import scrape_klassement, klassement_to_history_summary, extract_niveau_winrates
+    except Exception as exc:
+        st.caption(f"Klassement automatisch ophalen niet beschikbaar: {exc}")
+        return
+
+    progress = st.progress(0.0, text=f"{progress_label}: starten...")
+    for i, pid in enumerate(to_fetch, start=1):
+        progress.progress(i / len(to_fetch), text=f"{progress_label}: speler {i}/{len(to_fetch)}...")
+        try:
+            periods = scrape_klassement(str(pid))
+            history = klassement_to_history_summary(periods)
+            niveau_winrates = extract_niveau_winrates(periods)
+            klass_data = {
+                "history": history,
+                "niveau_winrates": niveau_winrates,
+                "raw_periods": periods,
+                "scraped_at": datetime.now(timezone.utc).isoformat(),
+            }
+            payload = {"klassement_history": fb.sanitize_for_firestore(klass_data)}
+            fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(payload, merge=True)
+            fb.db.collection(fb.PLAYERS_COLLECTION).document(str(pid)).set(payload, merge=True)
+        except Exception as exc:
+            st.write(f"Klassement ophalen mislukt voor speler {pid}: {exc}")
+    progress.progress(1.0, text=f"{progress_label}: klaar.")
+    _load_all_player_docs.clear()
+
+
 def _run_scout_and_scrape(
     fixtures: list[dict],
     opp: dict,
     next_match: dict,
     lookback: int,
     auto_scrape: bool,
+    fetch_klassement: bool,
 ) -> dict:
-    """Zoekt de opstelling op en scrapet meteen de onbekende spelers."""
+    """Zoekt de opstelling op, scrapet meteen de onbekende spelers en haalt
+    optioneel ook de klassementshistoriek op."""
     with st.status("Tegenstander analyseren...", expanded=True) as status:
         st.write("Vorige wedstrijd(en) van de tegenstander opzoeken...")
         bundle = osc.scout_opponent(
@@ -104,47 +182,42 @@ def _run_scout_and_scrape(
         st.write(f"{found} tegenstander-speler(s) gevonden.")
 
         unknown = _unknown_players(bundle)
-        if not unknown:
-            st.write("Alle spelers zijn al gekend. Geen scrape nodig.")
-            status.update(label="Analyse afgerond", state="complete")
-            return bundle
+        if unknown:
+            if not auto_scrape:
+                st.write(
+                    f"{len(unknown)} speler(s) nog niet gescrapet. Scrapen gebeurt hier "
+                    "niet: deze omgeving heeft geen browser."
+                )
+            else:
+                st.write(f"{len(unknown)} nieuwe speler(s) scrapen...")
+                progress = st.progress(0.0, text="Starten...")
 
-        if not auto_scrape:
-            st.write(
-                f"{len(unknown)} speler(s) nog niet gescrapet. Scrapen gebeurt hier "
-                "niet: deze omgeving heeft geen browser."
-            )
-            status.update(label="Analyse afgerond (scrape via GitHub Actions)", state="complete")
-            return bundle
+                def _callback(index: int, total: int, name: str) -> None:
+                    fraction = index / total if total else 0.0
+                    progress.progress(fraction, text=f"({index}/{total}) {name} scrapen...")
 
-        st.write(f"{len(unknown)} nieuwe speler(s) scrapen...")
-        progress = st.progress(0.0, text="Starten...")
+                try:
+                    result = osc.scrape_new_opponent_players(
+                        unknown, lookback_periods=1, delay=1.5, progress_callback=_callback,
+                    )
+                    progress.progress(1.0, text="Klaar.")
+                    scraped = len(result.get("newly_scraped", []) or [])
+                    failed = result.get("failed", []) or []
+                    st.write(f"{scraped} gescrapet, {len(failed)} mislukt.")
+                    for item in failed:
+                        st.write(f"Mislukt: {item.get('name')} - {item.get('error')}")
+                except Exception as exc:
+                    progress.empty()
+                    st.write(f"Scrapen mislukt: {exc}")
+        else:
+            st.write("Alle spelers zijn al gekend qua matchdata.")
 
-        def _callback(index: int, total: int, name: str) -> None:
-            fraction = index / total if total else 0.0
-            progress.progress(fraction, text=f"({index}/{total}) {name} scrapen...")
+        if fetch_klassement:
+            st.write("Klassementshistoriek controleren/ophalen...")
+            all_ids = [p["user_id"] for p in bundle.get("unique_players", []) or []]
+            _ensure_klassement(all_ids, progress_label="Klassement")
 
-        try:
-            result = osc.scrape_new_opponent_players(
-                unknown,
-                lookback_periods=1,
-                delay=1.5,
-                progress_callback=_callback,
-            )
-        except Exception as exc:
-            progress.empty()
-            st.write(f"Scrapen mislukt: {exc}")
-            status.update(label="Analyse afgerond, scrape mislukt", state="error")
-            return bundle
-
-        progress.progress(1.0, text="Klaar.")
-        scraped = len(result.get("newly_scraped", []) or [])
-        failed = result.get("failed", []) or []
-        st.write(f"{scraped} gescrapet, {len(failed)} mislukt.")
-        for item in failed:
-            st.write(f"Mislukt: {item.get('name')} - {item.get('error')}")
-
-        status.update(label="Analyse en scrape afgerond", state="complete")
+        status.update(label="Analyse afgerond", state="complete")
         return bundle
 
 
@@ -156,7 +229,7 @@ def render_scout_block(
     go_to_player_fn: Optional[Callable[[str], None]] = None,
     lookback: int = 1,
 ):
-    """Toont de volgende match en de tegenstander-analyse in één stap."""
+    """Toont de volgende match en het volledige tegenploeg-analysescherm."""
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)
     if not next_match:
@@ -164,6 +237,7 @@ def render_scout_block(
         return None
 
     opp = ss.opponent_of(next_match, own_ploeg_id)
+    spelgroep_id = next_match.get("spelgroep_id")
     st.markdown(
         f"**{next_match['date_text']}** - tegen **{opp['name']}** "
         f"({next_match.get('poule_label', '')})"
@@ -172,15 +246,22 @@ def render_scout_block(
     scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
     can_scrape = is_scraping_available()
 
+    fetch_klassement = False
     if not can_scrape:
         st.caption(
             "Deze omgeving kan zelf niet scrapen. Nieuwe spelers worden opgehaald "
             "via de achtergrondtaak op GitHub Actions."
         )
+    else:
+        fetch_klassement = st.checkbox(
+            "📈 Ook klassementshistoriek ophalen (lokaal, ±30-60s per nog onbekende speler)",
+            value=True, key=f"fetch_klassement_{sel_player_id}",
+        )
 
     if st.button("🔍 Tegenstander analyseren", key=f"btn_scout_{sel_player_id}", type="primary"):
         st.session_state[scout_key] = _run_scout_and_scrape(
-            fixtures, opp, next_match, lookback, auto_scrape=can_scrape
+            fixtures, opp, next_match, lookback,
+            auto_scrape=can_scrape, fetch_klassement=fetch_klassement,
         )
 
     bundle = st.session_state.get(scout_key)
@@ -199,37 +280,30 @@ def render_scout_block(
         return bundle, opp
 
     unknown_ids = {player["user_id"] for player in _unknown_players(bundle)}
+    all_docs = ll.get_docs_for_players([p["user_id"] for p in unique_players])
 
-    with st.expander(f"👥 Gevonden tegenstander-spelers ({len(unique_players)})", expanded=True):
-        all_docs = ll.get_docs_for_players([p["user_id"] for p in unique_players])
-        for player in unique_players:
-            is_unknown = player["user_id"] in unknown_ids
-            status_text = "❓ nog niet gescrapet" if is_unknown else "✅ gekend"
-            c1, c2, c3 = st.columns([3, 1, 1])
-            c1.write(f"• {player['name']} - {status_text}")
-            if not is_unknown:
-                if c2.button("👁️ Bekijk", key=f"jump_opp_{sel_player_id}_{player['user_id']}"):
-                    if go_to_player_fn:
-                        go_to_player_fn(player["user_id"])
-                with c3:
-                    od.render_opponent_dossier_button(
-                        player["user_id"],
-                        player["name"],
-                        all_docs,
-                        current_reeks_url=reeks_url,
-                        key_prefix="scout_dossier",
-                    )
-
-        if unknown_ids and not can_scrape:
-            st.caption(
-                f"{len(unknown_ids)} speler(s) konden hier niet gescrapet worden. "
-                "Start de achtergrondtaak om ze toe te voegen."
-            )
+    if unknown_ids:
+        st.caption(f"⚠️ {len(unknown_ids)} speler(s) nog niet volledig gekend qua matchdata.")
+        if not can_scrape:
             render_cloud_scrape_trigger(
                 key_prefix=f"scout_scrape_{sel_player_id}",
                 player_ids=",".join(sorted(unknown_ids)),
                 mode="missing",
                 label="🚀 Nieuwe tegenstanders ophalen",
             )
+
+    global_docs = _load_all_player_docs()
+
+    oa.render_team_analysis(
+        bundle,
+        opp,
+        all_docs,
+        current_reeks_url=reeks_url,
+        current_spelgroep_id=spelgroep_id,
+        home_player_id=sel_player_id,
+        global_docs=global_docs,
+        go_to_player_fn=go_to_player_fn,
+        key_prefix=f"scout_team_{sel_player_id}",
+    )
 
     return bundle, opp
