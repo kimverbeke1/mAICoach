@@ -1,12 +1,10 @@
 """
 team_ai_advisor.py - AI-vragen, automatische inzichten en opstellingsadvies
-over een tegenploeg-analyse (v4).
+over een tegenploeg-analyse (v5).
 
-Ongewijzigd t.o.v. v3, behalve dat de context-tekst nu meegaat met de
-klassement-richtingfix uit opponent_dossier.py: hoger getal = beter. Dit
-bestand doet zelf geen berekeningen op ranggetallen, enkel weergave, dus er
-was hier zelf geen bug - maar de systeeminstructie is verduidelijkt zodat het
-taalmodel niet per ongeluk aanneemt dat een lager getal beter is.
+Ongewijzigd t.o.v. v4 - geen inhoudelijke wijziging nodig voor de v5
+labelverkorting (dit bestand gebruikt enkel de al-berekende best_rank_when
+tekst uit opponent_dossier.py, die nu automatisch al kort is).
 
 Vereist een OpenAI API-key. Zoekt in deze volgorde:
   1. st.secrets["openai"]["api_key"]   (Streamlit secrets, lokaal of cloud)

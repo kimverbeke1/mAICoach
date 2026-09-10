@@ -1,27 +1,28 @@
 """
-opponent_dossier.py - scoutingdossier voor een tegenstander (v4).
+opponent_dossier.py - scoutingdossier voor een tegenstander (v5).
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
-Waarom deze versie bestaat:
 De strikte poulefilter uit v2 was correct maar leverde in de praktijk bijna
-niets op: de huidige competitieperiode (bv. spelgroep 702074/702079, weken
-27/2026 - 48/2026) is pas gestart, dus tegenstanders hebben er 1 a 2 matchen.
-Alle historiek zit in de vorige periode (bv. spelgroep 673692). v2 verborg die
-volledig, v1 mengde ze stilzwijgend onder "deze poule" - beide fout.
-
-v3 splitst expliciet in TWEE lagen:
+niets op: de huidige competitieperiode is pas gestart, dus tegenstanders
+hebben er 1 a 2 matchen. Alle historiek zit in de vorige periode. v3 splitst
+expliciet in TWEE lagen:
   1. HUIDIGE POULE  - strikt op spelgroep_id. Feitelijk, maar vaak dun.
   2. HISTORIEK      - alle overige interclubmatches, per periode gegroepeerd,
                       duidelijk gelabeld als context uit een andere poule.
-Beide lagen worden apart berekend en apart getoond. Er wordt nooit stilzwijgend
-teruggevallen van laag 1 op laag 2.
 
 PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-10 (v4):
-BELANGRIJKE CORRECTIE: in dit klassementsysteem geldt HOE HOGER HET GETAL,
-HOE BETER (het omgekeerde van wat v1-v3 aannamen). v3 behandelde het laagste
-getal als "beste ooit" en toonde de grafiek-as omgekeerd - dat was dus fout.
-v4 neemt overal het HOOGSTE getal als beste klassement, en de tijdlijngrafiek
-gebruikt een normale (niet-omgekeerde) as.
+In dit klassementsysteem geldt HOE HOGER HET GETAL, HOE BETER. "Beste ooit" =
+het HOOGSTE getal, niet het laagste. De tijdlijngrafiek gebruikt een normale
+(niet-omgekeerde) as.
+
+PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10 (v5):
+De ruwe periode-omschrijving die TVL gebruikt (bv. "Startklassement" of
+"Zomerklassement") wordt nu verkort tot "Start <jaar>" / "Zomer <jaar>" op de
+grafiek-as en in de "beste klassement bereikt op"-tekst. Zonder deze fix
+verscheen de volledige, lange ruwe tekst als as-label, wat onleesbaar was
+zodra er geen (kortere) datum beschikbaar was. Als er geen jaartal in de bron
+zit, wordt enkel het seizoenswoord getoond (er wordt nooit een jaartal
+verzonnen).
 
 reeks_url is in de praktijk None in alle opgeslagen matchrecords; de filter
 steunt daarom op spelgroep_id, met reeks_url enkel als optionele extra.
@@ -99,6 +100,31 @@ def _period_sort_key(label) -> tuple:
     return 0, 0, 0, text
 
 
+def _short_klassement_label(periode: str) -> str:
+    """PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10.
+
+    Verkort ruwe periode-omschrijvingen zoals 'Startklassement' of
+    'Zomerklassement' tot 'Start <jaar>' / 'Zomer <jaar>', leesbaar als
+    as-label op een grafiek. Als er geen jaartal in de brontekst zelf staat,
+    wordt enkel het seizoenswoord getoond - er wordt nooit een jaartal
+    verzonnen. Onbekende formaten worden ingekort in plaats van volledig
+    getoond, zodat de as sowieso leesbaar blijft.
+    """
+    text = str(periode or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    year_match = re.search(r"(20\d{2})", text)
+    year = year_match.group(1) if year_match else ""
+    if "zomer" in lower or "summer" in lower:
+        season = "Zomer"
+    elif "start" in lower or "begin" in lower:
+        season = "Start"
+    else:
+        return text if len(text) <= 18 else text[:15] + "..."
+    return f"{season} {year}".strip()
+
+
 def _is_interclub(match: dict) -> bool:
     value = str(match.get("match_type") or match.get("type") or "").strip().lower()
     return value == "interclub" or "interclub" in value
@@ -123,11 +149,11 @@ def _winrate_display(wins: int, losses: int) -> str:
 
 # ─────────────────────────────────────────────
 # Klassementshistoriek
-# LET OP (v4): hoe HOGER het klassementsgetal, hoe BETER de speler.
+# LET OP: hoe HOGER het klassementsgetal, hoe BETER de speler.
 # ─────────────────────────────────────────────
 def _history_rows(doc: dict) -> list[dict]:
     """Leest klassement_history en sorteert RECENTSTE EERST (chronologisch,
-    niet op ranggetal)."""
+    niet op ranggetal). Voegt 'periode_kort' toe voor leesbare as-labels."""
     history_doc = (doc or {}).get("klassement_history") or {}
     rows = []
     for index, row in enumerate(history_doc.get("history") or []):
@@ -140,10 +166,12 @@ def _history_rows(doc: dict) -> list[dict]:
         )
         if rank is None:
             continue
+        periode_raw = row.get("periode") or row.get("label") or row.get("periodeomschrijving") or ""
         rows.append({
             "index": index,
             "datum": row.get("datum") or "",
-            "periode": row.get("periode") or row.get("label") or row.get("periodeomschrijving") or "",
+            "periode": periode_raw,
+            "periode_kort": _short_klassement_label(periode_raw),
             "rank": rank,
         })
 
@@ -162,23 +190,24 @@ def _history_rows(doc: dict) -> list[dict]:
 
 def _history_summary(doc: dict):
     """Geeft (huidig, beste, wanneer_beste, alle_rijen) terug.
-    v4: 'beste' = HOOGSTE klassementsgetal (hoger = sterker)."""
+    'beste' = HOOGSTE klassementsgetal (hoger = sterker)."""
     rows = _history_rows(doc)
     if not rows:
         return None, None, None, []
     current = rows[0]
     best = max(rows, key=lambda row: row["rank"])
-    return current["rank"], best["rank"], best.get("datum") or best.get("periode"), rows
+    best_when = best.get("datum") or best.get("periode_kort") or best.get("periode")
+    return current["rank"], best["rank"], best_when, rows
 
 
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
-    """Behouden voor compatibiliteit met bestaande aanroepen. v4: hoogste getal."""
+    """Behouden voor compatibiliteit met bestaande aanroepen. Hoogste getal."""
     return max((row["rank"] for row in _history_rows(doc)), default=None)
 
 
 def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]:
     """Leidt een klassement af uit matchrecords van ANDERE spelers waarin deze
-    persoon als tegenstander voorkwam. v4: hoogste gevonden waarde = beste."""
+    persoon als tegenstander voorkwam. Hoogste gevonden waarde = beste."""
     values = []
     target = _normalize_id(player_id)
     for doc in (search_docs or {}).values():
@@ -223,10 +252,11 @@ def _render_ranking_timeline(rows: list[dict]) -> None:
         return
     chart_rows = []
     for reverse_index, row in enumerate(reversed(rows)):
-        label = row.get("datum") or row.get("periode") or str(reverse_index + 1)
+        # Voorkeur: echte datum (al kort). Anders: verkort seizoenslabel
+        # ('Start 2025'/'Zomer 2025') in plaats van de lange ruwe tekst.
+        label = row.get("datum") or row.get("periode_kort") or row.get("periode") or str(reverse_index + 1)
         chart_rows.append({"Moment": str(label), "Klassement": row["rank"]})
     chart = pd.DataFrame(chart_rows).set_index("Moment")
-    # v4: hoger getal = sterker, dus GEEN omgekeerde as meer.
     st.caption("Hoger klassementscijfer betekent sterker.")
     try:
         import altair as alt
@@ -413,12 +443,12 @@ def build_player_summary(
     current_rank, best_rank, best_when, history_rows = _history_summary(ranking_doc)
     current_rank = current_rank or _current_rank_fallback(player_id, matches, rank_search_docs)
     best_rank = best_rank or _best_rank_opportunistic(player_id, rank_search_docs)
-    # v4: 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
+    # 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
     if current_rank is not None and (best_rank is None or current_rank > best_rank):
         best_rank = current_rank
 
     return {
-        "schema": 4,
+        "schema": 5,
         "player_id": str(player_id),
         "name": name,
 
