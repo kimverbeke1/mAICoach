@@ -65,54 +65,36 @@ def _parse_rank(value) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
-def _short_period_label(row: dict, index: int = 0) -> str:
-    """Maak lange scraperlabels compact zonder een niet-gekende maand te verzinnen."""
-    raw = str(row.get("periode") or row.get("label") or row.get("periodeomschrijving") or row.get("datum") or "").strip()
-    if not raw:
-        return str(index + 1)
-    text = raw
-    for pattern, value in (
-        (r"(?i)startklassement\s*", "Start "),
-        (r"(?i)zomerklassement\s*", "Zomer "),
-        (r"(?i)winterklassement\s*", "Winter "),
-        (r"(?i)eindklassement\s*", "Einde "),
-        (r"(?i)klassement\s*", ""),
-    ):
-        text = re.sub(pattern, value, text).strip()
-    return re.sub(r"\s+", " ", text)[:24]
-
-
-def _history_sort_key(row: dict) -> tuple:
-    parsed = _parse_match_date(row.get("datum"))
-    if parsed:
-        return (*parsed, 2)
-    label = str(row.get("periode") or "")
-    year_match = re.search(r"(20\d{2})", label)
-    year = int(year_match.group(1)) if year_match else 0
-    lower = label.lower()
-    phase = 1 if ("start" in lower or "winter" in lower) else 2 if "zomer" in lower else 3 if "eind" in lower else 0
-    return (year, phase, 0, 1)
-
-
 def _history_rows(doc: dict) -> list[dict]:
     history_doc = (doc or {}).get("klassement_history") or {}
     rows = []
     for index, row in enumerate(history_doc.get("history") or []):
-        rank = _parse_rank(row.get("klassement") or row.get("begin_klassement") or row.get("selected_period_klassement") or row.get("vorig_klassement") or row.get("berekend_klassement"))
+        rank = _parse_rank(
+            row.get("klassement")
+            or row.get("begin_klassement")
+            or row.get("selected_period_klassement")
+            or row.get("vorig_klassement")
+            or row.get("berekend_klassement")
+        )
         if rank is None:
             continue
-        period = row.get("periode") or row.get("label") or row.get("periodeomschrijving") or ""
-        rows.append({"index": index, "datum": row.get("datum"), "periode": period, "label_kort": _short_period_label(row, index), "rank": rank})
-    return sorted(rows, key=_history_sort_key)
+        rows.append({
+            "index": index,
+            "datum": row.get("datum"),
+            "periode": row.get("periode") or row.get("label") or row.get("periodeomschrijving") or "",
+            "rank": rank,
+        })
+    return rows
 
 
 def _history_summary(doc: dict):
     rows = _history_rows(doc)
     if not rows:
         return None, None, None, []
-    current = rows[-1]
+    current = rows[0]
     best = min(rows, key=lambda row: row["rank"])
-    return current["rank"], best["rank"], best.get("label_kort") or best.get("datum"), rows
+    return current["rank"], best["rank"], best.get("datum") or best.get("periode"), rows
+
 
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
     """Behouden voor compatibiliteit met bestaande aanroepen."""
@@ -164,26 +146,28 @@ def _winrate_str(wins: int, losses: int) -> str:
     return f"{round(wins / known * 100, 1)}%" if known else "-"
 
 
-def _render_ranking_timeline(rows: list[dict], minimum_rank: int = 100) -> None:
+def _render_ranking_timeline(rows: list[dict]) -> None:
     if not rows:
         st.info("Nog geen klassementshistoriek opgeslagen voor deze speler.")
         return
-    source = pd.DataFrame([{"Moment": row.get("label_kort") or _short_period_label(row, idx), "Klassement": row["rank"], "Volledig label": row.get("periode") or row.get("datum") or "", "Volgorde": idx} for idx, row in enumerate(rows)])
-    maximum_rank = max(int(source["Klassement"].max()), minimum_rank)
-    step = 50 if minimum_rank == 50 else 100
-    maximum_rank = max(minimum_rank + step, ((maximum_rank + step - 1) // step) * step)
-    ticks = list(range(minimum_rank, maximum_rank + 1, step))
-    st.caption("Een hogere lijn betekent een hoger P-getal. Lager is een sterker klassement.")
+    chart_rows = []
+    for reverse_index, row in enumerate(reversed(rows)):
+        label = row.get("datum") or row.get("periode") or str(reverse_index + 1)
+        chart_rows.append({"Moment": str(label), "Klassement": row["rank"]})
+    chart = pd.DataFrame(chart_rows).set_index("Moment")
+    st.caption("Lager klassementscijfer betekent sterker. De Y-as wordt daarom omgekeerd weergegeven waar ondersteund.")
     try:
         import altair as alt
-        visual = alt.Chart(source).mark_line(point=alt.OverlayMarkDef(filled=True, size=75)).encode(
-            x=alt.X("Moment:N", sort=alt.SortField(field="Volgorde", order="ascending"), title="Periode", axis=alt.Axis(labelAngle=-35, labelLimit=90)),
-            y=alt.Y("Klassement:Q", scale=alt.Scale(domain=[minimum_rank, maximum_rank], nice=False), axis=alt.Axis(values=ticks), title="P-klassement"),
-            tooltip=[alt.Tooltip("Volledig label:N", title="Periode"), alt.Tooltip("Klassement:Q", title="Klassement", format=".0f")],
-        ).properties(height=280)
+        source = chart.reset_index()
+        visual = alt.Chart(source).mark_line(point=True).encode(
+            x=alt.X("Moment:N", sort=None, title="Periode"),
+            y=alt.Y("Klassement:Q", scale=alt.Scale(reverse=True), title="P-klassement"),
+            tooltip=["Moment:N", alt.Tooltip("Klassement:Q", format=".0f")],
+        ).properties(height=240)
         st.altair_chart(visual, use_container_width=True)
     except Exception:
-        st.line_chart(source.set_index("Moment")[["Klassement"]], height=280)
+        st.line_chart(chart, height=240)
+
 
 def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     buckets = {}
@@ -203,10 +187,6 @@ def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     return sorted(rows, key=lambda row: (row["Matches"], row["W"]), reverse=True)[:limit]
 
 
-def _latest_relevant_match(matches: list[dict]) -> Optional[dict]:
-    if not matches:
-        return None
-    return max(matches, key=lambda item: _parse_match_date(item.get("match_date") or item.get("tournament_date_start")) or (0, 0, 0))
 
 def _period_matches(
     matches: list[dict],
@@ -218,7 +198,7 @@ def _period_matches(
     Volgorde van precisie: spelgroep_id (het exacte poule-ID) > reeks_url >
     meest recente period_label als laatste redmiddel (kan meerdere poules
     omvatten en is dus minder precies)."""
-    interclub = [match for match in matches if str(match.get("match_type") or "").strip().lower() == "interclub"]
+    interclub = [match for match in matches if match.get("match_type") == "interclub"]
     if current_spelgroep_id:
         exact = [m for m in interclub if str(m.get("spelgroep_id") or "") == str(current_spelgroep_id)]
         if exact:
@@ -227,8 +207,6 @@ def _period_matches(
         exact = [match for match in interclub if match.get("reeks_url") == current_reeks_url]
         if exact:
             return exact, True
-    if current_spelgroep_id or current_reeks_url:
-        return [], False
     labels = [match.get("period_label") for match in interclub if match.get("period_label")]
     if labels:
         latest = sorted(set(labels), reverse=True)[0]
@@ -361,7 +339,6 @@ def build_player_summary(
     best = best or _best_rank_opportunistic(player_id, rank_search_docs)
 
     partners = _partner_rows(relevant_matches)
-    board_positions = _board_position_rows(relevant_matches)
 
     poule_rows = []
     for match in sorted(relevant_matches, key=lambda item: _parse_match_date(item.get("match_date")) or (0, 0, 0), reverse=True):
@@ -387,9 +364,7 @@ def build_player_summary(
         "history": history_rows,
         "history_available": bool(history_rows),
         "partners": partners,
-        "latest_partner": (latest_match or {}).get("partner_name") or "",
-        "latest_match_date": (latest_match or {}).get("match_date") or "",
-        "ranking_axis_min": minimum_rank,
+
         "poule_results": poule_rows,
         "poule_results_exact": poule_exact,
     }
@@ -414,9 +389,10 @@ def render_player_summary_inline(summary: dict) -> None:
         st.caption(f"({summary.get('matches_total', 0)} matches gekend in totaal, over alle periodes/poules heen.)")
 
     st.markdown("##### 📈 Klassementshistoriek")
-    _render_ranking_timeline(summary.get("history") or [], summary.get("ranking_axis_min", 100))
+    _render_ranking_timeline(summary.get("history") or [])
     if not summary.get("history_available"):
         st.caption("Voor de volledige tijdlijn moet klassement_history voor deze speler nog opgeslagen worden.")
+
 
     st.markdown("##### 🤝 Meest gebruikte partners (deze poule/periode)")
     partners = summary.get("partners") or []
