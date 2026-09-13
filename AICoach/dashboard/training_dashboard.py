@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-
 from pathlib import Path
 import sys
-
+import threading
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -74,46 +73,108 @@ def _inject_css() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Lichte, gecachete opstart-sync.
-# Draait maximaal één keer per 30 minuten (gedeeld over sessies) en blokkeert de
-# UI niet bij elke rerun. Zo laadt de app op mobiel meteen door.
+# MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14
+# BUG (opgelost): ensure_latest_data() riep _sync_once() rechtstreeks en
+# SYNCHROON aan, VOOR er ook maar iets van de UI (tabs, data) getoond werd -
+# ondanks de (misleidende) codecommentaar "UI eerst tonen; sync draait
+# gecachet en blokkeert niet". _sync_once() is een st.cache_resource met
+# ttl=1800 (30 minuten) - een PROCES-BREDE cache, gedeeld over alle sessies.
+# Bij elke "koude start" (na 30 minuten inactiviteit, of - typischer op
+# Streamlit Community Cloud - na een volledige herstart van de app door
+# inactiviteit/redeploy) is die cache leeg, en moest de EERSTE bezoeker
+# wachten tot sync_latest_data() volledig klaar was (intervals.icu-API-
+# calls + bestandsschrijfacties), VOOR er iets op het scherm verscheen. Dat
+# verklaart het gemelde "laadt in het begin heel traag" - eenmaal de cache
+# warm is (binnen diezelfde 30 min), gaat het weer snel, wat het
+# inconsistente gevoel gaf.
+# Fix: de sync draait nu ECHT op de achtergrond (aparte thread). De UI
+# rendert ONMIDDELLIJK met de data die al lokaal/in GCS aanwezig is (nooit
+# leeg bij een normale, niet-eerste-ooit run). Zodra de achtergrond-sync
+# klaar is, wordt dat gedetecteerd bij de eerstvolgende Streamlit-rerun
+# (elke gebruikersinteractie triggert er sowieso een) en worden de
+# data-caches dan pas geleegd + een expliciete rerun getriggerd, zodat de
+# verse data verschijnt - zonder ooit de EERSTE render te blokkeren.
+# Belangrijke, bewuste beperking: st.cache_resource zelf wordt hier NIET
+# meer gebruikt voor de 30-minuten-throttling (threads passen niet goed bij
+# een cache-decorator die op cache-hit gewoon de vorige return-waarde
+# teruggeeft, zonder de thread-status te kunnen volgen). In plaats daarvan
+# wordt _last_sync_started_at op session_state bijgehouden per sessie. Dat
+# betekent dat de 30-minuten-throttling nu PER SESSIE geldt in plaats van
+# proces-breed - een bewuste afweging: iets meer sync-aanroepen bij veel
+# gelijktijdige gebruikers, in ruil voor een gegarandeerd nooit-blokkerende
+# eerste render. Bij mAICoach (persoonlijke, single-user app) is dat verschil
+# in de praktijk verwaarloosbaar.
 # --------------------------------------------------------------------------- #
-@st.cache_resource(ttl=1800, show_spinner=False)
-def _sync_once(bucket: str) -> dict:
+_SYNC_MIN_INTERVAL_SECONDS = 1800  # 30 minuten, zelfde als de vorige ttl
+
+
+def _sync_worker() -> None:
+    """Draait in een aparte thread: doet de effectieve intervals.icu-sync.
+    Schrijft het resultaat/eventuele fout naar een module-level dict
+    (niet st.session_state - dat is niet thread-safe voor schrijven vanuit
+    een andere thread dan de hoofd-Streamlit-thread)."""
     from AICoach.sync_latest import sync_latest_data
-
-    return sync_latest_data()
-
-
-def ensure_latest_data():
-    # Draai de sync gecachet; bij fouten blijft de app gewoon werken met
-    # de laatst beschikbare data.
     try:
-        _sync_once("v1")
+        sync_latest_data()
+        _SYNC_STATE["status"] = "done"
     except Exception as exc:  # noqa: BLE001
-        st.session_state.startup_sync_error = str(exc)
+        _SYNC_STATE["status"] = "error"
+        _SYNC_STATE["error"] = str(exc)
+
+
+# Module-level (proces-breed) state van de lopende/laatste achtergrond-sync.
+# Bewust GEEN st.session_state (niet thread-safe voor cross-thread writes).
+_SYNC_STATE = {"status": "idle", "error": None, "thread": None}
+
+
+def ensure_latest_data() -> None:
+    """MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14: start de sync op de
+    achtergrond als dat nog niet recent gebeurd is, en blokkeert NOOIT de
+    render van de rest van de pagina. Detecteert bij elke aanroep (dus bij
+    elke Streamlit-rerun) of een eerder gestarte achtergrond-sync intussen
+    klaar is; zo ja, worden de data-caches geleegd en wordt éénmalig een
+    rerun getriggerd zodat de verse data verschijnt."""
+    import time
+
+    last_started = st.session_state.get("_sync_last_started_at")
+    now = time.monotonic()
+    thread_running = _SYNC_STATE["thread"] is not None and _SYNC_STATE["thread"].is_alive()
+
+    if not thread_running and (last_started is None or now - last_started > _SYNC_MIN_INTERVAL_SECONDS):
+        _SYNC_STATE["status"] = "running"
+        _SYNC_STATE["error"] = None
+        thread = threading.Thread(target=_sync_worker, daemon=True)
+        _SYNC_STATE["thread"] = thread
+        thread.start()
+        st.session_state["_sync_last_started_at"] = now
+        st.session_state["_sync_awaiting_refresh"] = True
+        return
+
+    if st.session_state.get("_sync_awaiting_refresh") and _SYNC_STATE["status"] in ("done", "error"):
+        st.session_state["_sync_awaiting_refresh"] = False
+        if _SYNC_STATE["status"] == "error":
+            st.session_state.startup_sync_error = _SYNC_STATE["error"]
+        else:
+            st.session_state.pop("startup_sync_error", None)
+            st.cache_data.clear()
+            st.rerun()
 
 
 def render_dashboard():
     df = load_history()
     context = build_context()
-
     render_daily_update()
     st.divider()
-
     if df.empty:
         st.warning("Geen trainingshistoriek gevonden.")
         return
-
     st.caption(
         f"Hersteldata: {context.get('current_date') or 'onbekend'} | "
         f"Trainingsstatus: {context.get('latest_training_status_date') or 'onbekend'}"
     )
-
     period_options = {"30 dagen": 30, "90 dagen": 90, "Dit jaar": 366, "Alles": len(df)}
     selected_period = st.selectbox("Periode", list(period_options), index=2, key="dashboard_period")
     view = df.tail(period_options[selected_period]).copy()
-
     latest_date = view["date"].max() if not view.empty else None
     selected_date = st.session_state.get("dashboard_selected_date")
     if selected_date is None:
@@ -121,7 +182,6 @@ def render_dashboard():
         st.session_state.dashboard_selected_date = latest_date
     selected_row = nearest_row(view, selected_date)
     render_selected_values(selected_row, ["fitness", "fatigue", "form", "training_load", "resting_hr"])
-
     event = render_time_chart(
         view,
         ["fitness", "fatigue", "form"],
@@ -134,7 +194,6 @@ def render_dashboard():
     if event_date is not None and event_date != selected_date:
         st.session_state.dashboard_selected_date = event_date
         st.rerun()
-
     if has_data(view, "training_load"):
         render_time_chart(
             view,
@@ -150,13 +209,11 @@ def render_chat():
     st.subheader("mAICoach")
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-
     _, clear_column = st.columns([8, 2])
     with clear_column:
         if st.button("Gesprek wissen", use_container_width=True):
             st.session_state.chat_history = []
             st.rerun()
-
     for index, message in enumerate(st.session_state.chat_history):
         with st.chat_message(message["role"]):
             if message["role"] == "assistant":
@@ -166,7 +223,6 @@ def render_chat():
                     st.success("Inzicht bewaard bij je kennis.")
             else:
                 st.markdown(message["content"])
-
     question = st.chat_input("Stel een vraag over je training, herstel of prestaties...")
     if question:
         st.session_state.chat_history.append({"role": "user", "content": question})
@@ -182,48 +238,46 @@ def render_chat():
 
 def render_health_app() -> None:
     """Bouwt de volledige mAICoach-pagina (titel, sync, tabs).
-
     Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
     opgebouwd. Zowel de standalone uitvoering (streamlit run
     training_dashboard.py) als de gecombineerde app (via
     AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
     Dat voorkomt dubbele rendering van widgets (zoals de knoppen in
     daily_update.py) en StreamlitDuplicateElementKey-fouten.
-    """
+    MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14: ensure_latest_data()
+    start nu enkel een achtergrondthread (of detecteert dat er eentje klaar
+    is) - het blokkeert de render hieronder niet meer, ook niet bij een
+    koude start."""
     try:
         st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
     except Exception:
         pass
-
     _inject_css()
-
     st.title("🏃 mAICoach")
-
-    # UI eerst tonen; sync draait gecachet en blokkeert niet.
+    # UI eerst tonen; sync draait nu ECHT op de achtergrond en blokkeert niet.
     ensure_latest_data()
-
+    if st.session_state.get("_sync_awaiting_refresh"):
+        st.caption("🔄 Nieuwste gegevens worden op de achtergrond opgehaald...")
     context = build_context()
     st.caption(
         f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
         f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
     )
-
     with st.expander("Gegevens verversen"):
         st.caption("De nieuwste gegevens worden automatisch opgehaald. Forceer hier indien nodig.")
         if st.button("Nu verversen"):
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state.pop("dashboard_selected_date", None)
+            st.session_state.pop("_sync_last_started_at", None)
             st.rerun()
         if st.session_state.get("startup_sync_error"):
             st.warning("Automatische synchronisatie gaf een melding:")
             st.code(st.session_state["startup_sync_error"])
-
     tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
     comparison_active = bool(st.session_state.get("comparison_active"))
     if comparison_active:
         tab_labels.append("Vergelijking")
-
     tabs = st.tabs(tab_labels)
     with tabs[0]:
         render_dashboard()
