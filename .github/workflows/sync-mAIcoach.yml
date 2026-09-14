@@ -21,24 +21,35 @@
 # Streamlit-specifiek thread-gedrag: een gewone, korte GitHub Actions-job
 # draait, schrijft weg, en is klaar - de app hoeft enkel te lezen.
 #
-# Vereiste repo secrets (Settings -> Secrets and variables -> Actions):
+# Vereiste repo secrets (Settings -> Secrets and variables -> Actions ->
+# tabblad "Repository secrets", NIET "Environment secrets"):
 #   INTERVALS_API_KEY        - dezelfde waarde als in Streamlit Cloud secrets
 #   INTERVALS_ATHLETE_ID     - dezelfde waarde als in Streamlit Cloud secrets
-#   Firestore/GCS-credential - AFHANKELIJK van hoe AICoach/gcs_store.py zijn
-#                              credentials leest (zie de code aldaar); als
-#                              dat dezelfde Firebase service-account is als
-#                              PadelAnalysis gebruikt, hergebruik dan het
-#                              bestaande repo secret FIREBASE_SERVICE_ACCOUNT_JSON
-#                              (zie scrape-padel.yml) in plaats van een nieuw
-#                              secret aan te maken.
+#   FIREBASE_SERVICE_ACCOUNT_JSON - AFHANKELIJK van hoe AICoach/gcs_store.py
+#                              zijn credentials leest (zie de code aldaar);
+#                              hergebruikt hier hetzelfde repo secret als
+#                              scrape-padel.yml. Pas de secret-naam hier aan
+#                              indien AICoach een ANDER credential-mechanisme
+#                              gebruikt.
 #
 # app_config.require_secret() leest EERST een omgevingsvariabele, pas daarna
 # st.secrets (zie AICoach/app_config.py) - vandaar dat het injecteren van
 # INTERVALS_API_KEY/INTERVALS_ATHLETE_ID als env-var hieronder volstaat,
-# zonder dat er een secrets.toml-bestand voor deze CI-run nodig is.
-
+# zonder dat er een secrets.toml-bestand voor deze CI-run nodig is. De
+# secret-WAARDE zelf staat NERGENS in dit bestand: "${{ secrets.NAAM }}" is
+# een door GitHub Actions ingevulde verwijzing naar de repo-secrets-opslag,
+# geen letterlijke tekst.
+#
+# MATCHFITAI_SECRETS_DEBUG_STEP_2026-09-14 (tijdelijk, op verzoek van Kim):
+# Kim kreeg bij een handmatige workflow-run nog steeds "Ontbrekende
+# configuratie: INTERVALS_API_KEY", OOK NADAT de repo-secrets waren
+# ingesteld. Om te bevestigen of GitHub de secret al dan niet correct
+# doorgeeft aan de runner (los van de sync-logica zelf), is een extra,
+# tijdelijke debug-stap toegevoegd die ENKEL de AANWEZIGHEID en LENGTE van
+# elke secret toont (nooit de waarde zelf, om lekken te vermijden). Zodra
+# bevestigd is dat de secrets correct aankomen, kan dit stapje weer
+# verwijderd worden - zie het duidelijk gemarkeerde blok hieronder.
 name: Sync mAICoach data (intervals.icu)
-
 on:
   schedule:
     # Elk uur, op het hele uur (UTC).
@@ -72,15 +83,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ─────────────────────────────────────────────────────────────────
+      # MATCHFITAI_SECRETS_DEBUG_STEP_2026-09-14 (TIJDELIJK)
+      # Toont NOOIT de echte waarde - enkel of de secret leeg/aanwezig is
+      # en hoeveel tekens hij telt, puur om te bevestigen dat GitHub de
+      # repo-secrets daadwerkelijk doorgeeft aan deze workflow-run.
+      # VERWIJDER deze stap zodra bevestigd is dat alles correct aankomt.
+      # ─────────────────────────────────────────────────────────────────
+      - name: "[TIJDELIJK] Debug - controleer of secrets aanwezig zijn (toont GEEN waarden)"
+        env:
+          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
+          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          check_secret () {
+            name="$1"
+            value="$2"
+            if [ -z "$value" ]; then
+              echo "  LEEG      : $name is NIET ingesteld of NIET doorgegeven aan deze run"
+            else
+              echo "  AANWEZIG  : $name heeft een waarde (lengte: ${#value} tekens)"
+            fi
+          }
+          echo "=== Secrets-check (repo secrets, Actions) ==="
+          check_secret "INTERVALS_API_KEY" "$INTERVALS_API_KEY"
+          check_secret "INTERVALS_ATHLETE_ID" "$INTERVALS_ATHLETE_ID"
+          check_secret "FIREBASE_SERVICE_ACCOUNT_JSON" "$FIREBASE_SERVICE_ACCOUNT_JSON"
+          echo "=============================================="
+
       - name: Run mAICoach-synchronisatie
         env:
           INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
           INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
-          # Zie opmerking hierboven: hergebruikt hetzelfde Firebase-secret
-          # als PadelAnalysis, indien dat ook is wat AICoach/gcs_store.py
-          # verwacht. Pas de secret-naam hier aan indien AICoach een ANDER
-          # credential-mechanisme gebruikt (bv. een apart GCS-service-
-          # account-JSON i.p.v. Firestore).
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
         run: |
           python -m AICoach.sync_latest
