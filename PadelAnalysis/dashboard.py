@@ -15,14 +15,50 @@ foutgevoelig maakte. Opgesplitst in:
 dashboard.py zelf doet enkel nog: st.set_page_config, CSS-injectie,
 navigatie-knoppen, en de routing naar de juiste page_xxx()-functie.
 
-Voordeel voor toekomstige wijzigingen: een aanpassing aan bv. enkel de
-rotatieplanner raakt nu alleen page_lineup_lab.py (~450 regels) in plaats
-van het volledige, vroegere dashboard.py (~1800 regels) - sneller en met
-minder risico op onbedoelde neveneffecten in andere pagina's.
+PADEL_ANALYSIS_SYSPATH_CHICKEN_EGG_FIX_2026-09-14 (kritieke bugfix):
+BUG (opgelost): dashboard.py importeerde dashboard_common als ALLERALEERSTE
+lokale import, in de veronderstelling dat "het via streamlit_app.py sowieso
+wel goed komt". Maar dashboard_common.py bevat zelf de sys.path-setup die
+de PadelAnalysis-map toevoegt - een kip-en-ei-probleem: om
+dashboard_common.py te kunnen VINDEN en importeren, moet Python al weten dat
+er in de PadelAnalysis-map gezocht moet worden, en dat wist het nog niet op
+het moment van die import.
+Lokaal (via `streamlit run dashboard.py`, uitgevoerd VANUIT de
+PadelAnalysis-map) voegt Streamlit de map van het uitgevoerde hoofdscript
+zelf automatisch toe aan sys.path - vandaar dat het daar wél werkte. Op de
+cloud wordt dashboard.py echter NIET als hoofdscript gestart, maar als
+sub-pagina via st.Page("PadelAnalysis/dashboard.py") vanuit het
+GECOMBINEERDE hoofdbestand streamlit_app.py (dat in de repo-root staat).
+Streamlit voegt dan enkel de map van streamlit_app.py toe aan sys.path -
+niet de PadelAnalysis-submap - waardoor "import dashboard_common" faalde
+met ModuleNotFoundError, en (omdat beide apps in HETZELFDE proces draaien
+via dezelfde st.navigation) ook mAICoach onbruikbaar werd.
+In de OUDE, monolithische dashboard.py (vóór de opsplitsing) stond deze
+exacte sys.path-toevoeging BOVENAAN dat bestand zelf, VOOR enige lokale
+import - vandaar dat die versie altijd werkte, ongeacht hoe ze werd
+aangeroepen. Bij de opsplitsing verhuisde die cruciale, EERST-uit-te-voeren
+stap per ongeluk naar dashboard_common.py, waardoor de volgorde verloren
+ging.
+Fix: dezelfde twee regels sys.path-setup staan nu OOK, EERST, hier in
+dashboard.py zelf - vóór "import dashboard_common". Dat is een bewuste,
+kleine duplicatie (dashboard_common.py behoudt zijn EIGEN kopie voor het
+geval een ander bestand dashboard_common rechtstreeks importeert zonder
+via dashboard.py te lopen) - maar noodzakelijk om het kip-en-ei-probleem op
+te lossen.
 """
+import sys
+from pathlib import Path
+
+# PADEL_ANALYSIS_SYSPATH_CHICKEN_EGG_FIX_2026-09-14: MOET vóór de
+# "import dashboard_common"-regel hieronder staan - zie uitleg hierboven.
+_ROOT = Path(__file__).parent
+for _p in [str(_ROOT), str(_ROOT / "scraper")]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import streamlit as st
 
-import dashboard_common as dc  # zorgt voor path-setup + alle gedeelde imports
+import dashboard_common as dc  # zorgt (nogmaals, onschadelijk) voor dezelfde path-setup + alle gedeelde imports
 from page_add_player import page_add_player
 from page_lineup_lab import page_lineup_lab
 from page_my_profile import page_my_profile
