@@ -1,39 +1,69 @@
 """
 lineup_lab.py — Opstelling-analyse (Fase 1: retrospectieve test-tool)
-
 Doel: een eerder gespeelde interclub-ontmoeting reconstrueren uit de al
 gescrapete Firestore-data (welke koppels speelden er echt, tegen wie, met
 welk resultaat), en daarnaast berekenen wat de beste alternatieve
 opstelling(en) geweest zouden zijn op basis van historische partner-synergie
 (buiten die ene ontmoeting om, om "leakage" te vermijden).
-
 Geen koppeling met een toekomstige wedstrijdkalender — dit werkt uitsluitend
 op data die al in Firestore staat.
-
 Belangrijke spelregel die hier hard gecodeerd is: een speler speelt op één
 en dezelfde dag nooit twee keer met dezelfde partner.
-"""
 
+PADEL_ANALYSIS_MATCHUP_EDGE_DIRECTION_FIX_2026-09-13 (kritieke bugfix):
+BUG (opgelost): matchup_edge() gebruikte de conventie "lager klassementsgetal
+= sterker" (zie de oude docstring van parse_ranking: "Lager = sterker
+(Tennis Vlaanderen-conventie)"). Dat is het TEGENOVERGESTELDE van de
+conventie die overal elders in dit project geldt (HOGER = STERKER, zie
+opponent_dossier.py en padelstats.be 'playing strength'). Voorbeeld: bij
+ons_rank=P100 (zwak) en hun_rank=P300 (sterk) gaf de oude formule een
+maximale POSITIEVE edge (+1.0), terwijl P300 net STERKER is - de matchup was
+dus net ONGUNSTIG voor ons. Fix: het teken van 'diff' is omgedraaid (ons -
+hun in plaats van hun - ons), zodat een hogere eigen waarde een POSITIEVE
+edge geeft. Getest in 3 richtingen (wij zwakker/sterker/gelijk).
+
+PADEL_ANALYSIS_BOARD_DEDUPE_SAME_MATCHID_FIX_2026-09-13 (kritieke bugfix,
+tweede van dezelfde familie als de eerdere partneranalyse-fix in
+lineup_quick.py):
+BUG (opgelost): _board_dedupe_key() gebruikte UITSLUITEND match_id om
+duplicaten te herkennen (nodig omdat 'entries' voor 1 ontmoeting BEIDE
+perspectieven van hetzelfde board kan bevatten, bv. zowel speler A's als
+speler B's eigen matchrecord van hun gezamenlijke wedstrijd). Voor bepaalde
+competitievormen (concreet gemeld: 'PADEL OPEN 200', een tornooi/interclub-
+variant) blijkt de scraper ALLE dubbels van één speeldag onder HETZELFDE
+match_id te registreren - niet slechts de twee kanten van één board, maar
+meerdere VERSCHILLENDE boards tegelijk. Omdat de oude dedupe-sleutel enkel
+op match_id steunde, werden al die verschillende boards ten onrechte als
+"hetzelfde board, ander perspectief" behandeld: reconstruct_boards() hield
+dan nog maar 1 board over in plaats van alle 4 (concreet, gemeld geval:
+Kim + partner, en drie andere boards waaronder Carl Ide + Nico Recour,
+werden herleid tot 1 board - "slechts 2 spelers zichtbaar bij Opstelling-
+analyse" was het zichtbare symptoom, willekeurig welk board toevallig als
+eerste verwerkt werd).
+Fix: de dedupe-sleutel bevat nu ook de SPELERS VAN DAT SPECIFIEKE BOARD
+(fallback_pid + partner_user_id, alfabetisch gesorteerd zodat beide
+perspectieven van HETZELFDE board nog steeds naar dezelfde sleutel
+resolven). Zo blijven boards met een gedeeld match_id maar VERSCHILLENDE
+spelers correct apart, terwijl de twee kanten van exact hetzelfde board nog
+steeds correct als 1 geteld worden. compute_pairwise_synergy() gebruikt
+dezelfde _board_dedupe_key() en profiteert dus automatisch mee van deze fix.
+Getest met de exacte, gemelde 9-entries-situatie (1 match_id, 4 werkelijke
+boards) - gaf voorheen 1 board terug, nu correct 4.
+"""
 import heapq
 import itertools
 import re
 from typing import Callable, Dict, List, Optional, Tuple
-
 import firebase_service as fb
-
-
 # ─────────────────────────────────────────────
 # Data ophalen
 # ─────────────────────────────────────────────
-
 def get_all_profiles() -> List[dict]:
     try:
         docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()
         return [d.to_dict() for d in docs]
     except Exception:
         return []
-
-
 def get_docs_for_players(player_ids: List[str]) -> Dict[str, dict]:
     """Haalt volledige player-documenten (met matches) op voor een lijst player_ids."""
     out = {}
@@ -42,12 +72,9 @@ def get_docs_for_players(player_ids: List[str]) -> Dict[str, dict]:
         if doc:
             out[str(pid)] = doc
     return out
-
-
 # ─────────────────────────────────────────────
 # Ontmoetingen (encounters) opsporen
 # ─────────────────────────────────────────────
-
 def _encounter_key(m: dict) -> Tuple:
     return (
         m.get("match_date") or "",
@@ -55,13 +82,17 @@ def _encounter_key(m: dict) -> Tuple:
         m.get("encounter") or "",
         m.get("competition_name") or "",
     )
-
-
 def build_encounter_index(docs: Dict[str, dict]) -> Dict[Tuple, List[Tuple[str, dict]]]:
     """
     Doorzoekt alle matches (interclub) van alle gegeven spelers en groepeert
     ze per ontmoeting (zelfde datum + reeks + 'ontmoeting'-tekst + competitie).
     Returns: {encounter_key: [(player_id, match_dict), ...]}
+
+    LET OP (datacompleetheid, geen codefout): deze index kan enkel dubbels
+    tonen van spelers die zelf AL in 'docs' zitten (dus al gescraped/
+    toegevoegd zijn via Speler toevoegen of de scout-flow). Speelde iemand
+    in dezelfde ontmoeting mee, maar is die persoon nooit zelf toegevoegd,
+    dan ontbreekt diens board volledig uit deze index.
     """
     index: Dict[Tuple, List[Tuple[str, dict]]] = {}
     for pid, doc in docs.items():
@@ -71,8 +102,6 @@ def build_encounter_index(docs: Dict[str, dict]) -> Dict[Tuple, List[Tuple[str, 
             key = _encounter_key(m)
             index.setdefault(key, []).append((pid, m))
     return index
-
-
 def list_encounters(index: Dict[Tuple, List[Tuple[str, dict]]]) -> List[Tuple[Tuple, str]]:
     """Geeft (key, leesbaar label) terug, recentste datum eerst."""
     items = []
@@ -83,23 +112,30 @@ def list_encounters(index: Dict[Tuple, List[Tuple[str, dict]]]) -> List[Tuple[Tu
         items.append((key, label, date))
     items.sort(key=lambda x: x[2] or "", reverse=True)
     return [(key, label) for key, label, _ in items]
-
-
 # ─────────────────────────────────────────────
 # Dubbels (individuele matchen binnen 1 ontmoeting) reconstrueren
 # ─────────────────────────────────────────────
-
 def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
+    """PADEL_ANALYSIS_BOARD_DEDUPE_SAME_MATCHID_FIX_2026-09-13:
+    Bevat nu ALTIJD de spelers van dit specifieke board (fallback_pid +
+    partner_user_id, alfabetisch gesorteerd), niet enkel match_id. Reden:
+    sommige competitievormen registreren meerdere VERSCHILLENDE boards van
+    dezelfde speeldag onder hetzelfde match_id - een dedupe puur op match_id
+    zou die dan foutief allemaal als 1 board behandelen. Door de spelers mee
+    op te nemen blijven verschillende boards met een gedeeld match_id apart,
+    terwijl de twee kanten van HETZELFDE board (speler A's en speler B's
+    eigen matchrecord van hun gezamenlijke wedstrijd) nog steeds naar
+    dezelfde sleutel resolven, dankzij de gesorteerde spelerspaar-component."""
     mid = m.get("match_id")
+    partner = m.get("partner_user_id")
+    pair_key = "|".join(sorted([str(fallback_pid), str(partner)]))
     if mid:
-        return f"mid:{mid}"
+        return f"mid:{mid}|pair:{pair_key}"
     # fallback als match_id ontbreekt: best-effort unieke sleutel
     return "fb:" + "|".join(str(x) for x in [
         m.get("match_date"), m.get("encounter"), m.get("round_text"),
-        m.get("score"), frozenset([fallback_pid, m.get("partner_user_id")]),
+        m.get("score"), pair_key,
     ])
-
-
 def reconstruct_boards(entries: List[Tuple[str, dict]]) -> List[dict]:
     """
     entries: lijst van (player_id, match_dict) voor 1 ontmoeting (kan beide
@@ -130,20 +166,15 @@ def reconstruct_boards(entries: List[Tuple[str, dict]]) -> List[dict]:
             "dedupe_key": key,
         }
     return list(seen.values())
-
-
 def required_counts_from_boards(boards: List[dict]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for b in boards:
         for p in b["pair"]:
             counts[p] = counts.get(p, 0) + 1
     return counts
-
-
 # ─────────────────────────────────────────────
 # Synergie & individuele vorm
 # ─────────────────────────────────────────────
-
 def compute_pairwise_synergy(
     docs: Dict[str, dict],
     player_ids: List[str],
@@ -153,12 +184,15 @@ def compute_pairwise_synergy(
     Scant ALLE matches (tornooi + interclub) van de gegeven spelers en bouwt
     per koppel (a,b) de historische samenspeel-winrate, met uitsluiting van
     de ontmoeting die net geanalyseerd wordt (om leakage te vermijden).
+
+    Gebruikt dezelfde _board_dedupe_key() als reconstruct_boards(), en
+    profiteert dus automatisch mee van
+    PADEL_ANALYSIS_BOARD_DEDUPE_SAME_MATCHID_FIX_2026-09-13 hierboven.
     """
     exclude_match_keys = exclude_match_keys or set()
     player_set = set(str(p) for p in player_ids)
     seen_global = set()
     acc: Dict[frozenset, dict] = {}
-
     for pid in player_ids:
         doc = docs.get(str(pid))
         if not doc:
@@ -173,7 +207,6 @@ def compute_pairwise_synergy(
             if key in seen_global:
                 continue
             seen_global.add(key)
-
             pair = frozenset({str(pid), str(partner)})
             won = m.get("won")
             slot = acc.setdefault(pair, {"matches": 0, "wins": 0, "losses": 0})
@@ -182,13 +215,10 @@ def compute_pairwise_synergy(
                 slot["wins"] += 1
             elif won is False:
                 slot["losses"] += 1
-
     for pair, slot in acc.items():
         known = slot["wins"] + slot["losses"]
         slot["winrate"] = (slot["wins"] / known) if known else None
     return acc
-
-
 def compute_individual_winrate(doc: Optional[dict]) -> Optional[float]:
     if not doc:
         return None
@@ -197,14 +227,17 @@ def compute_individual_winrate(doc: Optional[dict]) -> Optional[float]:
     losses = stats.get("losses", 0) or 0
     known = wins + losses
     return (wins / known) if known else None
-
-
 def find_player_ranking(player_id: str, docs: Dict[str, dict]) -> Optional[int]:
     """
     Onze eigen spelers hebben geen 'ranking'-veld op zichzelf (enkel
     tegenstanders krijgen een klassement vermeld in een match-record). We
     zoeken daarom opportunistisch: heeft IEMAND deze speler ooit als
     tegenstander gehad? Dan staat hun klassement daar vermeld.
+    LET OP: dit geeft het OFFICIËLE TVL-klassement terug (hoger = sterker,
+    zie parse_ranking hieronder) - GEEN padelstats.be playing strength. Voor
+    de opstelling-scenario-berekening in dashboard.py wordt tegenwoordig bij
+    voorkeur opponent_analysis.get_own_player_rating() gebruikt (padelstat
+    met deze functie als fallback), niet deze functie rechtstreeks.
     """
     for doc in docs.values():
         for m in doc.get("matches", []) or []:
@@ -213,8 +246,6 @@ def find_player_ranking(player_id: str, docs: Dict[str, dict]) -> Optional[int]:
             if str(m.get("opp2_user_id")) == str(player_id) and m.get("opp2_ranking"):
                 return parse_ranking(m["opp2_ranking"])
     return None
-
-
 def make_pair_score_fn(
     synergy: Dict[frozenset, dict],
     docs: Dict[str, dict],
@@ -228,12 +259,10 @@ def make_pair_score_fn(
       - anders (geen data): 0.5 (neutraal)
     """
     indiv_cache: Dict[str, Optional[float]] = {}
-
     def indiv(p: str) -> Optional[float]:
         if p not in indiv_cache:
             indiv_cache[p] = compute_individual_winrate(docs.get(str(p)))
         return indiv_cache[p]
-
     def score(a: str, b: str) -> float:
         pair = frozenset({str(a), str(b)})
         slot = synergy.get(pair)
@@ -246,14 +275,10 @@ def make_pair_score_fn(
         if vals:
             return sum(vals) / len(vals)
         return 0.5
-
     return score
-
-
 # ─────────────────────────────────────────────
 # Opstelling-optimalisatie (branch & bound)
 # ─────────────────────────────────────────────
-
 def optimize_lineup(
     players: List[str],
     required: Dict[str, int],
@@ -273,7 +298,6 @@ def optimize_lineup(
         raise ValueError("Som van 'required' moet even zijn (elk board = 2 spelers).")
     if total_slots == 0:
         return [], False
-
     sorted_partners = {
         p: sorted((q for q in players if q != p), key=lambda q: -synergy_fn(p, q))
         for p in players
@@ -281,15 +305,12 @@ def optimize_lineup(
     best_possible_pair_score = max(
         (synergy_fn(a, b) for a, b in itertools.combinations(players, 2)), default=0.0
     )
-
     heap: List[Tuple[float, tuple, list]] = []
     seen_keys = set()
     calls = [0]
     truncated = [False]
-
     def heap_worst():
         return heap[0][0] if heap else float("-inf")
-
     def backtrack(remaining, used_partners, pairs, score):
         calls[0] += 1
         if calls[0] > call_budget:
@@ -306,12 +327,10 @@ def optimize_lineup(
                 seen_keys.add(key)
                 heapq.heapreplace(heap, (score, key, list(pairs)))
             return
-
         remaining_boards = sum(remaining.values()) // 2
         upper_bound = score + remaining_boards * best_possible_pair_score
         if len(heap) >= top_n and upper_bound <= heap_worst():
             return
-
         anchor = max((p for p in players if remaining[p] > 0), key=lambda p: (remaining[p], p))
         for partner in sorted_partners[anchor]:
             if remaining[partner] <= 0 or partner in used_partners[anchor]:
@@ -329,49 +348,48 @@ def optimize_lineup(
             remaining[partner] += 1
             if calls[0] > call_budget:
                 return
-
     backtrack(dict(required), {p: set() for p in players}, [], 0.0)
     results = sorted(heap, key=lambda x: -x[0])
     return [(round(s, 4), p) for s, _, p in results], truncated[0]
-
-
 def score_actual_lineup(boards: List[dict], synergy_fn: Callable[[str, str], float]) -> float:
     total = 0.0
     for b in boards:
         a, c = tuple(b["pair"])
         total += synergy_fn(a, c)
     return round(total, 4)
-
-
 # ─────────────────────────────────────────────
 # Scenario-analyse: onze beste tegenzet per mogelijk tegenstander-scenario
 # ─────────────────────────────────────────────
-
 def parse_ranking(rank_str) -> Optional[int]:
-    """'P100' -> 100, 'P 200' -> 200. Lager = sterker (Tennis Vlaanderen-conventie)."""
+    """'P100' -> 100, 'P 200' -> 200.
+
+    PADEL_ANALYSIS_MATCHUP_EDGE_DIRECTION_FIX_2026-09-13: deze functie parst
+    enkel het cijfer uit de tekst - de vroegere docstring-vermelding "Lager =
+    sterker (Tennis Vlaanderen-conventie)" was MISLEIDEND en bracht
+    matchup_edge() op het verkeerde spoor. Correcte, projectbrede conventie:
+    HOGER = STERKER."""
     if rank_str is None:
         return None
     m = re.search(r"(\d+)", str(rank_str))
     return int(m.group(1)) if m else None
-
-
 def matchup_edge(our_ranks: List[Optional[int]], their_ranks: List[Optional[int]]) -> float:
     """
     Ruwe, transparante inschatting van het verschil in slagkracht tussen twee
-    koppels op basis van klassement (GEEN echte winkans — enkel een relatieve
-    indicatie). Positief = in ons voordeel (hun klassementscijfer hoger/zwakker
-    dan het onze). Genormaliseerd zodat het ongeveer in dezelfde grootte-orde
-    ligt als een winrate-verschil (0–1-achtig), zodat het samen met de
-    synergie-score kan opgeteld worden zonder die te overheersen.
+    koppels op basis van klassement/rating (GEEN echte winkans — enkel een
+    relatieve indicatie). Positief = in ons voordeel.
+
+    PADEL_ANALYSIS_MATCHUP_EDGE_DIRECTION_FIX_2026-09-13: het teken is
+    gecorrigeerd. HOGER GETAL = STERKER. Is ons gemiddelde hoger dan dat van
+    de tegenstander, dan zijn WIJ sterker en is de edge nu correct POSITIEF.
+    Genormaliseerd zodat het ongeveer in dezelfde grootte-orde ligt als een
+    winrate-verschil (0–1-achtig).
     """
     ours = [r for r in our_ranks if r is not None]
     theirs = [r for r in their_ranks if r is not None]
     if not ours or not theirs:
         return 0.0
-    diff = (sum(theirs) / len(theirs)) - (sum(ours) / len(ours))
+    diff = (sum(ours) / len(ours)) - (sum(theirs) / len(theirs))
     return max(-1.0, min(1.0, diff / 150.0))  # ±150 klassementspunten ≈ volle uitslag van de schaal
-
-
 def optimize_lineup_vs_scenario(
     players: List[str],
     required: Dict[str, int],
@@ -385,10 +403,10 @@ def optimize_lineup_vs_scenario(
     Zoekt, voor een SPECIFIEK tegenstander-scenario (hun werkelijke koppels uit
     een eerdere wedstrijd), de beste combinatie van (a) onze eigen koppelvorming
     en (b) welke van onze koppels tegen welk tegenstanderskoppel uitkomt.
-
     opponent_boards: lijst van {"opponent_pair": [{"name","user_id","ranking"(optioneel)}, ...]}
-    player_rankings: pid -> klassementscijfer (lager = sterker), voor ONZE spelers
-
+    player_rankings: pid -> rating/klassementscijfer (HOGER = STERKER), voor
+      ONZE spelers. Kan zowel het officiële TVL-klassement als een
+      padelstats.be playing strength-waarde bevatten.
     Returns: (resultaten, truncated) — resultaten = lijst van
       {"total_score", "assignment": [{"our_pair":(p1,p2), "synergy":.., "vs": {...}, "edge":.., "opponent_pair":[...]}]}
       gesorteerd van beste naar slechtste, max top_n.
@@ -396,13 +414,11 @@ def optimize_lineup_vs_scenario(
     candidates, truncated = optimize_lineup(players, required, own_synergy_fn, top_n=candidate_pool)
     if not candidates:
         return [], truncated
-
     n_boards = len(opponent_boards)
     their_rank_lists = []
     for b in opponent_boards:
         ranks = [parse_ranking(p.get("ranking")) for p in b.get("opponent_pair", [])]
         their_rank_lists.append(ranks)
-
     results = []
     for synergy_total, pairs in candidates:
         n = min(len(pairs), n_boards)
@@ -410,7 +426,6 @@ def optimize_lineup_vs_scenario(
             continue
         pair_list = list(pairs)[:n]
         best_for_this_pairing = None
-
         # Voor kleine n (boards per ontmoeting blijft beperkt, typisch ≤6) is
         # brute-force permutatie van de toewijzing aan boards probleemloos snel.
         for perm in itertools.permutations(range(n_boards), n):
@@ -430,10 +445,8 @@ def optimize_lineup_vs_scenario(
                 })
             if best_for_this_pairing is None or total > best_for_this_pairing["total_score"]:
                 best_for_this_pairing = {"total_score": round(total, 3), "assignment": assignment}
-
         if best_for_this_pairing:
             results.append(best_for_this_pairing)
-
     seen = set()
     deduped = []
     for r in sorted(results, key=lambda x: -x["total_score"]):
@@ -441,5 +454,4 @@ def optimize_lineup_vs_scenario(
         if key not in seen:
             seen.add(key)
             deduped.append(r)
-
     return deduped[:top_n], truncated

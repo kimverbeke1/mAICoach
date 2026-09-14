@@ -4,22 +4,17 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
 import firebase_admin
 from firebase_admin import credentials, firestore
-
 logger = logging.getLogger(__name__)
-
 SERVICE_ACCOUNT_FILE = "firebase-key.json"
 PLAYERS_COLLECTION = "players"
 PLAYER_SEARCH_CACHE_COLLECTION = "player_search_cache"
 PLAYER_PROFILES_COLLECTION = "player_profiles"
-
-
+SAVED_LINEUP_ANALYSES_COLLECTION = "saved_lineup_analyses"
+PADELSTAT_CACHE_COLLECTION = "padelstat_cache"
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
 def convert_firestore_values(obj: Any):
     if isinstance(obj, dict):
         return {k: convert_firestore_values(v) for k, v in obj.items()}
@@ -31,8 +26,6 @@ def convert_firestore_values(obj: Any):
         except Exception:
             return str(obj)
     return obj
-
-
 def sanitize_for_firestore(obj: Any):
     if isinstance(obj, dict):
         return {str(k): sanitize_for_firestore(v) for k, v in obj.items()}
@@ -46,16 +39,10 @@ def sanitize_for_firestore(obj: Any):
         except Exception:
             return str(obj)
     return obj
-
-
 def normalize_name(name: str) -> str:
     return " ".join((name or "").lower().split()).strip()
-
-
 def normalize_search_key(name_query: str, club: Optional[str] = None, sport: str = "Padel") -> str:
     return f"{(sport or '').strip().lower()}|{normalize_name(name_query)}|{normalize_name(club or '')}"
-
-
 def build_minimal_defaults(player_id: str, player_data: dict) -> dict:
     data = dict(player_data or {})
     data.setdefault("player_id", str(player_id))
@@ -76,15 +63,12 @@ def build_minimal_defaults(player_id: str, player_data: dict) -> dict:
     stats.setdefault("winrate", 0.0)
     data["stats"] = stats
     return data
-
-
 # ---------------------------------------------------------------------------
 # Credential loading — 3 mogelijke bronnen, in deze volgorde:
 #   1. Streamlit secrets ([firebase] sectie)     -> Streamlit Community Cloud
 #   2. Environment variable met volledige JSON   -> GitHub Actions / CI
 #   3. Lokaal firebase-key.json bestand          -> lokale ontwikkelmachine
 # ---------------------------------------------------------------------------
-
 def _load_streamlit_secrets_credentials() -> Optional[credentials.Certificate]:
     try:
         import streamlit as st
@@ -96,8 +80,6 @@ def _load_streamlit_secrets_credentials() -> Optional[credentials.Certificate]:
         return credentials.Certificate(firebase_cfg)
     except Exception:
         return None
-
-
 def _load_env_credentials() -> Optional[credentials.Certificate]:
     """
     Laadt Firebase-credentials uit een environment variable — bedoeld voor
@@ -113,8 +95,6 @@ def _load_env_credentials() -> Optional[credentials.Certificate]:
         return credentials.Certificate(info)
     except Exception:
         return None
-
-
 def _load_local_file_credentials() -> Optional[credentials.Certificate]:
     candidate_paths = [
         SERVICE_ACCOUNT_FILE,
@@ -125,8 +105,6 @@ def _load_local_file_credentials() -> Optional[credentials.Certificate]:
         if os.path.exists(candidate):
             return credentials.Certificate(candidate)
     return None
-
-
 def _init_firebase():
     if firebase_admin._apps:
         return firestore.client()
@@ -143,25 +121,17 @@ def _init_firebase():
         )
     firebase_admin.initialize_app(cred)
     return firestore.client()
-
-
 db = _init_firebase()
-
-
 def save_player(player_id: str, player_data: dict):
     prepared = sanitize_for_firestore(build_minimal_defaults(player_id, player_data))
     db.collection(PLAYERS_COLLECTION).document(str(player_id)).set(prepared, merge=False)
     return prepared
-
-
 def get_player(player_id: str, converted: bool = True):
     doc = db.collection(PLAYERS_COLLECTION).document(str(player_id)).get()
     if not doc.exists:
         return None
     data = doc.to_dict()
     return convert_firestore_values(data) if converted else data
-
-
 def save_player_profile(player_id: str, display_name: Optional[str] = None, club: Optional[str] = None, sport: str = "Padel", dashboard_url: Optional[str] = None, aliases: Optional[List[str]] = None):
     doc = {
         "player_id": str(player_id),
@@ -177,26 +147,18 @@ def save_player_profile(player_id: str, display_name: Optional[str] = None, club
     }
     db.collection(PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(sanitize_for_firestore(doc), merge=True)
     return doc
-
-
 def get_player_profile(player_id: str, converted: bool = True):
     doc = db.collection(PLAYER_PROFILES_COLLECTION).document(str(player_id)).get()
     if not doc.exists:
         return None
     data = doc.to_dict()
     return convert_firestore_values(data) if converted else data
-
-
 def get_app_settings() -> dict:
     """Klein settings-document, o.a. wie 'jij' bent (home_player_id)."""
     doc = db.collection("app_settings").document("main").get()
     return doc.to_dict() if doc.exists else {}
-
-
 def save_app_settings(data: dict):
     db.collection("app_settings").document("main").set(sanitize_for_firestore(data), merge=True)
-
-
 def search_player_profiles(name_query: str, club: Optional[str] = None, limit: int = 20, converted: bool = True):
     name_q = normalize_name(name_query)
     club_q = normalize_name(club or "")
@@ -212,8 +174,6 @@ def search_player_profiles(name_query: str, club: Optional[str] = None, limit: i
             out.append(convert_firestore_values(data) if converted else data)
     out = sorted(out, key=lambda x: (x.get("display_name") or x.get("player_id") or ""))
     return out[:limit]
-
-
 def save_player_search_cache(name_query: str, club: Optional[str], sport: str, candidates: List[Dict[str, Any]]):
     key = normalize_search_key(name_query, club, sport)
     doc = {
@@ -227,8 +187,6 @@ def save_player_search_cache(name_query: str, club: Optional[str], sport: str, c
     }
     db.collection(PLAYER_SEARCH_CACHE_COLLECTION).document(key).set(doc, merge=False)
     return doc
-
-
 def get_player_search_cache(name_query: str, club: Optional[str] = None, sport: str = "Padel", converted: bool = True):
     key = normalize_search_key(name_query, club, sport)
     doc = db.collection(PLAYER_SEARCH_CACHE_COLLECTION).document(key).get()
@@ -236,12 +194,9 @@ def get_player_search_cache(name_query: str, club: Optional[str] = None, sport: 
         return None
     data = doc.to_dict()
     return convert_firestore_values(data) if converted else data
-
-
 def save_player_v2(player_id: str, player_data: dict):
     """
     Save v2 schema player data directly, skipping legacy build_minimal_defaults.
-
     PADEL_ANALYSIS_WRITE_GUARD_FIX (deze beurt):
     BUG (opgelost): deze functie schreef altijd met merge=False (volledige
     documentvervanging). Als een scrape-run om welke reden dan ook een
@@ -252,7 +207,6 @@ def save_player_v2(player_id: str, player_data: dict):
     VOLLEDIG OVERSCHREVEN en dus verloren, zonder enige waarschuwing. Dit is
     de meest waarschijnlijke verklaring voor "ik had deze speler al
     gescraped, maar nu toont de app hem plots als niet-gescraped".
-
     Fix: vóór het schrijven wordt de bestaande data opgehaald. Als de NIEUWE
     data significant MINDER matches bevat dan wat al gekend was, weigert
     deze functie de bestaande matches/stats te laten verdwijnen -- de oude
@@ -269,7 +223,6 @@ def save_player_v2(player_id: str, player_data: dict):
     prepared["player_id"] = str(player_id)
     if "last_updated" not in prepared:
         prepared["last_updated"] = utc_now_iso()
-
     new_matches = prepared.get("matches") or []
     try:
         existing = get_player(player_id, converted=False)
@@ -277,7 +230,6 @@ def save_player_v2(player_id: str, player_data: dict):
         logger.warning(f"[{player_id}] Kon bestaand document niet ophalen voor write-guard check: {e}")
         existing = None
     existing_matches = (existing or {}).get("matches") or []
-
     if existing_matches and len(new_matches) < len(existing_matches):
         warn_msg = (
             f"Nieuwe scrape had {len(new_matches)} matches, minder dan de "
@@ -289,11 +241,8 @@ def save_player_v2(player_id: str, player_data: dict):
         prepared["stats"] = existing.get("stats", prepared.get("stats", {}))
         prepared["_write_guard_triggered"] = True
         prepared["_write_guard_note"] = warn_msg
-
     db.collection(PLAYERS_COLLECTION).document(str(player_id)).set(prepared, merge=False)
     return prepared
-
-
 def delete_player(player_id: str) -> dict:
     pid = str(player_id)
     db.collection(PLAYER_PROFILES_COLLECTION).document(pid).delete()
@@ -302,3 +251,67 @@ def delete_player(player_id: str) -> dict:
     if str(settings.get("home_player_id") or "") == pid:
         save_app_settings({"home_player_id": None})
     return {"player_id": pid, "deleted_from": [PLAYER_PROFILES_COLLECTION, PLAYERS_COLLECTION]}
+def cleanup_ghost_profiles() -> int:
+    """PADEL_ANALYSIS_GHOST_PROFILE_CLEANUP_2026-09-12:
+    Verwijdert profieldocumenten zonder display_name EN zonder player_id.
+    Zulke documenten zijn geen echte spelersprofielen, maar ontstaan als
+    bijproduct van merge=True-writes op een player_id die geen (meer)
+    bestaand profiel heeft -- met name dashboard._save_poule_url() (schrijft
+    enkel {"poule_reeks_url": ...}) en de Playwright/GitHub Actions-flow die
+    interclub_schedule wegschrijft."""
+    removed = 0
+    for doc in db.collection(PLAYER_PROFILES_COLLECTION).stream():
+        data = doc.to_dict() or {}
+        if not data.get("display_name") and not data.get("player_id"):
+            doc.reference.delete()
+            removed += 1
+    return removed
+def save_lineup_analysis(owner_player_id: str, data: dict) -> str:
+    """PADEL_ANALYSIS_SAVED_LINEUP_ANALYSES_2026-09-12:
+    Slaat een berekende opstelling-scenario-analyse permanent op (nieuwe
+    collectie), zodat ze later terug te bekijken is via het tabblad
+    'Opgeslagen analyses' in Opstelling-analyse, zonder herberekening.
+    Geeft het aangemaakte document-ID terug."""
+    doc = dict(data)
+    doc["owner_player_id"] = str(owner_player_id)
+    doc["saved_at"] = utc_now_iso()
+    ref = db.collection(SAVED_LINEUP_ANALYSES_COLLECTION).document()
+    ref.set(sanitize_for_firestore(doc))
+    return ref.id
+def list_lineup_analyses(owner_player_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Geeft alle opgeslagen opstelling-analyses terug (recentste eerst).
+    Optioneel gefilterd op wie de analyse opsloeg (owner_player_id)."""
+    docs = db.collection(SAVED_LINEUP_ANALYSES_COLLECTION).stream()
+    out = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if owner_player_id and str(data.get("owner_player_id") or "") != str(owner_player_id):
+            continue
+        data["_doc_id"] = doc.id
+        out.append(convert_firestore_values(data))
+    out.sort(key=lambda x: x.get("saved_at") or "", reverse=True)
+    return out
+def delete_lineup_analysis(doc_id: str) -> None:
+    db.collection(SAVED_LINEUP_ANALYSES_COLLECTION).document(str(doc_id)).delete()
+def save_padelstat_rating(player_id: str, padelstat_id: str, rating: Optional[int], rating_source: str, raw_text_snippet: str = "") -> dict:
+    """PADEL_ANALYSIS_PADELSTAT_CALIBRATION_2026-09-12:
+    Cachet een opgezochte padelstats.be-waarde voor een eigen speler, zodat
+    dezelfde speler niet herhaaldelijk opnieuw gescraped hoeft te worden
+    (padelstats_scraper.py gebruikt Playwright, wat traag is en de site
+    onnodig belast bij herhaling). doc-ID = onze eigen player_id, niet het
+    padelstats-ID, zodat opzoeken vanuit de rest van de app eenvoudig blijft."""
+    doc = {
+        "player_id": str(player_id),
+        "padelstat_id": str(padelstat_id),
+        "rating": rating,
+        "rating_source": rating_source,
+        "raw_text_snippet": raw_text_snippet,
+        "fetched_at": utc_now_iso(),
+    }
+    db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).set(sanitize_for_firestore(doc), merge=True)
+    return doc
+def get_padelstat_rating(player_id: str) -> Optional[dict]:
+    doc = db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).get()
+    if not doc.exists:
+        return None
+    return convert_firestore_values(doc.to_dict())

@@ -1,6 +1,5 @@
 """
-opponent_dossier.py - scoutingdossier voor een tegenstander (v5).
-
+opponent_dossier.py - scoutingdossier voor een tegenstander (v7).
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De strikte poulefilter uit v2 was correct maar leverde in de praktijk bijna
 niets op: de huidige competitieperiode is pas gestart, dus tegenstanders
@@ -9,48 +8,45 @@ expliciet in TWEE lagen:
   1. HUIDIGE POULE  - strikt op spelgroep_id. Feitelijk, maar vaak dun.
   2. HISTORIEK      - alle overige interclubmatches, per periode gegroepeerd,
                       duidelijk gelabeld als context uit een andere poule.
-
 PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-10 (v4):
 In dit klassementsysteem geldt HOE HOGER HET GETAL, HOE BETER. "Beste ooit" =
 het HOOGSTE getal, niet het laagste. De tijdlijngrafiek gebruikt een normale
 (niet-omgekeerde) as.
-
 PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10 (v5):
 De ruwe periode-omschrijving die TVL gebruikt (bv. "Startklassement" of
 "Zomerklassement") wordt nu verkort tot "Start <jaar>" / "Zomer <jaar>" op de
-grafiek-as en in de "beste klassement bereikt op"-tekst. Zonder deze fix
-verscheen de volledige, lange ruwe tekst als as-label, wat onleesbaar was
-zodra er geen (kortere) datum beschikbaar was. Als er geen jaartal in de bron
-zit, wordt enkel het seizoenswoord getoond (er wordt nooit een jaartal
-verzonnen).
-
+grafiek-as en in de "beste klassement bereikt op"-tekst.
+PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13 (v7, BELANGRIJKE WIJZIGING):
+De eerder in v6 toegevoegde EIGEN Elo-berekening (elo_rating.compute_player_
+elo) is VERWIJDERD uit dit bestand. Op uitdrukkelijk verzoek van Kim, na een
+kalibratietest die aantoonde dat die eigen berekening structureel en
+onoplosbaar afweek van de externe referentie padelstats.be (zie
+elo_rating.py voor de volledige toelichting), wordt de 'playing strength'
+nu UITSLUITEND gehaald uit de gecachete padelstats.be-waarde
+(firebase_service.get_padelstat_rating), opgehaald via
+padelstats_scraper.py / bulk_fetch_padelstat_ratings.py. Is die nog niet
+opgehaald voor een speler, dan wordt dat EXPLICIET getoond ("nog niet
+opgehaald") in plaats van een minder betrouwbaar eigen cijfer te tonen.
 reeks_url is in de praktijk None in alle opgeslagen matchrecords; de filter
 steunt daarom op spelgroep_id, met reeks_url enkel als optionele extra.
-
 Bordpositie-heuristiek is verwijderd (was een telling van round_text en gaf
 geen betrouwbare bordnummering).
 """
 from __future__ import annotations
-
 import re
 from collections import Counter
+from datetime import datetime
 from typing import Optional
-
 import pandas as pd
 import streamlit as st
-
 import firebase_service as fb
-
 _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11,
     "december": 12,
 }
-
 # Minimum aantal matchen voor een statistisch zinvolle winrate.
 MIN_MATCHES_FOR_WINRATE = 3
-
-
 # ─────────────────────────────────────────────
 # Parsers / normalisatie
 # ─────────────────────────────────────────────
@@ -68,13 +64,9 @@ def _parse_match_date(text) -> Optional[tuple]:
     if match and match.group(2) in _DUTCH_MONTHS:
         return int(match.group(3)), _DUTCH_MONTHS[match.group(2)], int(match.group(1))
     return None
-
-
 def _parse_rank(value) -> Optional[int]:
     match = re.search(r"(\d+)", str(value or ""))
     return int(match.group(1)) if match else None
-
-
 def _normalize_id(value) -> str:
     """Maakt spelgroep-ID's vergelijkbaar ongeacht of ze als int, float of
     string werden opgeslagen ('702074', 702074, 702074.0)."""
@@ -82,8 +74,6 @@ def _normalize_id(value) -> str:
     if re.fullmatch(r"\d+\.0+", text):
         text = text.split(".", 1)[0]
     return text
-
-
 def _period_sort_key(label) -> tuple:
     """Sorteert period_labels zoals 'Resultaten van week 27/2026 tot en met
     week 48/2026' chronologisch. Valt terug op alfabetisch bij onbekend
@@ -98,11 +88,8 @@ def _period_sort_key(label) -> tuple:
     if years:
         return 1, int(years[-1]), 0, text
     return 0, 0, 0, text
-
-
 def _short_klassement_label(periode: str) -> str:
     """PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10.
-
     Verkort ruwe periode-omschrijvingen zoals 'Startklassement' of
     'Zomerklassement' tot 'Start <jaar>' / 'Zomer <jaar>', leesbaar als
     as-label op een grafiek. Als er geen jaartal in de brontekst zelf staat,
@@ -123,18 +110,12 @@ def _short_klassement_label(periode: str) -> str:
     else:
         return text if len(text) <= 18 else text[:15] + "..."
     return f"{season} {year}".strip()
-
-
 def _is_interclub(match: dict) -> bool:
     value = str(match.get("match_type") or match.get("type") or "").strip().lower()
     return value == "interclub" or "interclub" in value
-
-
 def _winrate_str(wins: int, losses: int) -> str:
     known = wins + losses
     return f"{round(wins / known * 100, 1)}%" if known else "-"
-
-
 def _winrate_display(wins: int, losses: int) -> str:
     """Toont de winrate, maar markeert expliciet wanneer ze op te weinig
     matchen gebaseerd is om betekenis te hebben."""
@@ -145,8 +126,17 @@ def _winrate_display(wins: int, losses: int) -> str:
     if known < MIN_MATCHES_FOR_WINRATE:
         return f"{text} ({known}x)"
     return text
-
-
+def _format_fetched_at(value) -> str:
+    """Kort, leesbaar formaat voor een ISO-timestamp (bv. padelstat
+    fetched_at). Geeft de ruwe waarde terug als parsing faalt, zodat er
+    nooit een onverwachte crash optreedt op een onverwacht formaat."""
+    if not value:
+        return "onbekend"
+    try:
+        cleaned = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned).strftime("%d/%m/%Y")
+    except Exception:
+        return str(value)
 # ─────────────────────────────────────────────
 # Klassementshistoriek
 # LET OP: hoe HOGER het klassementsgetal, hoe BETER de speler.
@@ -174,7 +164,6 @@ def _history_rows(doc: dict) -> list[dict]:
             "periode_kort": _short_klassement_label(periode_raw),
             "rank": rank,
         })
-
     def sort_key(row):
         parsed = _parse_match_date(row.get("datum"))
         if parsed:
@@ -184,10 +173,7 @@ def _history_rows(doc: dict) -> list[dict]:
             return (1, period[1], period[2], 0, 0)
         # Onbekend formaat: bewaar de oorspronkelijke volgorde.
         return (0, 0, 0, 0, -row["index"])
-
     return sorted(rows, key=sort_key, reverse=True)
-
-
 def _history_summary(doc: dict):
     """Geeft (huidig, beste, wanneer_beste, alle_rijen) terug.
     'beste' = HOOGSTE klassementsgetal (hoger = sterker)."""
@@ -198,13 +184,9 @@ def _history_summary(doc: dict):
     best = max(rows, key=lambda row: row["rank"])
     best_when = best.get("datum") or best.get("periode_kort") or best.get("periode")
     return current["rank"], best["rank"], best_when, rows
-
-
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
     """Behouden voor compatibiliteit met bestaande aanroepen. Hoogste getal."""
     return max((row["rank"] for row in _history_rows(doc)), default=None)
-
-
 def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]:
     """Leidt een klassement af uit matchrecords van ANDERE spelers waarin deze
     persoon als tegenstander voorkwam. Hoogste gevonden waarde = beste."""
@@ -221,8 +203,6 @@ def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]
             if rank is not None:
                 values.append(rank)
     return max(values) if values else None
-
-
 def _current_rank_fallback(player_id: str, matches: list[dict], search_docs: dict) -> Optional[int]:
     """Meest recente bekende klassement (chronologisch, niet op hoogte)."""
     dated = []
@@ -244,8 +224,6 @@ def _current_rank_fallback(player_id: str, matches: list[dict], search_docs: dic
         if rank is not None:
             return rank
     return None
-
-
 def _render_ranking_timeline(rows: list[dict]) -> None:
     if not rows:
         st.info("Nog geen klassementshistoriek opgeslagen voor deze speler.")
@@ -269,8 +247,6 @@ def _render_ranking_timeline(rows: list[dict]) -> None:
         st.altair_chart(visual, use_container_width=True)
     except Exception:
         st.line_chart(chart, height=240)
-
-
 # ─────────────────────────────────────────────
 # Tweelaagse poulefilter
 # ─────────────────────────────────────────────
@@ -280,7 +256,6 @@ def split_matches(
     current_reeks_url: Optional[str] = None,
 ) -> tuple[list[dict], list[dict], dict]:
     """Splitst interclubmatches in (huidige poule, historiek, meta).
-
     Laag 1 (huidige poule): strikt op spelgroep_id. Als er geen spelgroep_id
     meegegeven is, is deze laag leeg - er wordt NOOIT geraden.
     Laag 2 (historiek): alle overige interclubmatches. Dit is bewust GEEN
@@ -290,11 +265,9 @@ def split_matches(
     interclub = [match for match in matches if _is_interclub(match)]
     target_id = _normalize_id(current_spelgroep_id)
     target_url = str(current_reeks_url or "").strip().rstrip("/").lower()
-
     current: list[dict] = []
     history: list[dict] = []
     matched_on = "geen poulecontext"
-
     if target_id:
         for match in interclub:
             match_id = _normalize_id(
@@ -311,18 +284,14 @@ def split_matches(
             matched_on = "reeks_url"
     else:
         history = list(interclub)
-
     if target_id and not current:
         matched_on = "poule herkend, nog geen matchen gespeeld"
-
     meta = {
         "matched_on": matched_on,
         "target_spelgroep_id": target_id or None,
         "interclub_total": len(interclub),
     }
     return current, history, meta
-
-
 def _period_breakdown(matches: list[dict]) -> list[dict]:
     """Groepeert historiek per period_label + spelgroep_id, recentste eerst."""
     buckets: dict[tuple, dict] = {}
@@ -345,8 +314,6 @@ def _period_breakdown(matches: list[dict]) -> list[dict]:
     for row in rows:
         row["Winrate"] = _winrate_display(row["W"], row["V"])
     return sorted(rows, key=lambda row: _period_sort_key(row["Periode"]), reverse=True)
-
-
 def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     buckets: dict[str, dict] = {}
     for match in matches:
@@ -363,8 +330,6 @@ def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     for row in rows:
         row["Winrate"] = _winrate_display(row["W"], row["V"])
     return sorted(rows, key=lambda row: (row["Matches"], row["W"]), reverse=True)[:limit]
-
-
 def _result_rows(matches: list[dict], limit: Optional[int] = None) -> list[dict]:
     ordered = sorted(
         matches,
@@ -384,8 +349,6 @@ def _result_rows(matches: list[dict], limit: Optional[int] = None) -> list[dict]
             "W/V": match.get("result") or ("W" if match.get("won") is True else ("V" if match.get("won") is False else "-")),
         })
     return rows
-
-
 def _form_string(matches: list[dict], limit: int = 8) -> str:
     """Recente vorm als leesbare reeks, recentste links (bv. 'W W V W')."""
     ordered = sorted(
@@ -402,8 +365,6 @@ def _form_string(matches: list[dict], limit: int = 8) -> str:
         else:
             marks.append("-")
     return " ".join(marks) if marks else "-"
-
-
 # ─────────────────────────────────────────────
 # Spelerssamenvatting (plat, opslagbaar in Firestore)
 # ─────────────────────────────────────────────
@@ -416,7 +377,6 @@ def build_player_summary(
     global_docs: Optional[dict] = None,
 ) -> dict:
     """Berekent alle scoutinggegevens voor een speler in twee lagen.
-
     all_docs:    matchdocumenten van de tegenstander-roster (smal).
     global_docs: optioneel, alle gekende spelers - breder, gebruikt voor de
                  opportunistische ranking-fallback.
@@ -426,19 +386,15 @@ def build_player_summary(
         profile_doc = fb.get_player_profile(player_id) or {}
     except Exception:
         profile_doc = {}
-
     ranking_doc = doc if doc.get("klassement_history") else profile_doc
     matches = doc.get("matches", []) or []
-
     current_matches, history_matches, meta = split_matches(
         matches, current_spelgroep_id, current_reeks_url
     )
-
     wins_cur = sum(1 for m in current_matches if m.get("won") is True)
     losses_cur = sum(1 for m in current_matches if m.get("won") is False)
     wins_hist = sum(1 for m in history_matches if m.get("won") is True)
     losses_hist = sum(1 for m in history_matches if m.get("won") is False)
-
     rank_search_docs = global_docs if global_docs else all_docs
     current_rank, best_rank, best_when, history_rows = _history_summary(ranking_doc)
     current_rank = current_rank or _current_rank_fallback(player_id, matches, rank_search_docs)
@@ -446,19 +402,36 @@ def build_player_summary(
     # 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
     if current_rank is not None and (best_rank is None or current_rank > best_rank):
         best_rank = current_rank
-
+    # PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13: 'playing strength' komt nu
+    # UITSLUITEND uit de gecachete padelstats.be-waarde. Geen eigen
+    # berekening meer als fallback - is er niets gecached, dan blijft dit
+    # veld gewoon None en toont de UI expliciet "nog niet opgehaald".
+    try:
+        padelstat = fb.get_padelstat_rating(player_id)
+    except Exception:
+        padelstat = None
+    if padelstat and padelstat.get("rating") is not None:
+        current_elo = padelstat["rating"]
+        elo_source = "padelstat"
+        elo_fetched_at = padelstat.get("fetched_at")
+    else:
+        current_elo = None
+        elo_source = "none"
+        elo_fetched_at = None
     return {
-        "schema": 5,
+        "schema": 7,
         "player_id": str(player_id),
         "name": name,
-
         # Klassement
         "current_rank": current_rank,
         "best_rank": best_rank,
         "best_rank_when": best_when,
         "history": history_rows,
         "history_available": bool(history_rows),
-
+        # Playing strength (padelstats.be, extern - geen eigen berekening meer)
+        "current_elo": current_elo,
+        "elo_source": elo_source,
+        "elo_fetched_at": elo_fetched_at,
         # Laag 1: huidige poule
         "matches_relevant": len(current_matches),
         "wins_relevant": wins_cur,
@@ -469,7 +442,6 @@ def build_player_summary(
         "poule_results_exact": bool(current_matches),
         "poule_matched_on": meta["matched_on"],
         "poule_spelgroep_id": meta["target_spelgroep_id"],
-
         # Laag 2: historiek uit vorige periodes
         "matches_history": len(history_matches),
         "wins_history": wins_hist,
@@ -479,12 +451,9 @@ def build_player_summary(
         "history_results": _result_rows(history_matches, limit=15),
         "history_periods": _period_breakdown(history_matches),
         "form_history": _form_string(history_matches),
-
         # Totaal
         "matches_total": len(matches),
     }
-
-
 # ─────────────────────────────────────────────
 # Inline renderer
 # ─────────────────────────────────────────────
@@ -498,20 +467,29 @@ def render_player_summary_inline(summary: dict) -> None:
     c2.metric("Beste ooit", f"P{best}" if best is not None else "Onbekend")
     c3.metric("Matchen deze poule", summary.get("matches_relevant", 0))
     c4.metric("Matchen historiek", summary.get("matches_history", 0))
-
     if summary.get("best_rank_when"):
         st.caption(f"Beste klassement bereikt in/op: **{summary['best_rank_when']}**")
-
+    # PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13: playing strength uitsluitend
+    # via padelstats.be, geen eigen schatting meer.
+    current_elo = summary.get("current_elo")
+    if summary.get("elo_source") == "padelstat" and current_elo is not None:
+        fetched = _format_fetched_at(summary.get("elo_fetched_at"))
+        st.caption(
+            f"🎯 Playing strength (padelstats.be): **P{current_elo}** (opgehaald op {fetched}). "
+            "Onafhankelijke, externe schatting - geen officieel TVL-klassement."
+        )
+    else:
+        st.caption(
+            "🎯 Playing strength (padelstats.be): nog niet opgehaald voor deze speler."
+        )
     st.markdown("##### 📈 Klassementshistoriek")
     _render_ranking_timeline(summary.get("history") or [])
     if not summary.get("history_available"):
         st.caption("Voor de volledige tijdlijn moet klassement_history voor deze speler nog gescrapet worden.")
-
     # ── Laag 1: huidige poule ──
     st.markdown("##### 🎯 Deze poule")
     poule_id = summary.get("poule_spelgroep_id")
     st.caption(f"Strikt gefilterd op spelgroep {poule_id or 'onbekend'} · {summary.get('poule_matched_on', '-')}")
-
     current_matches = summary.get("matches_relevant", 0)
     if current_matches:
         m1, m2 = st.columns(2)
@@ -523,13 +501,11 @@ def render_player_summary_inline(summary: dict) -> None:
         m2.metric("Gespeeld", current_matches)
         if current_matches < MIN_MATCHES_FOR_WINRATE:
             st.caption("Te weinig matchen voor een betrouwbare winrate. Gebruik vooral de historiek hieronder.")
-
         partners = summary.get("partners") or []
         if partners:
             st.markdown("**Partners deze poule**")
             st.dataframe(pd.DataFrame(partners), use_container_width=True, hide_index=True,
                          height=min(200, 40 + 36 * len(partners)))
-
         results = summary.get("poule_results") or []
         if results:
             st.markdown("**Resultaten deze poule**")
@@ -540,16 +516,13 @@ def render_player_summary_inline(summary: dict) -> None:
             "Deze speler heeft in de huidige poule nog geen gespeelde matchen in onze data. "
             "De historiek hieronder is voorlopig de beste scoutinginformatie."
         )
-
     # ── Laag 2: historiek ──
     st.markdown("##### 🗄️ Historiek uit vorige periodes")
     history_matches = summary.get("matches_history", 0)
     if not history_matches:
         st.info("Geen eerdere interclubmatches gekend voor deze speler.")
         return
-
     st.caption("Andere poules/periodes. Bruikbaar als inschatting van niveau en speelpatroon, niet als stand in de huidige poule.")
-
     h1, h2 = st.columns(2)
     h1.metric(
         "Winrate historiek",
@@ -557,26 +530,21 @@ def render_player_summary_inline(summary: dict) -> None:
         f"{summary.get('wins_history', 0)}W - {summary.get('losses_history', 0)}V",
     )
     h2.metric("Recente vorm", summary.get("form_history", "-"))
-
     periods = summary.get("history_periods") or []
     if periods:
         st.markdown("**Per periode**")
         st.dataframe(pd.DataFrame(periods), use_container_width=True, hide_index=True,
                      height=min(200, 40 + 36 * len(periods)))
-
     partners_history = summary.get("partners_history") or []
     if partners_history:
         st.markdown("**Vaste partners in vorige periodes**")
         st.dataframe(pd.DataFrame(partners_history), use_container_width=True, hide_index=True,
                      height=min(220, 40 + 36 * len(partners_history)))
-
     history_results = summary.get("history_results") or []
     if history_results:
         with st.expander(f"Alle gekende resultaten uit vorige periodes ({len(history_results)} getoond)", expanded=False):
             st.dataframe(pd.DataFrame(history_results), use_container_width=True, hide_index=True,
                          height=min(420, 40 + 36 * len(history_results)))
-
-
 # ─────────────────────────────────────────────
 # Oudere knop-variant (compatibiliteit)
 # ─────────────────────────────────────────────
@@ -602,8 +570,6 @@ def render_opponent_dossier(
         current_spelgroep_id=current_spelgroep_id,
     )
     render_player_summary_inline(summary)
-
-
 def render_opponent_dossier_button(
     player_id: str,
     name: str,

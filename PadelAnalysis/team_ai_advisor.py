@@ -1,16 +1,22 @@
 """
-team_ai_advisor.py - AI-vragen, automatische inzichten en opstellingsadvies
-over een tegenploeg-analyse (v5).
+team_ai_advisor.py - AI-vragen, automatische inzichten over een
+tegenploeg-analyse, en pro/contra-commentaar op berekende opstelling-opties.
 
-Ongewijzigd t.o.v. v4 - geen inhoudelijke wijziging nodig voor de v5
-labelverkorting (dit bestand gebruikt enkel de al-berekende best_rank_when
-tekst uit opponent_dossier.py, die nu automatisch al kort is).
+Ongewijzigd t.o.v. v7 wat betreft generate_insights/ask_about_team.
 
-Vereist een OpenAI API-key. Zoekt in deze volgorde:
-  1. st.secrets["openai"]["api_key"]   (Streamlit secrets, lokaal of cloud)
-  2. omgevingsvariabele OPENAI_API_KEY
-Zonder geldige key geeft elke functie een duidelijke RuntimeError i.p.v. een
-onduidelijke crash dieper in de OpenAI-library.
+PADEL_ANALYSIS_LINEUP_OPTIONS_AI_2026-09-13 (nieuw):
+Nieuwe functie analyze_lineup_options(): geeft AI-commentaar (pro's en
+contra's, in het Nederlands) op de top-N BEREKENDE opstelling-opties uit
+lineup_lab.optimize_lineup_vs_scenario (via dashboard.py's Opstelling-
+scenario's-blok). Dit vervangt de vroegere, vrij-tekst-gebaseerde
+suggest_lineup()-aanroep (die werkte op een handmatig ingevulde "onze
+opstelling"-tekst, ondertussen verwijderd - zie opponent_analysis.py v8):
+in plaats van de AI zelf een opstelling te laten VERZINNEN, krijgt de AI nu
+de reeds EXACT BEREKENDE, cijfermatig onderbouwde opties (koppels, synergie,
+matchup-edge, playing strength) en wordt gevraagd die te DUIDEN - sterke en
+zwakke punten per optie, in mensentaal, zonder zelf spelers of cijfers te
+verzinnen. suggest_lineup() blijft bestaan voor eventueel ander gebruik,
+maar wordt niet langer aangeroepen vanuit opponent_analysis.py.
 """
 from __future__ import annotations
 
@@ -59,8 +65,8 @@ def _report_to_context(report: dict) -> str:
         "BELANGRIJK: 'deze poule' = de lopende competitieperiode. "
         "'historiek' = vorige periodes/andere poules, enkel bruikbaar als "
         "niveau-inschatting. Vermeng deze twee niet in je antwoord. "
-        "Klassement: HOE HOGER HET GETAL, HOE STERKER DE SPELER "
-        "(bv. P450 is sterker dan P200).",
+        "Klassement/playing strength: HOE HOGER HET GETAL, HOE STERKER DE "
+        "SPELER (bv. P450 is sterker dan P200).",
         "",
     ]
 
@@ -74,7 +80,6 @@ def _report_to_context(report: dict) -> str:
             f"({player.get('best_rank_when') or 'datum onbekend'})"
         )
 
-        # Laag 1: huidige poule
         n_now = player.get("matches_relevant", 0)
         if n_now:
             lines.append(
@@ -99,7 +104,6 @@ def _report_to_context(report: dict) -> str:
         else:
             lines.append("  DEZE POULE: nog geen gespeelde matchen gekend.")
 
-        # Laag 2: historiek
         n_hist = player.get("matches_history", 0)
         if n_hist:
             lines.append(
@@ -186,7 +190,13 @@ def ask_about_team(question: str, report: dict) -> str:
 
 def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
     """Stelt op basis van de tegenploeg-data (en optioneel onze eigen
-    aangeduide opstelling) een opstelling voor."""
+    aangeduide opstelling) een opstelling voor.
+
+    Behouden voor eventueel ander gebruik; wordt sinds v8 niet meer
+    aangeroepen vanuit opponent_analysis.py (zie module-docstring) - gebruik
+    voor de Opstelling-scenario's-pagina bij voorkeur
+    analyze_lineup_options() hieronder, die op REEDS BEREKENDE opties werkt
+    i.p.v. de AI zelf een opstelling te laten verzinnen."""
     context = _report_to_context(report)
     client = _client()
 
@@ -214,6 +224,89 @@ def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
                 ),
             },
             {"role": "user", "content": f"Data over de tegenploeg:\n{context}{own_part}"},
+        ],
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _lineup_options_to_context(options: list[dict], name_lookup: dict) -> str:
+    """Zet een lijst berekende opstelling-opties (zoals teruggegeven door
+    lineup_lab.optimize_lineup_vs_scenario) om naar platte tekst voor het
+    taalmodel. Elke optie bevat exacte koppels, synergie-scores en
+    matchup-edges - de AI wordt gevraagd dit te DUIDEN, niet te herberekenen
+    of te verzinnen."""
+    lines = []
+    for i, option in enumerate(options, start=1):
+        lines.append(f"Optie {i} (totaalscore {option.get('total_score')}):")
+        for a in option.get("assignment", []):
+            p1, p2 = a["our_pair"]
+            n1 = name_lookup.get(p1, p1)
+            n2 = name_lookup.get(p2, p2)
+            opp_names = " / ".join(
+                p.get("name", "?") for p in a["opponent_board"].get("opponent_pair", [])
+            )
+            lines.append(
+                f"  Dubbel: {n1} / {n2} (synergie {a['synergy']}) "
+                f"tegen {opp_names or 'onbekende tegenstanders'} (matchup-edge {a['edge']:+.2f})"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def analyze_lineup_options(
+    report: dict,
+    options: list[dict],
+    name_lookup: dict,
+) -> str:
+    """PADEL_ANALYSIS_LINEUP_OPTIONS_AI_2026-09-13:
+    Geeft AI-commentaar (pro's en contra's per optie, in het Nederlands) op
+    de top-N REEDS BEREKENDE opstelling-opties uit
+    lineup_lab.optimize_lineup_vs_scenario(). De AI verzint GEEN cijfers of
+    spelers - ze duidt enkel de al gegeven synergie-scores, matchup-edges en
+    playing-strength-gegevens uit het rapport.
+
+    report:      het team-scoutingrapport (zie opponent_analysis.py), voor
+                 context over de tegenploeg.
+    options:     lijst van opstelling-opties zoals teruggegeven door
+                 lineup_lab.optimize_lineup_vs_scenario (elk met
+                 "total_score" en "assignment").
+    name_lookup: {player_id: weergavenaam} voor ONZE eigen spelers, om de
+                 ID's in de opties leesbaar te maken.
+    """
+    if not options:
+        return "Geen berekende opstelling-opties beschikbaar om te analyseren."
+
+    team_context = _report_to_context(report)
+    options_context = _lineup_options_to_context(options, name_lookup)
+    client = _client()
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Je bent een padel-coach. Je krijgt een aantal AL BEREKENDE "
+                    "opstelling-opties voor onze eigen ploeg tegen een specifieke "
+                    "tegenstander (elke optie = een volledige verdeling van onze spelers "
+                    "in dubbels, met wie tegen welk tegenstanderskoppel uitkomt). Geef PER "
+                    "OPTIE een kort, concreet commentaar: wat zijn de sterke punten "
+                    "(gunstige matchups, goede synergie) en de risico's (moeilijke "
+                    "matchups, weinig gezamenlijke ervaring)? Sluit af met een korte "
+                    "aanbeveling welke optie je zou kiezen en waarom. Spreek over 'dubbel "
+                    "1', 'dubbel 2', enzovoort - nooit over 'board'. Verzin GEEN spelers, "
+                    "cijfers of resultaten die niet letterlijk gegeven zijn - de "
+                    "synergie-scores en matchup-edges in de data zijn al berekend, jij "
+                    "duidt ze enkel. " + _BASE_RULES
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Data over de tegenploeg:\n{team_context}\n\n"
+                    f"Berekende opstelling-opties:\n{options_context}"
+                ),
+            },
         ],
     )
     return response.choices[0].message.content.strip()

@@ -1,46 +1,35 @@
 from __future__ import annotations
-
-import inspect
 import re
 from typing import Optional
-
 import pandas as pd
-import streamlit as st
-
 import player_inline_actions as pia
-import firebase_service as fb
-import lineup_lab as ll
-
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-
 def _safe_int(value, default: int = 0) -> int:
     try:
         return int(value or default)
     except Exception:
         return default
-
-
 def _winrate_num(wins: int, losses: int) -> Optional[float]:
     known = wins + losses
     if known <= 0:
         return None
     return wins / known
-
-
 def _pct(value: Optional[float]) -> str:
     if value is None:
         return "-"
     return f"{round(value * 100, 1)}%"
-
-
 def _winrate_str(wins: int, losses: int) -> str:
     return _pct(_winrate_num(wins, losses))
-
-
 def _parse_rank(value) -> Optional[int]:
-    """Parse P100/P200/... to int. Lower number means stronger ranking."""
+    """Parse P100/P200/... to int.
+    PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-14 (kritieke bugfix):
+    BUG (opgelost): de docstring stond hier voorheen "Lower number means
+    stronger ranking" - dat is het TEGENOVERGESTELDE van de projectbrede,
+    bevestigde conventie (zie opponent_dossier.py: "HOE HOGER HET GETAL, HOE
+    BETER"; lineup_lab.matchup_edge() kreeg exact dezelfde bugfix eerder al).
+    Correct: HOGER GETAL = STERKER."""
     if value is None:
         return None
     m = re.search(r"(\d+)", str(value))
@@ -50,14 +39,10 @@ def _parse_rank(value) -> Optional[int]:
         return int(m.group(1))
     except Exception:
         return None
-
-
 def _format_rank(avg_rank: Optional[float]) -> str:
     if avg_rank is None:
         return "-"
     return f"P{int(round(avg_rank / 50) * 50)}"
-
-
 # PADEL_ANALYSIS_DATE_PARSE_FIX
 # Zelfde robuuste datum-parser als in dashboard.py (elk bestand houdt zijn
 # eigen kleine kopie, geen extra gedeelde module nodig voor deze ene
@@ -69,8 +54,6 @@ _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
 }
-
-
 def _parse_match_date(text) -> Optional[tuple]:
     if not text:
         return None
@@ -88,60 +71,42 @@ def _parse_match_date(text) -> Optional[tuple]:
         if mo:
             return (int(m.group(3)), mo, int(m.group(1)))
     return None
-
-
 def _match_date_key(m: dict) -> str:
     return str(m.get("match_date") or m.get("tournament_date_start") or "")
-
-
-def _match_type_label(value: str) -> str:
-    if value == "interclub":
-        return "Interclub"
-    if value == "tornooi":
-        return "Tornooi"
-    return value or "-"
-
-
-def _result_char(m: dict) -> str:
-    if m.get("result"):
-        return str(m.get("result"))
-    if m.get("won") is True:
-        return "W"
-    if m.get("won") is False:
-        return "V"
-    return "-"
-
-
 def _dedupe_match_key(m: dict) -> str:
-    """Dedupe only within the selected player's own document."""
+    """Dedupe only within the selected player's own document.
+    PADEL_ANALYSIS_MIXED_SAME_MATCH_ID_FIX_2026-09-12:
+    BUG (opgelost): bij een mixed-interclubwedstrijd blijkt de scraper voor
+    ÉÉN en dezelfde 'match_id' twee aparte matchrecords op te slaan - één met
+    de ene partner (bv. 'Ide Carl') en één met de andere (bv. 'Gallant
+    Anneleen') - beide met exact hetzelfde match_id en dezelfde datum. Dat is
+    functioneel GEEN duplicaat (het zijn twee verschillende, geldige
+    partner-registraties van dezelfde ontmoeting), maar de oude dedupe-sleutel
+    gebruikte ENKEL match_id. Zodra het ene record (toevallig) eerder in de
+    matchlijst stond, werd het andere - met een andere partner - foutief als
+    duplicaat overgeslagen. Gevolg: die partner miste in de partneranalyse
+    exact de matches waar dit gebeurde, wat een verkeerde (soms 0%) winrate
+    opleverde ondanks correcte brondata.
+    Fix: de partner (user_id, of anders naam) wordt mee opgenomen in de
+    dedupe-sleutel. Zo blijven twee records met hetzelfde match_id maar een
+    verschillende partner allebei behouden; enkel écht identieke records
+    (zelfde match_id ÉN zelfde partner) worden nog gededupliceerd - bv. als
+    een matchrecord ooit per ongeluk twee keer zou worden opgeslagen."""
     match_id = m.get("match_id")
+    partner_key = m.get("partner_user_id") or m.get("partner_name") or ""
     if match_id:
-        return f"match_id:{match_id}"
+        return f"match_id:{match_id}|partner:{partner_key}"
     parts = [
         m.get("match_date") or m.get("tournament_date_start") or "",
         m.get("period_label") or "",
         m.get("reeks_name") or "",
         m.get("round_text") or "",
-        m.get("partner_user_id") or m.get("partner_name") or "",
+        partner_key,
         m.get("opp1_name") or "",
         m.get("opp2_name") or "",
         m.get("score") or "",
     ]
     return "fallback:" + "|".join(str(x) for x in parts)
-
-
-def _dataframe_kwargs(**kwargs):
-    """Use Streamlit's new width API, with fallback for older versions."""
-    try:
-        if "width" in inspect.signature(st.dataframe).parameters:
-            kwargs["width"] = "stretch"
-        else:
-            kwargs["use_container_width"] = True
-    except Exception:
-        kwargs["use_container_width"] = True
-    return kwargs
-
-
 def _partner_general_wr(partner_pid: str, docs: dict) -> tuple[Optional[float], int, int, int]:
     """Return partner's overall winrate from scraped partner document, if available."""
     if not partner_pid:
@@ -156,65 +121,16 @@ def _partner_general_wr(partner_pid: str, docs: dict) -> tuple[Optional[float], 
     losses = _safe_int(stats.get("losses"))
     wr = _winrate_num(wins, losses)
     return wr, total or len(matches), wins, losses
-
-
 # -----------------------------------------------------------------------------
-# Dataframe builders
+# Kernlogica partneranalyse
+# PADEL_ANALYSIS_MOVE_PARTNER_ANALYSIS_2026-09-10: Sectie 1 ("Snelle analyse"/
+# Beschikbare spelersdata), Sectie 2 ("Recente interclub van <speler>") en de
+# vroegere render_lineup_quick_results-wrapper zijn verwijderd: geen directe
+# meerwaarde t.o.v. de rest van de app. De partneranalyse hieronder wordt nu
+# via build_partner_analysis_df() aangeroepen vanuit het gedeelde
+# spelersprofiel (dashboard._render_player_dashboard, tab 'Partners'),
+# zichtbaar voor elke speler i.p.v. enkel bij Opstelling-analyse.
 # -----------------------------------------------------------------------------
-
-def _available_players_df(docs: dict, selected_ids: list[str], name_lookup: dict) -> pd.DataFrame:
-    """Only show players that actually have scraped match data."""
-    rows = []
-    for pid in selected_ids:
-        pid = str(pid)
-        doc = docs.get(pid) or {}
-        matches = doc.get("matches", []) or []
-        stats = doc.get("stats", {}) or {}
-        total = _safe_int(stats.get("total_matches"), len(matches))
-        if total <= 0 and len(matches) <= 0:
-            continue
-        wins = _safe_int(stats.get("wins"))
-        losses = _safe_int(stats.get("losses"))
-        rows.append({
-            "Speler": name_lookup.get(pid, pid),
-            "Speler ID": pid,
-            "Matches": total or len(matches),
-            "W": wins,
-            "V": losses,
-            "Winrate": _winrate_str(wins, losses),
-            "Interclub": _safe_int(stats.get("interclub_matches")),
-            "Tornooi": _safe_int(stats.get("tournament_matches")),
-        })
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["Interclub", "Matches"], ascending=[False, False])
-
-
-def _recent_interclub_df(doc: dict, limit: int = 10) -> pd.DataFrame:
-    matches = [m for m in (doc or {}).get("matches", []) or [] if m.get("match_type") == "interclub"]
-    # PADEL_ANALYSIS_DATE_SORT_FIX: was een platte string-sort op de ruwe
-    # datumtekst (_match_date_key), wat "datums door elkaar" gaf zodra het
-    # formaat niet toevallig ISO was. Nu een echte datum-parse, recentste
-    # bovenaan; niet-herkende datums (zeldzaam) belanden onderaan.
-    matches = sorted(matches, key=lambda m: _parse_match_date(_match_date_key(m)) or (0, 0, 0), reverse=True)[:limit]
-    rows = []
-    for m in matches:
-        rows.append({
-            "Datum": m.get("match_date") or "",
-            "Reeks": m.get("reeks_name") or m.get("competition_name") or "",
-            "Ronde": m.get("round_text") or "",
-            "Partner": m.get("partner_name") or "",
-            "Partner ID": m.get("partner_user_id") or "",
-            "Tegenstander 1": m.get("opp1_name") or "",
-            "Tegenstander 1 ID": m.get("opp1_user_id") or m.get("opp1_id") or "",
-            "Tegenstander 2": m.get("opp2_name") or "",
-            "Tegenstander 2 ID": m.get("opp2_user_id") or m.get("opp2_id") or "",
-            "Score": m.get("score") or "",
-            "W/V": _result_char(m),
-        })
-    return pd.DataFrame(rows)
-
-
 def _collect_partner_analysis_from_selected_doc(
     sel_doc: dict,
     docs: dict,
@@ -224,30 +140,76 @@ def _collect_partner_analysis_from_selected_doc(
     """
     Partner analysis based on selected player's own match list, enriched with
     scraped partner stats.
-
-    PADEL_ANALYSIS_PARTNER_GROUPING_FIX (bug: "winrate met mij" toonde 0%
-    ondanks effectieve winsten met die partner, bv. Anneleen Gallant):
-    Vroeger werd er gegroepeerd op partner_user_id ALS die aanwezig was in
-    het match-record, anders op de (genormaliseerde) naam. Niet elk
-    match-record heeft echter consequent een partner_user_id ingevuld (bv.
-    oudere scrapes, of matches toegevoegd via de tegenstander-scout-flow) --
-    hierdoor konden dezelfde partner in TWEE aparte rijen terechtkomen
-    ("id:12345" voor de ene match, "name:anneleen gallant" voor de andere),
-    met elk hun eigen (onvolledige, soms toevallig 0%) winst/verlies-telling.
-
-    Fix: we lossen EERST een canoniek player_id op via de globale profiel-
-    lookup (dezelfde naam-matching als de rest van de app, incl. naam-
-    varianten/volgorde), en groeperen daarop. Enkel als er geen profiel-match
-    mogelijk is (partner nog nooit toegevoegd/gescraped) vallen we terug op
-    een naam-sleutel -- in dat geval blijft correcte totaaltelling sowieso
-    afhankelijk van consistente naamschrijfwijze in de brondata.
+    PADEL_ANALYSIS_PARTNER_GROUPING_FIX (eerdere poging, onvolledig):
+    Groepeerde op partner_user_id ALS die aanwezig was in het match-record,
+    anders op de (genormaliseerde) naam - via resolve_player_id() PER MATCH
+    aangeroepen. Dat loste het probleem niet volledig op.
+    PADEL_ANALYSIS_PARTNER_GROUPING_FIX_V2_2026-09-12:
+    Niet elk match-record van dezelfde partner heeft consequent een
+    partner_user_id ingevuld. Als resolve_player_id() PER MATCH wordt
+    aangeroepen, en de partner bovendien geen eigen player_profile heeft, dan
+    kon dezelfde partner in TWEE aparte groepen terechtkomen ("id:..." vs
+    "name:..."). Fix: EERST één canoniek ID per genormaliseerde partnernaam
+    bepalen, PAS DAARNA groeperen.
+    PADEL_ANALYSIS_MIXED_SAME_MATCH_ID_FIX_2026-09-12 (echte oorzaak van de
+    aanhoudende 0%-winrate, ook na de vorige twee fixes):
+    Bij mixed-interclubwedstrijden slaat de scraper voor ÉÉN match_id soms
+    TWEE matchrecords op - één per partner. Deze functie dedupliceert matches
+    via _dedupe_match_key() om te vermijden dat een tegenstander-scout-flow
+    dezelfde match dubbel telt. Die sleutel gebruikte voorheen ENKEL
+    match_id, dus het tweede record (andere partner, zelfde match_id) werd
+    hier foutief als duplicaat overgeslagen. _dedupe_match_key() is gefixt om
+    de partner mee te nemen in de sleutel (zie aldaar).
+    PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-14 (kritieke bugfix, dit was de
+    resterende, hardnekkige oorzaak van "Sterkste winst toont altijd P100" en
+    een verkeerd-gerichte "W tegen P<=200"-kolom, gemeld door Kim):
+    BUG (opgelost): deze functie ging er - net als de oude, foutieve
+    parse_ranking-docstring in lineup_lab.py, ondertussen daar al gefixt -
+    van uit dat een LAGER klassementsgetal een STERKERE tegenstander
+    betekent. Concreet fout, allebei nu gecorrigeerd:
+      1. "Sterkste winst" (best_win_rank) hield de LAAGSTE avg_match_rank
+         onder de overwinningen bij ("< bucket['best_win_rank']"). Onder de
+         correcte conventie (hoger = sterker) betekent dat: de winst tegen de
+         ZWAKSTE tegenstander werd getoond als "sterkste winst" - het
+         omgekeerde van de bedoeling. Omdat veel tegenstanders rond P100
+         clusteren, verklaarde dit waarom deze kolom bijna altijd P100 toonde.
+         Fix: nu wordt de HOOGSTE avg_match_rank onder de overwinningen
+         bijgehouden ("> bucket['best_win_rank']").
+      2. "sterke tegenstander"-drempel (strong_matches/strong_wins, kolom
+         "W tegen P<=200") gebruikte "avg_match_rank <= 200" om een
+         tegenstander als "sterk" te bestempelen - ook omgekeerd: een LAAG
+         getal is een ZWAKKE tegenstander. Fix: drempel omgedraaid naar
+         "avg_match_rank >= 200" (kolomlabel hieronder aangepast naar
+         "W tegen P>=200" om dit ook zichtbaar te maken).
+    "Gem. tegenstand" (avg_rank, gewoon een rekenkundig gemiddelde van alle
+    tegenstander-ratings) had GEEN richtingsafhankelijke logica en was dus al
+    correct - enkel de twee bovenstaande, expliciet vergelijkende berekeningen
+    waren fout.
     """
     profiles_lookup = profiles_lookup or {}
+    matches = [
+        m for m in (sel_doc or {}).get("matches", []) or []
+        if match_type_filter == "Alle" or m.get("match_type") == match_type_filter
+    ]
+    # Eerste doorloop: één canoniek ID per genormaliseerde partnernaam.
+    name_to_canonical_id: dict[str, str] = {}
+    for m in matches:
+        partner_name = str(m.get("partner_name") or "").strip()
+        if not partner_name:
+            continue
+        norm_name = pia._norm(partner_name)
+        if norm_name in name_to_canonical_id:
+            continue
+        partner_pid_raw = str(m.get("partner_user_id") or "").strip()
+        canonical = (
+            pia.resolve_player_id(partner_name, profiles_lookup, partner_pid_raw)
+            if profiles_lookup else partner_pid_raw
+        )
+        if canonical:
+            name_to_canonical_id[norm_name] = canonical
     acc: dict[str, dict] = {}
     seen = set()
-    for m in (sel_doc or {}).get("matches", []) or []:
-        if match_type_filter != "Alle" and m.get("match_type") != match_type_filter:
-            continue
+    for m in matches:
         partner_name = str(m.get("partner_name") or "").strip()
         partner_pid_raw = str(m.get("partner_user_id") or "").strip()
         if not partner_name and not partner_pid_raw:
@@ -256,10 +218,11 @@ def _collect_partner_analysis_from_selected_doc(
         if key in seen:
             continue
         seen.add(key)
-
-        canonical_pid = pia.resolve_player_id(partner_name, profiles_lookup, partner_pid_raw) if profiles_lookup else partner_pid_raw
-        partner_group = f"id:{canonical_pid}" if canonical_pid else f"name:{pia._norm(partner_name)}"
-
+        norm_name = pia._norm(partner_name) if partner_name else ""
+        # Gebruik het vooraf bepaalde, per-naam-consistente ID i.p.v. een
+        # per-match resolutie, zodat groepering nooit meer uit elkaar valt.
+        canonical_pid = name_to_canonical_id.get(norm_name) or partner_pid_raw
+        partner_group = f"id:{canonical_pid}" if canonical_pid else f"name:{norm_name or partner_pid_raw}"
         bucket = acc.setdefault(partner_group, {
             "Partner": partner_name or canonical_pid or "Onbekende partner",
             "Partner ID": canonical_pid or partner_pid_raw,
@@ -280,7 +243,6 @@ def _collect_partner_analysis_from_selected_doc(
         # langste/meest volledige variant als weergavenaam.
         if partner_name and len(partner_name) > len(bucket["Partner"] or ""):
             bucket["Partner"] = partner_name
-
         bucket["Matches"] += 1
         if m.get("match_type") == "interclub":
             bucket["interclub"] += 1
@@ -300,12 +262,17 @@ def _collect_partner_analysis_from_selected_doc(
         if ranks:
             avg_match_rank = sum(ranks) / len(ranks)
             bucket["rank_values"].append(avg_match_rank)
-            if avg_match_rank <= 200:
+            # PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-14: "sterk" = HOGER
+            # getal (>=200), niet lager. Zie functiedocstring hierboven.
+            if avg_match_rank >= 200:
                 bucket["strong_matches"] += 1
                 if won is True:
                     bucket["strong_wins"] += 1
             if won is True:
-                if bucket["best_win_rank"] is None or avg_match_rank < bucket["best_win_rank"]:
+                # PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-14: "sterkste
+                # winst" = winst tegen het HOOGSTE gemiddelde tegenstander-
+                # klassement (was voorheen "<", dus het laagste - omgekeerd).
+                if bucket["best_win_rank"] is None or avg_match_rank > bucket["best_win_rank"]:
                     bucket["best_win_rank"] = avg_match_rank
         date_key = _match_date_key(m)
         if date_key:
@@ -334,17 +301,17 @@ def _collect_partner_analysis_from_selected_doc(
         strong = "-"
         if data["strong_matches"]:
             strong = f"{data['strong_wins']}/{data['strong_matches']}"
-        matches = data["Matches"]
+        matches_count = data["Matches"]
         reliability = "Laag"
-        if matches >= 10:
+        if matches_count >= 10:
             reliability = "Hoog"
-        elif matches >= 4:
+        elif matches_count >= 4:
             reliability = "Middel"
         last_match_sorted = sorted(data["last_dates"], key=lambda d: _parse_match_date(d) or (0, 0, 0), reverse=True)
         rows.append({
             "Partner": data["Partner"],
             "Partner ID": data.get("Partner ID") or "",
-            "Matches": matches,
+            "Matches": matches_count,
             "W": wins,
             "V": losses,
             "Winrate met mij": _pct(with_me_wr),
@@ -353,7 +320,7 @@ def _collect_partner_analysis_from_selected_doc(
             "Delta": _pct(delta) if delta is not None else "-",
             "Gem. tegenstand": _format_rank(avg_rank),
             "Sterkste winst": _format_rank(data["best_win_rank"]),
-            "W tegen P<=200": strong,
+            "W tegen P>=200": strong,
             "Laatste 10": last10,
             "Laatste match": last_match_sorted[0] if last_match_sorted else "-",
             "Betrouwbaarheid": reliability,
@@ -365,194 +332,17 @@ def _collect_partner_analysis_from_selected_doc(
     df["_delta_sort"] = df["Delta"].apply(lambda x: float(str(x).replace("%", "")) if str(x).endswith("%") else -999)
     df = df.sort_values(["_matches_sort", "_delta_sort"], ascending=[False, False])
     return df.drop(columns=["_matches_sort", "_delta_sort"])
-
-
-# -----------------------------------------------------------------------------
-# Selectable table + detail pattern (consistent met dashboard.py's Match Explorer)
-# -----------------------------------------------------------------------------
-
-def _render_selectable_table_with_detail(
-    df: pd.DataFrame,
-    id_columns: list[str],
-    profiles_lookup: dict,
-    key_prefix: str,
-    height: int = 360,
-    column_config: Optional[dict] = None,
-):
-    """Toont een volledig-breed, sorteerbare tabel (alle kolommen zichtbaar,
-    ID-kolommen verborgen). Klik op een rij om onderaan de details te zien
-    met klikbare speleracties (popover met scrape/refresh-status) — dezelfde
-    UX als de bestaande Match Explorer-tab.
-    """
-    if df.empty:
-        st.info("Geen data beschikbaar.")
-        return
-    visible_cols = [c for c in df.columns if not c.endswith(" ID")]
-    display_df = df[visible_cols]
-    event = st.dataframe(
-        display_df,
-        **_dataframe_kwargs(
-            hide_index=True,
-            height=min(height, 40 + len(display_df) * 36),
-            column_config=column_config or {},
-            on_select="rerun",
-            selection_mode="single-row",
-        ),
-        key=f"{key_prefix}_table",
+def build_partner_analysis_df(
+    sel_doc: dict,
+    docs: dict,
+    profiles_lookup: Optional[dict] = None,
+    match_type_filter: str = "Alle",
+) -> pd.DataFrame:
+    """Publieke wrapper rond _collect_partner_analysis_from_selected_doc().
+    PADEL_ANALYSIS_MOVE_PARTNER_ANALYSIS_2026-09-10: toegevoegd zodat
+    dashboard.py (tab 'Partners', gedeeld door 'Mijn profiel' en 'Spelers')
+    dezelfde partneranalyse kan hergebruiken zonder de interne (onderstreepte)
+    functienaam rechtstreeks te moeten aanspreken."""
+    return _collect_partner_analysis_from_selected_doc(
+        sel_doc, docs, profiles_lookup=profiles_lookup, match_type_filter=match_type_filter
     )
-    sel_rows = (event or {}).get("selection", {}).get("rows", [])
-    if not sel_rows:
-        st.caption("👉 Klik op een rij voor speleracties (scrape-status, snel doorklikken).")
-        return
-    idx = sel_rows[0]
-    row = df.iloc[idx]
-    st.markdown("**Details van geselecteerde rij:**")
-    detail_cols = st.columns(min(len(id_columns), 3) or 1)
-    for i, col_name in enumerate(id_columns):
-        if col_name not in df.columns:
-            continue
-        with detail_cols[i % len(detail_cols)]:
-            st.caption(col_name)
-            id_col = f"{col_name} ID"
-            explicit_id = row.get(id_col, "") if id_col in df.columns else ""
-            pid = pia.resolve_player_id(row.get(col_name, ""), profiles_lookup, explicit_id)
-            pia.render_player_name_action(row.get(col_name, ""), pid, key_prefix=f"{key_prefix}_detail_{idx}_{i}")
-
-
-# -----------------------------------------------------------------------------
-# Public render function used by dashboard.py
-# -----------------------------------------------------------------------------
-
-def render_lineup_quick_results(
-    sel_player_id: str,
-    sel_label: str,
-    profiles: list,
-    name_lookup_global: dict,
-    display_name_fn,
-):
-    """Render useful analysis, consistently based on selected player's data but enriched with partner profile stats."""
-    st.markdown("### ⚡ Snelle analyse op basis van huidige data")
-    st.caption(
-        "Partneranalyse telt matchen uit de matchlijst van de geselecteerde speler. "
-        "Als de partner ook gescraped is, tonen we daarnaast zijn/haar algemene winrate en de delta."
-    )
-    all_ids = [str(p.get("player_id")) for p in profiles if p.get("player_id")]
-    docs = ll.get_docs_for_players(all_ids)
-    sel_player_id = str(sel_player_id)
-    sel_doc = docs.get(sel_player_id) or fb.get_player(sel_player_id) or {}
-    profiles_lookup = pia.build_profile_lookup(profiles)
-
-    scraped_options = []
-    for p in sorted(profiles, key=lambda x: x.get("display_name") or ""):
-        pid = str(p.get("player_id") or "")
-        if not pid:
-            continue
-        doc = docs.get(pid) or {}
-        stats = doc.get("stats", {}) or {}
-        total = _safe_int(stats.get("total_matches"), len(doc.get("matches", []) or []))
-        if total > 0 or len(doc.get("matches", []) or []) > 0:
-            scraped_options.append(display_name_fn(p))
-    if not scraped_options:
-        st.info("Er zijn nog geen gescrapete spelers met matchdata beschikbaar.")
-        st.divider()
-        return
-    label_to_id = {display_name_fn(p): str(p.get("player_id")) for p in profiles if p.get("player_id")}
-    default_labels = []
-    if sel_label in scraped_options:
-        default_labels.append(sel_label)
-    default_labels += [lbl for lbl in scraped_options if lbl != sel_label][:7]
-    selected_labels = st.multiselect(
-        "Beschikbare spelers meenemen in overzicht",
-        scraped_options,
-        default=default_labels,
-        key=f"quick_lineup_players_{sel_player_id}",
-    )
-    selected_ids = [label_to_id[lbl] for lbl in selected_labels if lbl in label_to_id]
-    if len(selected_ids) < 1:
-        st.info("Selecteer minstens 1 gescrapete speler.")
-        st.divider()
-        return
-
-    # ── Sectie 1: Beschikbare spelersdata (volledig-breed) ──
-    st.markdown("#### Beschikbare spelersdata")
-    overview_df = _available_players_df(docs, selected_ids, name_lookup_global)
-    if overview_df.empty:
-        st.info("Geen spelers met matchdata in deze selectie.")
-    else:
-        _render_selectable_table_with_detail(
-            overview_df,
-            id_columns=["Speler"],
-            profiles_lookup=profiles_lookup,
-            key_prefix=f"overview_{sel_player_id}",
-            height=320,
-            column_config={
-                "Speler": st.column_config.TextColumn("Speler", width="large"),
-                "Winrate": st.column_config.TextColumn("Winrate", width="small"),
-            },
-        )
-
-    st.divider()
-
-    # ── Sectie 2: Recente interclub van geselecteerde speler (volledig-breed) ──
-    st.markdown(f"#### Recente interclub van {sel_label}")
-    recent_df = _recent_interclub_df(sel_doc, limit=10)
-    if recent_df.empty:
-        st.info("Geen recente interclubmatches gevonden voor deze speler.")
-    else:
-        _render_selectable_table_with_detail(
-            recent_df,
-            id_columns=["Partner", "Tegenstander 1", "Tegenstander 2"],
-            profiles_lookup=profiles_lookup,
-            key_prefix=f"recent_ic_{sel_player_id}",
-            height=360,
-            column_config={
-                "Reeks": st.column_config.TextColumn("Reeks", width="medium"),
-                "Partner": st.column_config.TextColumn("Partner", width="medium"),
-                "Score": st.column_config.TextColumn("Score", width="small"),
-                "W/V": st.column_config.TextColumn("W/V", width="small"),
-            },
-        )
-
-    st.divider()
-
-    # ── Sectie 3: Partneranalyse (volledig-breed) ──
-    st.markdown(f"#### Partneranalyse voor {sel_label}")
-    with st.expander("Uitleg partneranalyse", expanded=False):
-        st.write(
-            "Matches/W/V/Winrate met mij komen uitsluitend uit de matchlijst van de geselecteerde speler. "
-            "Partner algemeen komt uit het profiel van de partner, als die partner gescraped is. "
-            "Delta = winrate met mij minus partner algemene winrate. Positieve delta betekent dat het duo beter presteert dan de algemene partnerbaseline. "
-            "Gebruik delta alleen met voldoende matchen; de kolom Betrouwbaarheid helpt daarbij."
-        )
-    match_type_choice = st.radio(
-        "Wedstrijdtype partneranalyse",
-        ["Alle", "interclub", "tornooi"],
-        horizontal=True,
-        format_func=lambda x: "Alle" if x == "Alle" else _match_type_label(x),
-        key=f"quick_partner_type_{sel_player_id}",
-    )
-    partner_df = _collect_partner_analysis_from_selected_doc(
-        sel_doc, docs, profiles_lookup=profiles_lookup, match_type_filter=match_type_choice
-    )
-    if partner_df.empty:
-        st.info("Geen partnerhistoriek gevonden voor deze speler binnen de huidige data.")
-    else:
-        _render_selectable_table_with_detail(
-            partner_df,
-            id_columns=["Partner"],
-            profiles_lookup=profiles_lookup,
-            key_prefix=f"partner_analysis_{sel_player_id}",
-            height=420,
-            column_config={
-                "Partner": st.column_config.TextColumn("Partner", width="large"),
-                "Winrate met mij": st.column_config.TextColumn("Winrate met mij", width="small"),
-                "Partner algemeen": st.column_config.TextColumn("Partner algemeen", width="small"),
-                "Delta": st.column_config.TextColumn("Delta", width="small"),
-                "Gem. tegenstand": st.column_config.TextColumn("Gem. tegenstand", width="small"),
-                "Sterkste winst": st.column_config.TextColumn("Sterkste winst", width="small"),
-                "W tegen P<=200": st.column_config.TextColumn("W tegen P<=200", width="small"),
-                "Laatste 10": st.column_config.TextColumn("Laatste 10", width="small"),
-                "Betrouwbaarheid": st.column_config.TextColumn("Betrouwbaarheid", width="small"),
-            },
-        )
-    st.divider()
