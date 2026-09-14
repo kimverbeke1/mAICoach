@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
 import sys
-import threading
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +23,7 @@ from AICoach.dashboard.ui_helpers import (
     render_assistant_answer,
     render_selected_values,
 )
+from AICoach.persistent_data import mirror_history_to_local
 from AICoach.saved_insights import render_saved_insights, save_insight
 
 
@@ -73,136 +73,56 @@ def _inject_css() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14
-# BUG (opgelost): ensure_latest_data() riep _sync_once() rechtstreeks en
-# SYNCHROON aan, VOOR er ook maar iets van de UI (tabs, data) getoond werd -
-# ondanks de (misleidende) codecommentaar "UI eerst tonen; sync draait
-# gecachet en blokkeert niet". _sync_once() is een st.cache_resource met
-# ttl=1800 (30 minuten) - een PROCES-BREDE cache, gedeeld over alle sessies.
-# Bij elke "koude start" (na 30 minuten inactiviteit, of - typischer op
-# Streamlit Community Cloud - na een volledige herstart van de app door
-# inactiviteit/redeploy) is die cache leeg, en moest de EERSTE bezoeker
-# wachten tot sync_latest_data() volledig klaar was (intervals.icu-API-
-# calls + bestandsschrijfacties), VOOR er iets op het scherm verscheen.
-# Fix: de sync draait nu ECHT op de achtergrond (aparte thread). De UI
-# rendert ONMIDDELLIJK met de data die al lokaal/in GCS aanwezig is (nooit
-# leeg bij een normale, niet-eerste-ooit run). Zodra de achtergrond-sync
-# klaar is, wordt dat gedetecteerd bij de eerstvolgende Streamlit-rerun
-# (elke gebruikersinteractie triggert er sowieso een) en worden de
-# data-caches dan pas geleegd + een expliciete rerun getriggerd.
+# MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14 (op verzoek van Kim, na twee
+# eerdere pogingen die het probleem niet oplosten - zie hieronder voor de
+# volledige voorgeschiedenis):
 #
-# MATCHFITAI_AUTOSTART_FIRST_SYNC_2026-09-14 (aanvulling, op verzoek van Kim)
-# BUG/BEPERKING (opgelost): op een VERSE cloud-container (of de allereerste
-# ooit-run) bestaat er nog HELEMAAL GEEN lokale trainingshistoriek. In dat
-# specifieke geval toonde de app "Geen trainingshistoriek gevonden" en bleef
-# ze dat tonen totdat de gebruiker ZELF een interactie deed (bv. handmatig op
-# "Nu verversen" klikken in de "Gegevens verversen"-expander) - want Streamlit
-# voert de pagina enkel opnieuw uit bij een gebruikersinteractie, niet
-# automatisch zodra een achtergrond-thread klaar is. Kim's melding: op de
-# cloud zag hij deze lege staat, maar zodra hij zelf op "Nu verversen" klikte,
-# verscheen de data WEL meteen (want de achtergrond-sync was intussen allang
-# klaar, enkel de detectie ervan had een interactie nodig om te triggeren).
-# Kim's verzoek: de achtergrond-sync-aanpak BEHOUDEN, maar bij het laden
-# automatisch al "die knop indrukken" zodat de gebruiker dat niet zelf hoeft
-# te doen.
-# Fix: _await_first_sync_if_needed() wacht EENMALIG en BEGRENSD (maximaal
-# _FIRST_SYNC_MAX_WAIT_SECONDS) op de achtergrond-thread, maar ENKEL als er
-# nog GEEN lokale data bestaat (load_history().empty) - dat is het enige
-# scenario waarin er sowieso niets zinvols te tonen valt zolang niet minstens
-# een eerste sync is afgerond. Bestaat er al (evt. wat verouderde) lokale
-# data, dan verandert er NIETS aan het bestaande, volledig niet-blokkerende
-# gedrag hierboven. Bij een trage of falende eerste sync (langer dan de
-# begrensde wachttijd) valt de code gewoon terug op de bestaande
-# "Geen trainingshistoriek gevonden"-melding + de handmatige "Nu
-# verversen"-knop blijft beschikbaar - de gebruiker raakt dus nooit
-# onherstelbaar vast, enkel de typische, lichte incrementele sync
-# (sync_latest.py noemt zichzelf expliciet "licht incrementeel") krijgt de
-# kans om automatisch, zonder klik, op tijd klaar te zijn.
+# VOORGESCHIEDENIS:
+# v1 (MATCHFITAI_NONBLOCKING_STARTUP_SYNC): ensure_latest_data() riep
+# sync_latest_data() SYNCHROON aan bij elke koude start, wat de eerste render
+# blokkeerde tot de volledige intervals.icu-sync klaar was (traag).
+# v2 (MATCHFITAI_AUTOSTART_FIRST_SYNC): sync verplaatst naar een
+# achtergrond-thread, met een begrensde wacht-lus als er nog geen lokale data
+# was. Op Streamlit Community Cloud bleek dit ONBETROUWBAAR: Kim zag de
+# spinner wel, maar nadien alsnog geen data - zelfs niet na een handmatige
+# "Nu verversen"-klik. Vermoedelijke oorzaak: gecombineerd met een 401
+# Unauthorized bij een LOKALE test (verkeerde lokale .env-key, apart
+# probleem) én mogelijk onvoorspelbaar gedrag van Python-threading in de
+# specifieke cloud-runtime, werd de combinatie te fragiel bevonden om op te
+# vertrouwen.
+#
+# NIEUWE AANPAK (v3, dit blok): de Streamlit-app doet ZELF NOOIT MEER een
+# live intervals.icu-aanroep. De verantwoordelijkheid voor "verse data" ligt
+# volledig bij een APARTE, uur-gebaseerde GitHub Actions-workflow
+# (.github/workflows/sync-mAIcoach.yml), die - net als de reeds langer
+# bestaande en beproefde scrape-padel.yml voor PadelAnalysis -
+# sync_latest_data() aanroept en de resultaten naar Firestore/GCS
+# (save_history_bulk, zie AICoach/persistent_data.py) wegschrijft.
+# De app zelf doet bij elke pagina-load enkel een GOEDKOPE, snelle
+# GCS-LEESoperatie: mirror_history_to_local() haalt de reeds gesynchroniseerde
+# geschiedenis terug van GCS naar de lokale data/history/*.json-bestanden
+# (die functie bestond al, oorspronkelijk bedoeld voor exact dit "koude
+# start"-scenario). Dit is GEEN intervals.icu-aanroep, dus geen 401-risico
+# hier, geen thread nodig, en typisch binnen milliseconden tot een paar
+# seconden klaar - het blokkeert de render dus niet merkbaar.
+# Resultaat: de app toont altijd de data die de laatste, uur-gebaseerde
+# GitHub Actions-run heeft opgehaald (dus maximaal ~1 uur "oud" in het
+# ergste geval), zonder ooit zelf te moeten wachten op of te vertrouwen op
+# een live sync binnen de Streamlit-runtime.
 # --------------------------------------------------------------------------- #
-_SYNC_MIN_INTERVAL_SECONDS = 1800  # 30 minuten, zelfde als de vorige ttl
-_FIRST_SYNC_MAX_WAIT_SECONDS = 25  # begrensde, eenmalige wachttijd - nooit oneindig
-_FIRST_SYNC_POLL_STEP_SECONDS = 2
-
-
-def _sync_worker() -> None:
-    """Draait in een aparte thread: doet de effectieve intervals.icu-sync.
-    Schrijft het resultaat/eventuele fout naar een module-level dict
-    (niet st.session_state - dat is niet thread-safe voor schrijven vanuit
-    een andere thread dan de hoofd-Streamlit-thread)."""
-    from AICoach.sync_latest import sync_latest_data
+def _refresh_local_history_from_storage() -> None:
+    """Spiegelt de laatst gesynchroniseerde geschiedenis van GCS/Firestore
+    terug naar lokale bestanden. GEEN intervals.icu-aanroep - enkel een
+    lezing van reeds bestaande, door de uur-gebaseerde GitHub Actions-
+    workflow bijgewerkte opslag. Faalt dit om welke reden dan ook (bv. GCS
+    niet bereikbaar), dan wordt dat opgevangen en blijft de app gewoon de
+    reeds lokaal aanwezige data tonen - nooit een crash op deze stap."""
     try:
-        sync_latest_data()
-        _SYNC_STATE["status"] = "done"
+        mirror_history_to_local()
     except Exception as exc:  # noqa: BLE001
-        _SYNC_STATE["status"] = "error"
-        _SYNC_STATE["error"] = str(exc)
-
-
-# Module-level (proces-breed) state van de lopende/laatste achtergrond-sync.
-# Bewust GEEN st.session_state (niet thread-safe voor cross-thread writes).
-_SYNC_STATE = {"status": "idle", "error": None, "thread": None}
-
-
-def ensure_latest_data() -> None:
-    """MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14: start de sync op de
-    achtergrond als dat nog niet recent gebeurd is, en blokkeert NOOIT de
-    render van de rest van de pagina. Detecteert bij elke aanroep (dus bij
-    elke Streamlit-rerun) of een eerder gestarte achtergrond-sync intussen
-    klaar is; zo ja, worden de data-caches geleegd en wordt éénmalig een
-    rerun getriggerd zodat de verse data verschijnt."""
-    import time
-    last_started = st.session_state.get("_sync_last_started_at")
-    now = time.monotonic()
-    thread_running = _SYNC_STATE["thread"] is not None and _SYNC_STATE["thread"].is_alive()
-    if not thread_running and (last_started is None or now - last_started > _SYNC_MIN_INTERVAL_SECONDS):
-        _SYNC_STATE["status"] = "running"
-        _SYNC_STATE["error"] = None
-        thread = threading.Thread(target=_sync_worker, daemon=True)
-        _SYNC_STATE["thread"] = thread
-        thread.start()
-        st.session_state["_sync_last_started_at"] = now
-        st.session_state["_sync_awaiting_refresh"] = True
-        return
-    if st.session_state.get("_sync_awaiting_refresh") and _SYNC_STATE["status"] in ("done", "error"):
-        st.session_state["_sync_awaiting_refresh"] = False
-        if _SYNC_STATE["status"] == "error":
-            st.session_state.startup_sync_error = _SYNC_STATE["error"]
-        else:
-            st.session_state.pop("startup_sync_error", None)
-            st.cache_data.clear()
-            st.rerun()
-
-
-def _await_first_sync_if_needed() -> None:
-    """MATCHFITAI_AUTOSTART_FIRST_SYNC_2026-09-14: zie de uitleg hierboven.
-    Wacht eenmalig, begrensd (max _FIRST_SYNC_MAX_WAIT_SECONDS) op de door
-    ensure_latest_data() gestarte achtergrond-thread, maar ENKEL wanneer er
-    nog helemaal geen lokale trainingshistoriek bestaat. In elk ander geval
-    (normale koude start met al bestaande, evt. wat verouderde lokale data)
-    doet deze functie niets en blijft het bestaande, volledig
-    niet-blokkerende gedrag ongewijzigd."""
-    if not load_history().empty:
-        return
-    thread = _SYNC_STATE.get("thread")
-    if thread is None or not thread.is_alive():
-        return
-    with st.spinner("Eerste synchronisatie met intervals.icu bezig (eenmalig, max ~25s)..."):
-        waited = 0.0
-        while thread.is_alive() and waited < _FIRST_SYNC_MAX_WAIT_SECONDS:
-            thread.join(timeout=_FIRST_SYNC_POLL_STEP_SECONDS)
-            waited += _FIRST_SYNC_POLL_STEP_SECONDS
-    if _SYNC_STATE.get("status") == "done":
-        st.session_state["_sync_awaiting_refresh"] = False
-        st.session_state.pop("startup_sync_error", None)
-        st.cache_data.clear()
-        st.rerun()
-    elif _SYNC_STATE.get("status") == "error":
-        st.session_state["_sync_awaiting_refresh"] = False
-        st.session_state["startup_sync_error"] = _SYNC_STATE.get("error")
-    # Anders (nog steeds bezig na de begrensde wachttijd): gewoon doorgaan
-    # naar de normale rendering. De achtergrond-thread loopt gewoon door; de
-    # bestaande "Nu verversen"-knop of een volgende interactie pikt de
-    # voltooiing later alsnog op via ensure_latest_data().
+        st.session_state["history_refresh_error"] = str(exc)
+    else:
+        st.session_state.pop("history_refresh_error", None)
 
 
 def render_dashboard():
@@ -282,46 +202,45 @@ def render_chat():
 
 
 def render_health_app() -> None:
-    """Bouwt de volledige mAICoach-pagina (titel, sync, tabs).
+    """Bouwt de volledige mAICoach-pagina (titel, data-verversing, tabs).
     Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
     opgebouwd. Zowel de standalone uitvoering (streamlit run
     training_dashboard.py) als de gecombineerde app (via
     AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
-    MATCHFITAI_NONBLOCKING_STARTUP_SYNC_2026-09-14: ensure_latest_data()
-    start nu enkel een achtergrondthread (of detecteert dat er eentje klaar
-    is) - het blokkeert de render hieronder niet meer, ook niet bij een
-    koude start.
-    MATCHFITAI_AUTOSTART_FIRST_SYNC_2026-09-14: direct daarna wordt
-    _await_first_sync_if_needed() aangeroepen - die doet NIETS zolang er al
-    lokale data bestaat, maar wacht kort en begrensd op de allereerste sync
-    als die data nog volledig ontbreekt (zie uitleg daar)."""
+    MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14: geen live intervals.icu-
+    sync meer binnen de app zelf (zie uitleg hierboven). De verse data komt
+    van een aparte, uur-gebaseerde GitHub Actions-workflow; hier wordt enkel
+    de reeds gesynchroniseerde geschiedenis van opslag naar lokaal
+    gespiegeld (goedkoop, geen intervals.icu-aanroep)."""
     try:
         st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
     except Exception:
         pass
     _inject_css()
     st.title("🏃 mAICoach")
-    # UI eerst tonen; sync draait nu ECHT op de achtergrond en blokkeert niet.
-    ensure_latest_data()
-    _await_first_sync_if_needed()
-    if st.session_state.get("_sync_awaiting_refresh"):
-        st.caption("🔄 Nieuwste gegevens worden op de achtergrond opgehaald...")
+    _refresh_local_history_from_storage()
     context = build_context()
     st.caption(
         f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
         f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
     )
+    st.caption(
+        "Gegevens worden elk uur automatisch bijgewerkt op de achtergrond "
+        "(via GitHub Actions) - hier steeds de laatst beschikbare synchronisatie."
+    )
+    if st.session_state.get("history_refresh_error"):
+        with st.expander("⚠️ Kon de opslag niet verversen (details)"):
+            st.code(st.session_state["history_refresh_error"])
     with st.expander("Gegevens verversen"):
-        st.caption("De nieuwste gegevens worden automatisch opgehaald. Forceer hier indien nodig.")
+        st.caption(
+            "Haalt de laatst door de uur-gebaseerde achtergrondtaak gesynchroniseerde "
+            "gegevens opnieuw op uit de opslag (geen live intervals.icu-aanroep hier)."
+        )
         if st.button("Nu verversen"):
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state.pop("dashboard_selected_date", None)
-            st.session_state.pop("_sync_last_started_at", None)
             st.rerun()
-        if st.session_state.get("startup_sync_error"):
-            st.warning("Automatische synchronisatie gaf een melding:")
-            st.code(st.session_state["startup_sync_error"])
     tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
     comparison_active = bool(st.session_state.get("comparison_active"))
     if comparison_active:

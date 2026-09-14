@@ -1,0 +1,86 @@
+# .github/workflows/sync-mAIcoach.yml
+#
+# MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14
+#
+# Automatische, uur-gebaseerde intervals.icu-synchronisatie voor mAICoach.
+# Draait AICoach/sync_latest.py::sync_latest_data() op de achtergrond en
+# schrijft het resultaat naar GCS/Firestore (via AICoach/persistent_data.py
+# en AICoach/gcs_store.py). De gedeployde Streamlit-app doet zelf GEEN
+# live intervals.icu-aanroep meer - ze leest enkel de laatst gesynchroniseerde
+# data terug via mirror_history_to_local() (goedkoop, geen API-call).
+#
+# Waarom dit patroon (en niet threading/sync binnen de app zelf):
+# Een eerdere aanpak liet de Streamlit-app zelf een achtergrond-thread
+# starten voor de sync. Dat bleek onbetrouwbaar op Streamlit Community
+# Cloud (mogelijk door hoe die omgeving Python-threads binnen een
+# webserver-proces behandelt) - een sync leek soms te draaien, maar de app
+# toonde nadien alsnog geen verse data, ook niet na een handmatige
+# ververs-poging. Door de sync volledig te ontkoppelen van de webserver
+# (net als de al langer bestaande, beproefde scrape-padel.yml voor
+# PadelAnalysis) is er geen enkele afhankelijkheid meer van
+# Streamlit-specifiek thread-gedrag: een gewone, korte GitHub Actions-job
+# draait, schrijft weg, en is klaar - de app hoeft enkel te lezen.
+#
+# Vereiste repo secrets (Settings -> Secrets and variables -> Actions):
+#   INTERVALS_API_KEY        - dezelfde waarde als in Streamlit Cloud secrets
+#   INTERVALS_ATHLETE_ID     - dezelfde waarde als in Streamlit Cloud secrets
+#   Firestore/GCS-credential - AFHANKELIJK van hoe AICoach/gcs_store.py zijn
+#                              credentials leest (zie de code aldaar); als
+#                              dat dezelfde Firebase service-account is als
+#                              PadelAnalysis gebruikt, hergebruik dan het
+#                              bestaande repo secret FIREBASE_SERVICE_ACCOUNT_JSON
+#                              (zie scrape-padel.yml) in plaats van een nieuw
+#                              secret aan te maken.
+#
+# app_config.require_secret() leest EERST een omgevingsvariabele, pas daarna
+# st.secrets (zie AICoach/app_config.py) - vandaar dat het injecteren van
+# INTERVALS_API_KEY/INTERVALS_ATHLETE_ID als env-var hieronder volstaat,
+# zonder dat er een secrets.toml-bestand voor deze CI-run nodig is.
+
+name: Sync mAICoach data (intervals.icu)
+
+on:
+  schedule:
+    # Elk uur, op het hele uur (UTC).
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+# Voorkom dat twee syncs elkaars geschreven data overlappen; een lopende
+# sync mag netjes afronden voor de volgende start (zelfde patroon als
+# scrape-padel.yml).
+concurrency:
+  group: sync-maicoach
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Installeer dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run mAICoach-synchronisatie
+        env:
+          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
+          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
+          # Zie opmerking hierboven: hergebruikt hetzelfde Firebase-secret
+          # als PadelAnalysis, indien dat ook is wat AICoach/gcs_store.py
+          # verwacht. Pas de secret-naam hier aan indien AICoach een ANDER
+          # credential-mechanisme gebruikt (bv. een apart GCS-service-
+          # account-JSON i.p.v. Firestore).
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python -m AICoach.sync_latest
