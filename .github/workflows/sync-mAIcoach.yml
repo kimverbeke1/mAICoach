@@ -1,53 +1,23 @@
 # .github/workflows/sync-mAIcoach.yml
 #
-# MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14
-# Automatische, uur-gebaseerde intervals.icu-synchronisatie voor mAICoach.
-# Draait AICoach/sync_latest.py::sync_latest_data() op de achtergrond en
-# schrijft het resultaat naar Firestore EN GCS (via AICoach/gcs_store.py /
-# AICoach/persistent_data.py). De gedeployde Streamlit-app doet zelf GEEN
-# live intervals.icu-aanroep meer - ze leest enkel de laatst gesynchroniseerde
-# data terug via mirror_history_to_local() (goedkoop, geen API-call).
-#
-# MATCHFITAI_GCS_CREDENTIALS_FOR_CI_2026-09-15 (kritieke aanvulling):
-# BUG (opgelost): de eerdere versie van deze workflow gaf enkel
-# FIREBASE_SERVICE_ACCOUNT_JSON door, in de veronderstelling dat dit ook de
-# GCS-toegang zou regelen. Uit AICoach/gcs_store.py bleek echter dat GCS een
-# APART mechanisme gebruikt:
-#   1. _credentials_from_streamlit() - vereist st.secrets["gcp_service_account"]
-#      (een TOML-sectie). Bestaat NIET buiten een Streamlit-runtime, dus dit
-#      faalt ALTIJD in een kale GitHub Actions-workflow (geen st.secrets).
-#   2. _credentials_from_env_file() - fallback: leest
-#      get_secret("GOOGLE_APPLICATION_CREDENTIALS") als BESTANDSPAD naar een
-#      service-account-JSON-bestand (zie AICoach/app_config.py: get_secret()
-#      heeft env-var-voorrang, dus dit werkt prima met een gewone
-#      omgevingsvariabele in CI).
-#   3. _bucket_name() - vereist get_secret("GCS_BUCKET") (of GCS_BUCKET_NAME)
-#      - een platte string, eenvoudig als env-var door te geven.
-# Zonder GCS_BUCKET en een geldig GOOGLE_APPLICATION_CREDENTIALS-bestand gaf
-# gcs_available() dus ALTIJD False terug in de workflow-run, en schreef
-# sync_latest_data() (voor zover het GCS gebruikt naast/i.p.v. Firestore)
-# nergens naartoe voor GCS - een vermoedelijke (mede)verklaring voor
-# ontbrekende velden (hrv/slaap/readiness) en/of trage fallback-gedrag in de
-# app, die daardoor op verouderde lokale/Firestore-data bleef terugvallen.
-# Fix: deze workflow schrijft nu de GCS-service-account-JSON (apart repo
-# secret, GCS_SERVICE_ACCOUNT_JSON - de INHOUD van hetzelfde JSON-bestand dat
-# ook in Streamlit Cloud's [gcp_service_account]-sectie staat, hier als platte
-# JSON-tekst) naar een tijdelijk bestand, en zet GOOGLE_APPLICATION_CREDENTIALS
-# naar dat bestandspad - exact het mechanisme dat _credentials_from_env_file()
-# verwacht. GCS_BUCKET wordt gewoon als losse env-var doorgegeven.
+# Uur-gebaseerde intervals.icu-synchronisatie voor mAICoach.
+# Draait AICoach/sync_latest.py en schrijft history, wellness en activities
+# naar GCS. De Streamlit-app doet zelf geen live intervals.icu-aanroep meer;
+# ze leest enkel de gesynchroniseerde data terug uit de bucket.
 #
 # Vereiste repo secrets (Settings -> Secrets and variables -> Actions):
-#   INTERVALS_API_KEY          - zelfde waarde als in Streamlit Cloud secrets
-#   INTERVALS_ATHLETE_ID       - zelfde waarde als in Streamlit Cloud secrets
-#   FIREBASE_SERVICE_ACCOUNT_JSON - reeds aanwezig (Firestore-toegang)
-#   GCS_SERVICE_ACCOUNT_JSON   - NIEUW: de volledige JSON-inhoud van het
-#                                 GCP-service-account (dezelfde inhoud als de
-#                                 [gcp_service_account]-sectie in Streamlit
-#                                 Cloud secrets, hier als platte JSON-string -
-#                                 kopieer de JSON-vorm van dat service-account,
-#                                 niet de TOML-sectie zelf)
-#   GCS_BUCKET                 - NIEUW: de bucketnaam, zelfde waarde als
-#                                 GCS_BUCKET in Streamlit Cloud secrets
+#   INTERVALS_API_KEY             - API-key van intervals.icu
+#   INTERVALS_ATHLETE_ID          - athlete-ID (bv. i123456)
+#   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang
+#   GCS_SERVICE_ACCOUNT_JSON      - GCP-service-account als platte JSON-string
+#                                   (zelfde account als de [gcp_service_account]-
+#                                   sectie in Streamlit Cloud secrets)
+#   GCS_BUCKET                    - naam van de GCS-bucket
+#
+# GCS gebruikt een ander credential-mechanisme dan Firestore: buiten een
+# Streamlit-runtime bestaat st.secrets niet, dus valt gcs_store.py terug op
+# GOOGLE_APPLICATION_CREDENTIALS - een pad naar een JSON-bestand. Vandaar de
+# stap die het secret eerst naar een tijdelijk bestand schrijft.
 
 name: Sync mAICoach data (intervals.icu)
 
@@ -81,13 +51,6 @@ jobs:
           pip install -r requirements.txt
 
       - name: Schrijf GCS-service-account naar tijdelijk bestand
-        # MATCHFITAI_GCS_CREDENTIALS_FOR_CI_2026-09-15: nodig zodat
-        # gcs_store._credentials_from_env_file() dit kan inlezen via
-        # GOOGLE_APPLICATION_CREDENTIALS (een bestandspad, geen JSON-tekst).
-        # Faalt dit secret te bestaan (leeg), dan schrijft dit stap een leeg
-        # bestand weg; get_bucket() valt in dat geval simpelweg terug op None
-        # (gcs_available() = False) zonder de rest van de sync te breken -
-        # sync_latest.py schrijft dan enkel naar Firestore, niet naar GCS.
         run: |
           echo '${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}' > "${{ runner.temp }}/gcs-service-account.json"
 
