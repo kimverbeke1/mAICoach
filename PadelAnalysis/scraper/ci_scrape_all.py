@@ -45,6 +45,15 @@ al gebruikte, nu gewoon automatisch voor iedereen. Elke speler krijgt zo
 dagelijks een vers "volgende match"-schema, zonder dat iemand ooit zelf de
 knop moet indrukken.
 
+PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15:
+update_player_poule() slaat sinds deze versie NAAST de voorronde-fixtures
+ook de EINDRONDE-bracket op (interclub_eindronde), en scopet de voorronde
+op de eigen pouleId. Zodra de voorronde uitgespeeld is, komt de "volgende
+match" uit die bracket. Deze module hoefde daarvoor niet te wijzigen -
+ze roept enkel update_player_poule() aan - maar de logging toont nu ook
+hoeveel bracketwedstrijden er gevonden zijn, zodat je in de Actions-logs
+meteen ziet of de eindronde correct meekomt.
+
 Te controleren via environment variables (optioneel, met veilige defaults):
     - ENABLE_POULE_UPDATE ("true"/"false", standaard "true"): zet de hele
       poule-schema-stap desgewenst volledig uit (bv. om een run te
@@ -53,6 +62,9 @@ Te controleren via environment variables (optioneel, met veilige defaults):
       poule-URL altijd opnieuw AFGELEID uit het meest recente
       interclub-uitslagenblad (trager), i.p.v. een reeds gekende
       poule_reeks_url te hergebruiken (sneller, normale dagelijkse gang).
+    - POULE_EINDRONDE ("true"/"false", standaard "true"): neem de
+      eindronde-brackets mee. Zet op "false" om de run te versnellen
+      (de eindronde-tabs moeten stuk voor stuk opengeklikt worden).
 
 Belangrijke, bewuste beperking: de poule-stap wordt uitgevoerd voor DEZELFDE
 (reeds mode-gefilterde) lijst van player_ids als de matchdata-stap
@@ -70,8 +82,10 @@ Gebruik (lokaal testen, PowerShell):
     $env:MODE = "missing"               # missing | new_users | full
     $env:ENABLE_POULE_UPDATE = "true"   # optioneel, standaard true
     $env:POULE_FORCE = "false"          # optioneel, standaard false
+    $env:POULE_EINDRONDE = "true"       # optioneel, standaard true
     python ci_scrape_all.py
 """
+
 import logging
 import os
 import sys
@@ -122,6 +136,7 @@ def get_requested_player_ids() -> list:
     """
     Bepaalt WELKE spelers deze run in aanmerking neemt (voor filtering op
     mode, zie filter_by_mode()).
+
     - PLAYER_IDS environment variable gezet en niet leeg  -> enkel die spelers
       (komma-gescheiden, spaties worden getrimd, lege stukken genegeerd).
     - Anders                                              -> alle gekende spelers.
@@ -161,12 +176,18 @@ def get_poule_force() -> bool:
     return _get_bool_env("POULE_FORCE", False)
 
 
+def get_poule_eindronde() -> bool:
+    """PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15."""
+    return _get_bool_env("POULE_EINDRONDE", True)
+
+
 def filter_by_mode(player_ids: list, mode: str) -> list:
     """Past de mode-specifieke voorselectie toe VOOR het scrapen begint,
     zodat spelers die niet in aanmerking komen niet eens geteld worden in
     de voortgangsbalk/logs."""
     if mode != "new_users":
         return player_ids
+
     new_only = []
     for pid in player_ids:
         try:
@@ -176,6 +197,7 @@ def filter_by_mode(player_ids: list, mode: str) -> list:
             continue
         if existing is None:
             new_only.append(pid)
+
     skipped = len(player_ids) - len(new_only)
     if skipped:
         logger.info(f"mode=new_users: {skipped} reeds-gekende speler(s) overgeslagen, {len(new_only)} nieuwe speler(s) te scrapen.")
@@ -194,11 +216,14 @@ def run_match_scrapes(player_ids: list, mode: str) -> tuple[list, list, list]:
     """Bestaande matchdata-scrape-stap, ONGEWIJZIGD t.o.v. de vorige versie
     van dit bestand - enkel losgetrokken in een eigen functie zodat main()
     overzichtelijk kan worden uitgebreid met de nieuwe poule-stap hieronder.
+
     Returns (ok, failed, skipped_up_to_date) - zelfde vorm als voorheen
     inline in main()."""
     kwargs = scrape_kwargs_for_mode(mode)
     logger.info(f"scrape_player kwargs: {kwargs}")
+
     ok, failed, skipped_up_to_date = [], [], []
+
     for i, pid in enumerate(player_ids, start=1):
         logger.info(f"--- ({i}/{len(player_ids)}) Speler {pid}: matchdata ---")
         try:
@@ -224,12 +249,14 @@ def run_match_scrapes(player_ids: list, mode: str) -> tuple[list, list, list]:
         except Exception as e:
             logger.exception(f"[{pid}] Onverwachte fout: {e}")
             failed.append((pid, str(e)))
+
         if i < len(player_ids):
             time.sleep(DELAY_BETWEEN_PLAYERS)
+
     return ok, failed, skipped_up_to_date
 
 
-def run_poule_updates(player_ids: list, force: bool) -> tuple[list, list]:
+def run_poule_updates(player_ids: list, force: bool, include_eindronde: bool = True) -> tuple[list, list]:
     """PADEL_ANALYSIS_AUTO_POULE_UPDATE_2026-09-14:
     Werkt voor elke speler in player_ids het interclub-poule-schema bij
     (poule_reeks_url + interclub_schedule), via de bestaande
@@ -238,6 +265,12 @@ def run_poule_updates(player_ids: list, force: bool) -> tuple[list, list]:
     was. Wordt aangeroepen VOOR ALLE verwerkte spelers uit deze run, zodat
     "Volgende match" voor iedereen automatisch actueel blijft, niet enkel
     voor wie ooit zelf de knop indrukte.
+
+    PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15: update_player_poule() slaat
+    nu ook de eindronde-bracket op. Die telling wordt mee gelogd, zodat je in
+    de Actions-logs ziet of de eindronde correct meekomt. Oudere versies van
+    poule_playwright kennen de include_eindronde-parameter niet; daarop wordt
+    netjes teruggevallen.
 
     Een speler zonder gekende interclubmatch (bv. speelt geen interclub, of
     matchdata kon niet gescraped worden) geeft een verwachte, onschuldige
@@ -252,25 +285,58 @@ def run_poule_updates(player_ids: list, force: bool) -> tuple[list, list]:
 
     updated, skipped_or_failed = [], []
     total = len(player_ids)
+
     for i, pid in enumerate(player_ids, start=1):
         logger.info(f"--- ({i}/{total}) Speler {pid}: poule-schema ---")
         try:
-            result = pp.update_player_poule(pid, headless=True, force=force)
+            try:
+                result = pp.update_player_poule(
+                    pid, headless=True, force=force, include_eindronde=include_eindronde
+                )
+            except TypeError:
+                # Oudere poule_playwright zonder eindronde-ondersteuning.
+                logger.warning(
+                    f"[{pid}] poule_playwright kent 'include_eindronde' niet — "
+                    f"werk scraper/poule_playwright.py bij om de eindronde mee op te slaan."
+                )
+                result = pp.update_player_poule(pid, headless=True, force=force)
         except Exception as e:
             logger.exception(f"[{pid}] Onverwachte fout bij poule-update: {e}")
             skipped_or_failed.append((pid, str(e)))
             if i < total:
                 time.sleep(DELAY_BETWEEN_POULE_UPDATES)
             continue
+
         if result.get("error"):
             logger.info(f"[{pid}] Poule-schema overgeslagen: {result['error']}")
             skipped_or_failed.append((pid, result["error"]))
         else:
             n_fixtures = result.get("fixtures", 0)
-            logger.info(f"[{pid}] Poule-schema bijgewerkt: {n_fixtures} wedstrijd(en) in het schema.")
-            updated.append((pid, f"{n_fixtures} wedstrijden"))
+            n_eind = result.get("eindronde", 0)
+            n_pending = result.get("eindronde_pending", 0)
+            poule_label = result.get("poule_label") or "poule ?"
+
+            detail = f"{n_fixtures} wedstrijd(en) in {poule_label}"
+            if n_eind:
+                detail += f", eindronde: {n_eind} wedstrijd(en)"
+                if n_pending:
+                    detail += f" ({n_pending} nog in te vullen)"
+            logger.info(f"[{pid}] Poule-schema bijgewerkt: {detail}.")
+
+            # Een poule van 6 ploegen telt 15 wedstrijden. Veel meer wijst op
+            # een scoping-probleem (zie PADEL_ANALYSIS_POULE_SCOPE_FIX): dan
+            # zijn er andere poules of eindronde-brackets mee ingelezen.
+            if n_fixtures > 60:
+                logger.warning(
+                    f"[{pid}] Ongewoon veel voorronde-fixtures ({n_fixtures}). "
+                    f"Controleer of de pouleId-scoping werkt in schedule_scraper.parse_poule_schedule()."
+                )
+
+            updated.append((pid, detail))
+
         if i < total:
             time.sleep(DELAY_BETWEEN_POULE_UPDATES)
+
     return updated, skipped_or_failed
 
 
@@ -278,9 +344,11 @@ def main() -> int:
     mode = get_mode()
     player_ids = get_requested_player_ids()
     player_ids = filter_by_mode(player_ids, mode)
+
     if not player_ids:
         logger.warning(f"Geen spelers gevonden/aangevraagd voor mode='{mode}' — niets te verversen.")
         return 0
+
     logger.info(f"Mode: '{mode}' — {len(player_ids)} speler(s) worden verwerkt: {player_ids}")
 
     ok, failed, skipped_up_to_date = run_match_scrapes(player_ids, mode)
@@ -293,8 +361,14 @@ def main() -> int:
     poule_updated, poule_skipped = [], []
     if get_poule_update_enabled():
         force = get_poule_force()
-        logger.info(f"=== Poule-schema bijwerken voor {len(player_ids)} speler(s) (force={force}) ===")
-        poule_updated, poule_skipped = run_poule_updates(player_ids, force=force)
+        include_eindronde = get_poule_eindronde()
+        logger.info(
+            f"=== Poule-schema bijwerken voor {len(player_ids)} speler(s) "
+            f"(force={force}, eindronde={include_eindronde}) ==="
+        )
+        poule_updated, poule_skipped = run_poule_updates(
+            player_ids, force=force, include_eindronde=include_eindronde
+        )
         logger.info("=== Samenvatting poule-schema ===")
         logger.info(f"Bijgewerkt: {len(poule_updated)} — Overgeslagen/mislukt: {len(poule_skipped)}")
         for pid, info in poule_skipped:
