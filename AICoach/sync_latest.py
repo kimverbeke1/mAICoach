@@ -1,24 +1,45 @@
 # -*- coding: utf-8 -*-
 """Lichte incrementele synchronisatie voor mAICoach.
 
-1. Zet bij een koude start eerst de persistente history uit Firestore terug naar
-   lokale bestanden (zodat data/history/*.json meteen bestaat).
+1. Zet bij een koude start eerst de persistente data uit GCS terug naar
+   lokale bestanden (zodat data/history/*.json, data/wellness/wellness.json en
+   data/activities/activities.json meteen bestaan).
 2. Haalt enkel de recentste ontbrekende activiteiten en wellness op (met een
    kleine overlap zodat retroactief bijgestelde CTL/ATL correct worden bijgewerkt).
 3. Herbouwt LOKAAL data/history/*.json uit wellness (primaire bron voor
    Fitness/Fatigue/Form, inclusief vandaag), verrijkt met training_load uit
-   activities.json, en spiegelt die history naar Firestore.
+   activities.json, en spiegelt die history naar GCS.
 
 Zo tonen dashboard en dagelijkse update altijd dezelfde, actuele Form die
 overeenkomt met Intervals.icu, en overleven de gegevens een cloud-herstart.
-"""
 
+MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15 (kritieke bugfix):
+BUG (opgelost, gemeld door Kim: Recovery- en Activiteiten-tab bleven LEEG op
+de cloud, terwijl Dashboard wél werkte): deze module schreef enkel de
+herbouwde history naar GCS (save_history_bulk). wellness.json en
+activities.json werden uitsluitend LOKAAL bewaard (via save_wellness/
+save_activities uit sync_wellness_history/sync_activity_history).
+Zolang de Streamlit-app zelf de sync uitvoerde, was dat voldoende: dezelfde
+container schreef én las die bestanden. Sinds de sync in een APARTE GitHub
+Actions-runner draait (MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14), wordt
+die runner na afloop vernietigd - de twee bestanden bereikten de
+Streamlit-container dus nooit. Enkel history overleefde, omdat dat als enige
+naar GCS werd gespiegeld.
+Fix: na elke sync worden wellness en activities nu OOK naar GCS geschreven
+(persist_wellness/persist_activities), en bij een koude start worden alle
+drie de bronnen teruggezet via mirror_all_to_local().
+"""
 from datetime import date, timedelta
 from pathlib import Path
 import json
 
 from AICoach.intervals.client import IntervalsClient
-from AICoach.persistent_data import mirror_history_to_local, save_history_bulk
+from AICoach.persistent_data import (
+    mirror_all_to_local,
+    save_history_bulk,
+    save_activities as persist_activities,
+    save_wellness as persist_wellness,
+)
 from AICoach.sync_activity_history import (
     configured_history_days,
     load_existing_activities,
@@ -37,7 +58,6 @@ ROOT = Path(__file__).resolve().parents[1]
 ACTIVITIES_FILE = ROOT / "data" / "activities" / "activities.json"
 WELLNESS_FILE = ROOT / "data" / "wellness" / "wellness.json"
 HISTORY_DIR = ROOT / "data" / "history"
-
 OVERLAP_DAYS = 7
 
 
@@ -86,7 +106,16 @@ def sync_latest_activities():
     downloaded = IntervalsClient().get_activities(oldest=oldest, newest=newest)
     merged = merge_activities(existing, downloaded)
     save_activities(merged)
-    return {"oldest": oldest, "newest": newest, "downloaded": len(downloaded), "stored": len(merged)}
+    # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15: ook naar GCS, anders
+    # bereikt dit bestand de Streamlit-container nooit (zie moduledocstring).
+    persisted = persist_activities(merged)
+    return {
+        "oldest": oldest,
+        "newest": newest,
+        "downloaded": len(downloaded),
+        "stored": len(merged),
+        "persisted": persisted,
+    }
 
 
 def sync_latest_wellness():
@@ -99,11 +128,20 @@ def sync_latest_wellness():
     downloaded = IntervalsClient().get_wellness(oldest=oldest, newest=newest)
     merged = merge_wellness(existing, downloaded)
     save_wellness(merged)
-    return {"oldest": oldest, "newest": newest, "downloaded": len(downloaded), "stored": len(merged)}
+    # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15: ook naar GCS - dit is
+    # de bron voor HRV/slaap in de Recovery-tab.
+    persisted = persist_wellness(merged)
+    return {
+        "oldest": oldest,
+        "newest": newest,
+        "downloaded": len(downloaded),
+        "stored": len(merged),
+        "persisted": persisted,
+    }
 
 
 def rebuild_history_local():
-    """Herbouw data/history/*.json uit wellness (primair) + activiteiten, en spiegel naar Firestore."""
+    """Herbouw data/history/*.json uit wellness (primair) + activiteiten, en spiegel naar GCS."""
     wellness = _load_json(WELLNESS_FILE, [])
     if isinstance(wellness, dict):
         wellness = wellness.get("wellness", wellness.get("data", []))
@@ -168,19 +206,23 @@ def rebuild_history_local():
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-    # Spiegel naar Firestore zodat de history een cloud-herstart overleeft.
+    # Spiegel naar GCS zodat de history een cloud-herstart overleeft.
+    # MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: save_history_bulk schrijft nu
+    # één bulk-object i.p.v. één object per dag (was 736 aparte uploads).
     save_history_bulk(per_day)
     return {"days": len(per_day)}
 
 
 def sync_latest_data():
-    # Koude start: zet persistente history uit Firestore terug naar lokaal.
-    restored = mirror_history_to_local()
+    # Koude start: zet ALLE persistente bronnen uit GCS terug naar lokaal.
+    # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15: was mirror_history_to_local(),
+    # wat enkel history terugzette - wellness/activities ontbraken daardoor.
+    restored = mirror_all_to_local()
     activities = sync_latest_activities()
     wellness = sync_latest_wellness()
     history = rebuild_history_local()
     return {
-        "restored_from_firestore": restored,
+        "restored_from_storage": restored,
         "activities": activities,
         "wellness": wellness,
         "history": history,

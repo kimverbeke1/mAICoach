@@ -23,7 +23,7 @@ from AICoach.dashboard.ui_helpers import (
     render_assistant_answer,
     render_selected_values,
 )
-from AICoach.persistent_data import mirror_history_to_local
+from AICoach.persistent_data import mirror_all_to_local
 from AICoach.saved_insights import render_saved_insights, save_insight
 
 
@@ -73,80 +73,62 @@ def _inject_css() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14 (op verzoek van Kim, na twee
-# eerdere pogingen die het probleem niet oplosten - zie hieronder voor de
-# volledige voorgeschiedenis):
+# DATA-VERVERSING - VOORGESCHIEDENIS EN HUIDIGE AANPAK
 #
-# VOORGESCHIEDENIS:
 # v1 (MATCHFITAI_NONBLOCKING_STARTUP_SYNC): ensure_latest_data() riep
-# sync_latest_data() SYNCHROON aan bij elke koude start, wat de eerste render
-# blokkeerde tot de volledige intervals.icu-sync klaar was (traag).
-# v2 (MATCHFITAI_AUTOSTART_FIRST_SYNC): sync verplaatst naar een
-# achtergrond-thread, met een begrensde wacht-lus als er nog geen lokale data
-# was. Op Streamlit Community Cloud bleek dit ONBETROUWBAAR: Kim zag de
-# spinner wel, maar nadien alsnog geen data - zelfs niet na een handmatige
-# "Nu verversen"-klik.
+# sync_latest_data() SYNCHROON aan bij elke koude start -> blokkeerde de
+# eerste render tot de volledige intervals.icu-sync klaar was (traag).
+# v2 (MATCHFITAI_AUTOSTART_FIRST_SYNC): sync in een achtergrond-thread, met
+# een begrensde wacht-lus. Op Streamlit Community Cloud onbetrouwbaar
+# gebleken: spinner verscheen wel, data niet - ook niet na handmatig
+# verversen.
+# v3 (MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14): de app doet ZELF geen
+# live intervals.icu-aanroep meer. Een aparte, uur-gebaseerde GitHub
+# Actions-workflow (.github/workflows/sync-mAIcoach.yml) synchroniseert en
+# schrijft naar GCS; de app leest enkel terug.
+# v3.1 (MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14): de terugleesoperatie
+# gebeurde bij ELKE Streamlit-rerun (dus bij elke tab-klik) -> gecachet tot
+# maximaal 1x per 5 minuten per sessie.
 #
-# v3 (dit blok): de Streamlit-app doet ZELF NOOIT MEER een live
-# intervals.icu-aanroep. Een APARTE, uur-gebaseerde GitHub Actions-workflow
-# (.github/workflows/sync-mAIcoach.yml) doet de eigenlijke sync en schrijft
-# naar GCS/Firestore. De app doet enkel nog een GOEDKOPE GCS-LEESoperatie
-# (mirror_history_to_local()) om de laatst gesynchroniseerde data terug te
-# spiegelen naar lokale bestanden.
-#
-# MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14 (kritieke bugfix op v3):
-# BUG (opgelost, gemeld door Kim): "gewoon iets switchen van pagina duurt
-# terug lang laden" - ook binnen een AL ACTIEVE sessie (dus GEEN koude
-# start/library-installatie, die hypothese werd expliciet uitgesloten omdat
-# PadelAnalysis in dezelfde container wel steeds snel bleef). Oorzaak:
-# mirror_history_to_local() had GEEN caching (bevestigd via
-# `Select-String -Pattern "cache_data|cache_resource"` op
-# AICoach/persistent_data.py - geen enkele treffer boven de functie). Ze werd
-# hierdoor bij ELKE Streamlit-rerun opnieuw aangeroepen - dus bij elke
-# tab-klik, elke interactie, elke keer dat de pagina opnieuw uitvoert - en
-# deed dan telkens opnieuw een volledige GCS-netwerklezing (lokaal gemeten
-# op ~1.15s; op Streamlit Cloud kennelijk merkbaar trager door hogere
-# netwerklatentie tussen de cloud-regio en de GCS-opslag).
-# Fix: de aanroep is nu gewrapt in _refresh_local_history_from_storage(),
-# met een EIGEN, HANDMATIGE tijd-gebaseerde cache via st.session_state (geen
-# st.cache_data-decorator op mirror_history_to_local() zelf, want die
-# functie heeft neveneffecten - ze schrijft lokale bestanden weg - en
-# st.cache_data is primair bedoeld voor functies die een waarde
-# TERUGGEVEN op basis van hun argumenten, niet voor side-effect-only
-# operaties). De GCS-lezing gebeurt zo nog maximaal 1x per
-# _MIRROR_CACHE_SECONDS (5 minuten) per sessie, in plaats van bij elke
-# rerun - ruim vers genoeg, aangezien de onderliggende data toch maar 1x
-# per uur verandert (dankzij de nieuwe sync-workflow).
+# MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15 (kritieke bugfix, dit blok):
+# BUG (opgelost, gemeld door Kim): op de cloud toonde Dashboard wél data,
+# maar Recovery én Activiteiten bleven LEEG. Oorzaak lag NIET hier maar in
+# persistent_data.py: alleen history/ werd naar GCS gespiegeld, terwijl
+# wellness.json (bron voor HRV/slaap in Recovery) en activities.json (bron
+# voor de Activiteiten-tab) uitsluitend lokaal bestonden - en dus achterbleven
+# op de GitHub Actions-runner die na de sync vernietigd wordt.
+# Aanpassing hier: _refresh_local_history_from_storage() roept nu
+# mirror_all_to_local() aan in plaats van mirror_history_to_local(), zodat
+# alle drie de bronnen worden teruggezet. Zie persistent_data.py voor de
+# volledige toelichting en de nieuwe save_wellness()/save_activities().
 # --------------------------------------------------------------------------- #
 _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-sync-workflow
 
 
-def _refresh_local_history_from_storage() -> None:
-    """Spiegelt de laatst gesynchroniseerde geschiedenis van GCS/Firestore
-    terug naar lokale bestanden. GEEN intervals.icu-aanroep - enkel een
-    lezing van reeds bestaande, door de uur-gebaseerde GitHub Actions-
-    workflow bijgewerkte opslag.
+def _refresh_local_data_from_storage() -> None:
+    """Spiegelt history, wellness én activities van GCS terug naar lokale
+    bestanden. GEEN intervals.icu-aanroep - enkel een lezing van reeds
+    bestaande, door de uur-gebaseerde GitHub Actions-workflow bijgewerkte
+    opslag.
 
-    MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14: doet dit nu maximaal 1x per
-    _MIRROR_CACHE_SECONDS per sessie (via een tijdstempel in
-    st.session_state), in plaats van bij ELKE rerun - dat verklaarde de
-    trage paginawissels op de cloud. Faalt de lezing om welke reden dan ook
-    (bv. GCS niet bereikbaar), dan wordt dat opgevangen en blijft de app
-    gewoon de reeds lokaal aanwezige data tonen - nooit een crash op deze
-    stap, en de volgende poging gebeurt gewoon bij het verstrijken van de
-    cache-termijn."""
+    Doet dit maximaal 1x per _MIRROR_CACHE_SECONDS per sessie (tijdstempel in
+    st.session_state), in plaats van bij elke rerun - dat verklaarde eerder de
+    trage paginawissels. Faalt de lezing (bv. GCS onbereikbaar), dan wordt dat
+    opgevangen en blijft de app de reeds lokaal aanwezige data tonen; de
+    volgende poging gebeurt bij het verstrijken van de cache-termijn."""
     import time
-    last_refreshed = st.session_state.get("_history_mirror_last_refreshed_at")
+    last_refreshed = st.session_state.get("_data_mirror_last_refreshed_at")
     now = time.monotonic()
     if last_refreshed is not None and now - last_refreshed < _MIRROR_CACHE_SECONDS:
         return
     try:
-        mirror_history_to_local()
+        result = mirror_all_to_local()
     except Exception as exc:  # noqa: BLE001
-        st.session_state["history_refresh_error"] = str(exc)
+        st.session_state["data_refresh_error"] = str(exc)
     else:
-        st.session_state.pop("history_refresh_error", None)
-    st.session_state["_history_mirror_last_refreshed_at"] = now
+        st.session_state.pop("data_refresh_error", None)
+        st.session_state["_last_mirror_result"] = result
+    st.session_state["_data_mirror_last_refreshed_at"] = now
 
 
 def render_dashboard():
@@ -230,22 +212,14 @@ def render_health_app() -> None:
     Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
     opgebouwd. Zowel de standalone uitvoering (streamlit run
     training_dashboard.py) als de gecombineerde app (via
-    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
-    MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14: geen live intervals.icu-
-    sync meer binnen de app zelf. De verse data komt van een aparte,
-    uur-gebaseerde GitHub Actions-workflow.
-    MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14: de GCS-spiegeling gebeurt nu
-    maximaal 1x per 5 minuten per sessie (zie
-    _refresh_local_history_from_storage hierboven), zodat paginawisselen
-    binnen een actieve sessie niet telkens een nieuwe, trage GCS-lezing
-    triggert."""
+    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan."""
     try:
         st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
     except Exception:
         pass
     _inject_css()
     st.title("🏃 mAICoach")
-    _refresh_local_history_from_storage()
+    _refresh_local_data_from_storage()
     context = build_context()
     st.caption(
         f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
@@ -255,22 +229,28 @@ def render_health_app() -> None:
         "Gegevens worden elk uur automatisch bijgewerkt op de achtergrond "
         "(via GitHub Actions) - hier steeds de laatst beschikbare synchronisatie."
     )
-    if st.session_state.get("history_refresh_error"):
+    if st.session_state.get("data_refresh_error"):
         with st.expander("⚠️ Kon de opslag niet verversen (details)"):
-            st.code(st.session_state["history_refresh_error"])
+            st.code(st.session_state["data_refresh_error"])
     with st.expander("Gegevens verversen"):
         st.caption(
             "Haalt de laatst door de uur-gebaseerde achtergrondtaak gesynchroniseerde "
             "gegevens opnieuw op uit de opslag (geen live intervals.icu-aanroep hier)."
         )
+        last_result = st.session_state.get("_last_mirror_result")
+        if last_result:
+            st.caption(
+                f"Laatst teruggezet uit opslag: {last_result.get('history', 0)} history-dagen, "
+                f"{last_result.get('wellness', 0)} wellness-records, "
+                f"{last_result.get('activities', 0)} activiteiten."
+            )
         if st.button("Nu verversen"):
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state.pop("dashboard_selected_date", None)
-            # MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14: forceert een
-            # nieuwe GCS-lezing bij de eerstvolgende render, ook al is de
-            # 5-minuten-cache-termijn nog niet verstreken.
-            st.session_state.pop("_history_mirror_last_refreshed_at", None)
+            # Forceert een nieuwe GCS-lezing, ook al is de 5-minuten-termijn
+            # nog niet verstreken.
+            st.session_state.pop("_data_mirror_last_refreshed_at", None)
             st.rerun()
     tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
     comparison_active = bool(st.session_state.get("comparison_active"))
