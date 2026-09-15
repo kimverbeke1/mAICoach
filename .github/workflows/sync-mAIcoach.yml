@@ -1,64 +1,61 @@
 # .github/workflows/sync-mAIcoach.yml
 #
 # MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14
-#
 # Automatische, uur-gebaseerde intervals.icu-synchronisatie voor mAICoach.
 # Draait AICoach/sync_latest.py::sync_latest_data() op de achtergrond en
-# schrijft het resultaat naar GCS/Firestore (via AICoach/persistent_data.py
-# en AICoach/gcs_store.py). De gedeployde Streamlit-app doet zelf GEEN
+# schrijft het resultaat naar Firestore EN GCS (via AICoach/gcs_store.py /
+# AICoach/persistent_data.py). De gedeployde Streamlit-app doet zelf GEEN
 # live intervals.icu-aanroep meer - ze leest enkel de laatst gesynchroniseerde
 # data terug via mirror_history_to_local() (goedkoop, geen API-call).
 #
-# Waarom dit patroon (en niet threading/sync binnen de app zelf):
-# Een eerdere aanpak liet de Streamlit-app zelf een achtergrond-thread
-# starten voor de sync. Dat bleek onbetrouwbaar op Streamlit Community
-# Cloud (mogelijk door hoe die omgeving Python-threads binnen een
-# webserver-proces behandelt) - een sync leek soms te draaien, maar de app
-# toonde nadien alsnog geen verse data, ook niet na een handmatige
-# ververs-poging. Door de sync volledig te ontkoppelen van de webserver
-# (net als de al langer bestaande, beproefde scrape-padel.yml voor
-# PadelAnalysis) is er geen enkele afhankelijkheid meer van
-# Streamlit-specifiek thread-gedrag: een gewone, korte GitHub Actions-job
-# draait, schrijft weg, en is klaar - de app hoeft enkel te lezen.
+# MATCHFITAI_GCS_CREDENTIALS_FOR_CI_2026-09-15 (kritieke aanvulling):
+# BUG (opgelost): de eerdere versie van deze workflow gaf enkel
+# FIREBASE_SERVICE_ACCOUNT_JSON door, in de veronderstelling dat dit ook de
+# GCS-toegang zou regelen. Uit AICoach/gcs_store.py bleek echter dat GCS een
+# APART mechanisme gebruikt:
+#   1. _credentials_from_streamlit() - vereist st.secrets["gcp_service_account"]
+#      (een TOML-sectie). Bestaat NIET buiten een Streamlit-runtime, dus dit
+#      faalt ALTIJD in een kale GitHub Actions-workflow (geen st.secrets).
+#   2. _credentials_from_env_file() - fallback: leest
+#      get_secret("GOOGLE_APPLICATION_CREDENTIALS") als BESTANDSPAD naar een
+#      service-account-JSON-bestand (zie AICoach/app_config.py: get_secret()
+#      heeft env-var-voorrang, dus dit werkt prima met een gewone
+#      omgevingsvariabele in CI).
+#   3. _bucket_name() - vereist get_secret("GCS_BUCKET") (of GCS_BUCKET_NAME)
+#      - een platte string, eenvoudig als env-var door te geven.
+# Zonder GCS_BUCKET en een geldig GOOGLE_APPLICATION_CREDENTIALS-bestand gaf
+# gcs_available() dus ALTIJD False terug in de workflow-run, en schreef
+# sync_latest_data() (voor zover het GCS gebruikt naast/i.p.v. Firestore)
+# nergens naartoe voor GCS - een vermoedelijke (mede)verklaring voor
+# ontbrekende velden (hrv/slaap/readiness) en/of trage fallback-gedrag in de
+# app, die daardoor op verouderde lokale/Firestore-data bleef terugvallen.
+# Fix: deze workflow schrijft nu de GCS-service-account-JSON (apart repo
+# secret, GCS_SERVICE_ACCOUNT_JSON - de INHOUD van hetzelfde JSON-bestand dat
+# ook in Streamlit Cloud's [gcp_service_account]-sectie staat, hier als platte
+# JSON-tekst) naar een tijdelijk bestand, en zet GOOGLE_APPLICATION_CREDENTIALS
+# naar dat bestandspad - exact het mechanisme dat _credentials_from_env_file()
+# verwacht. GCS_BUCKET wordt gewoon als losse env-var doorgegeven.
 #
-# Vereiste repo secrets (Settings -> Secrets and variables -> Actions ->
-# tabblad "Repository secrets", NIET "Environment secrets"):
-#   INTERVALS_API_KEY        - dezelfde waarde als in Streamlit Cloud secrets
-#   INTERVALS_ATHLETE_ID     - dezelfde waarde als in Streamlit Cloud secrets
-#   FIREBASE_SERVICE_ACCOUNT_JSON - AFHANKELIJK van hoe AICoach/gcs_store.py
-#                              zijn credentials leest (zie de code aldaar);
-#                              hergebruikt hier hetzelfde repo secret als
-#                              scrape-padel.yml. Pas de secret-naam hier aan
-#                              indien AICoach een ANDER credential-mechanisme
-#                              gebruikt.
-#
-# app_config.require_secret() leest EERST een omgevingsvariabele, pas daarna
-# st.secrets (zie AICoach/app_config.py) - vandaar dat het injecteren van
-# INTERVALS_API_KEY/INTERVALS_ATHLETE_ID als env-var hieronder volstaat,
-# zonder dat er een secrets.toml-bestand voor deze CI-run nodig is. De
-# secret-WAARDE zelf staat NERGENS in dit bestand: "${{ secrets.NAAM }}" is
-# een door GitHub Actions ingevulde verwijzing naar de repo-secrets-opslag,
-# geen letterlijke tekst.
-#
-# MATCHFITAI_SECRETS_DEBUG_STEP_2026-09-14 (tijdelijk, op verzoek van Kim):
-# Kim kreeg bij een handmatige workflow-run nog steeds "Ontbrekende
-# configuratie: INTERVALS_API_KEY", OOK NADAT de repo-secrets waren
-# ingesteld. Om te bevestigen of GitHub de secret al dan niet correct
-# doorgeeft aan de runner (los van de sync-logica zelf), is een extra,
-# tijdelijke debug-stap toegevoegd die ENKEL de AANWEZIGHEID en LENGTE van
-# elke secret toont (nooit de waarde zelf, om lekken te vermijden). Zodra
-# bevestigd is dat de secrets correct aankomen, kan dit stapje weer
-# verwijderd worden - zie het duidelijk gemarkeerde blok hieronder.
+# Vereiste repo secrets (Settings -> Secrets and variables -> Actions):
+#   INTERVALS_API_KEY          - zelfde waarde als in Streamlit Cloud secrets
+#   INTERVALS_ATHLETE_ID       - zelfde waarde als in Streamlit Cloud secrets
+#   FIREBASE_SERVICE_ACCOUNT_JSON - reeds aanwezig (Firestore-toegang)
+#   GCS_SERVICE_ACCOUNT_JSON   - NIEUW: de volledige JSON-inhoud van het
+#                                 GCP-service-account (dezelfde inhoud als de
+#                                 [gcp_service_account]-sectie in Streamlit
+#                                 Cloud secrets, hier als platte JSON-string -
+#                                 kopieer de JSON-vorm van dat service-account,
+#                                 niet de TOML-sectie zelf)
+#   GCS_BUCKET                 - NIEUW: de bucketnaam, zelfde waarde als
+#                                 GCS_BUCKET in Streamlit Cloud secrets
+
 name: Sync mAICoach data (intervals.icu)
+
 on:
   schedule:
-    # Elk uur, op het hele uur (UTC).
     - cron: "0 * * * *"
   workflow_dispatch: {}
 
-# Voorkom dat twee syncs elkaars geschreven data overlappen; een lopende
-# sync mag netjes afronden voor de volgende start (zelfde patroon als
-# scrape-padel.yml).
 concurrency:
   group: sync-maicoach
   cancel-in-progress: false
@@ -83,38 +80,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ─────────────────────────────────────────────────────────────────
-      # MATCHFITAI_SECRETS_DEBUG_STEP_2026-09-14 (TIJDELIJK)
-      # Toont NOOIT de echte waarde - enkel of de secret leeg/aanwezig is
-      # en hoeveel tekens hij telt, puur om te bevestigen dat GitHub de
-      # repo-secrets daadwerkelijk doorgeeft aan deze workflow-run.
-      # VERWIJDER deze stap zodra bevestigd is dat alles correct aankomt.
-      # ─────────────────────────────────────────────────────────────────
-      - name: "[TIJDELIJK] Debug - controleer of secrets aanwezig zijn (toont GEEN waarden)"
-        env:
-          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
-          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+      - name: Schrijf GCS-service-account naar tijdelijk bestand
+        # MATCHFITAI_GCS_CREDENTIALS_FOR_CI_2026-09-15: nodig zodat
+        # gcs_store._credentials_from_env_file() dit kan inlezen via
+        # GOOGLE_APPLICATION_CREDENTIALS (een bestandspad, geen JSON-tekst).
+        # Faalt dit secret te bestaan (leeg), dan schrijft dit stap een leeg
+        # bestand weg; get_bucket() valt in dat geval simpelweg terug op None
+        # (gcs_available() = False) zonder de rest van de sync te breken -
+        # sync_latest.py schrijft dan enkel naar Firestore, niet naar GCS.
         run: |
-          check_secret () {
-            name="$1"
-            value="$2"
-            if [ -z "$value" ]; then
-              echo "  LEEG      : $name is NIET ingesteld of NIET doorgegeven aan deze run"
-            else
-              echo "  AANWEZIG  : $name heeft een waarde (lengte: ${#value} tekens)"
-            fi
-          }
-          echo "=== Secrets-check (repo secrets, Actions) ==="
-          check_secret "INTERVALS_API_KEY" "$INTERVALS_API_KEY"
-          check_secret "INTERVALS_ATHLETE_ID" "$INTERVALS_ATHLETE_ID"
-          check_secret "FIREBASE_SERVICE_ACCOUNT_JSON" "$FIREBASE_SERVICE_ACCOUNT_JSON"
-          echo "=============================================="
+          echo '${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}' > "${{ runner.temp }}/gcs-service-account.json"
 
       - name: Run mAICoach-synchronisatie
         env:
           INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
           INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcs-service-account.json
         run: |
           python -m AICoach.sync_latest
+
+      - name: Ruim tijdelijke credential-file op
+        if: always()
+        run: |
+          rm -f "${{ runner.temp }}/gcs-service-account.json"
