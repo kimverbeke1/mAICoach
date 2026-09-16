@@ -423,6 +423,114 @@ def _get_previous_own_encounter(sel_player_id: str, profiles: list):
         return None, []
 
 
+def _get_all_own_encounters_boards(sel_player_id: str, profiles: list) -> list:
+    """PADEL_ANALYSIS_MATCH1_FREQUENCY_2026-09-16 (op verzoek van Kim).
+
+    In tegenstelling tot _get_previous_own_encounter() (die enkel de MEEST
+    RECENTE ontmoeting reconstrueert), doorloopt deze functie ALLE eigen
+    interclubontmoetingen waar sel_player_id in voorkwam, en reconstrueert
+    voor elk daarvan de boards (met round_num). Gebruikt als basis voor de
+    Match 1-frequentiestatistiek: "wie speelt meestal Match 1?" is pas een
+    zinvol antwoord over meerdere ontmoetingen heen, niet over één.
+
+    Returns een lijst van (label, boards)-tuples, één per gevonden
+    ontmoeting (nieuwste eerst). Boards hebben dezelfde vorm als in
+    _get_previous_own_encounter()."""
+    try:
+        profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
+        docs, index = _load_encounter_index(profile_ids)
+        all_encounters = ll.list_encounters(index)
+        own_keys_labels = [
+            (key, label) for key, label in all_encounters
+            if any(pid == sel_player_id for pid, _ in index[key])
+        ]
+        if not own_keys_labels:
+            return []
+
+        def _encounter_date(item):
+            key = item[0]
+            dates = []
+            for _, entry in index[key]:
+                d = _parse_match_date(entry.get("match_date"))
+                if d:
+                    dates.append(d)
+            return max(dates) if dates else (0, 0, 0)
+
+        own_keys_labels.sort(key=_encounter_date, reverse=True)
+
+        out = []
+        for key, label in own_keys_labels:
+            boards = ll.reconstruct_boards(index[key]) or []
+            for b in boards:
+                b["round_num"] = _parse_round_number(b.get("round_text"))
+            boards.sort(key=lambda b: (b["round_num"] is None, b["round_num"] or 0))
+            out.append((label, boards))
+        return out
+    except Exception:
+        return []
+
+
+def _render_match1_frequency(sel_player_id: str, profiles: list, name_lookup_global: dict) -> None:
+    """PADEL_ANALYSIS_MATCH1_FREQUENCY_2026-09-16 (op verzoek van Kim):
+    "wel interessant om te zien wie meestal match 1 speelt."
+
+    Toont, over ALLE gekende eigen interclubontmoetingen heen, per speler
+    hoeveel keer die op het laagste rondenummer (typisch 'Match 1'/'Wedstrijd
+    1', het HOOGST ingeschatte bord) heeft gestaan, versus op een ander/
+    onbekend bord. Dit is een FEITELIJKE telling uit de matchhistorie, geen
+    aanbeveling of regel -- puur "wat gebeurde er in de praktijk", als
+    aanvulling op de 'sterkste koppel op Match 1'-vuistregel die de
+    Rotatieplanner gebruikt.
+
+    Toont enkel spelers met minstens 1 bord met een GEKEND rondenummer,
+    zodat de tabel niet overspoeld wordt door "onbekend"-rijen wanneer
+    round_text structureel ontbreekt in de brondata."""
+    encounters = _get_all_own_encounters_boards(sel_player_id, profiles)
+    if not encounters:
+        return
+
+    tellingen: dict[str, dict[str, int]] = {}
+    any_known_round = False
+    for _label, boards in encounters:
+        for b in boards:
+            pair = tuple(b.get("pair") or ())
+            if len(pair) != 2:
+                continue
+            round_num = b.get("round_num")
+            if round_num is None:
+                continue
+            any_known_round = True
+            is_match1 = (round_num == 1)
+            for pid in pair:
+                slot = tellingen.setdefault(pid, {"match1": 0, "ander_bord": 0})
+                if is_match1:
+                    slot["match1"] += 1
+                else:
+                    slot["ander_bord"] += 1
+
+    if not any_known_round:
+        return
+
+    with st.expander(f"📊 Match 1-frequentie (over {len(encounters)} gekende ontmoeting(en))", expanded=False):
+        st.caption(
+            "Feitelijke telling uit jullie matchhistorie: hoe vaak stond deze speler effectief op Match 1 "
+            "(het bord met rondenummer 1 in de TVL-data), versus een ander bord. Puur beschrijvend -- geen "
+            "aanbeveling -- ter aanvulling op de 'sterkste koppel op Match 1'-vuistregel hierboven bij de "
+            "Rotatieplanner."
+        )
+        rows = []
+        for pid, counts in sorted(tellingen.items(), key=lambda kv: -kv[1]["match1"]):
+            totaal = counts["match1"] + counts["ander_bord"]
+            pct = round(100 * counts["match1"] / totaal, 0) if totaal else 0
+            rows.append({
+                "Speler": name_lookup_global.get(pid, pid),
+                "Match 1": counts["match1"],
+                "Ander bord": counts["ander_bord"],
+                "% op Match 1": f"{int(pct)}%",
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
 def _render_previous_own_lineup(sel_player_id: str, profiles: list, name_lookup_global: dict) -> None:
     """PADEL_ANALYSIS_SCENARIO_TRANSPARENCY_AND_HISTORY_2026-09-16.
 
@@ -807,6 +915,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     # PADEL_ANALYSIS_SCENARIO_TRANSPARENCY_AND_HISTORY_2026-09-16: referentie
     # naar de ECHTE vorige opstelling, om de Match1-sterkste-regel te toetsen.
     _render_previous_own_lineup(sel_player_id, profiles, name_lookup_global)
+    _render_match1_frequency(sel_player_id, profiles, name_lookup_global)
 
     # PADEL_ANALYSIS_SCENARIO_TRANSPARENCY_AND_HISTORY_2026-09-16: ALTIJD
     # zichtbare bevestiging van de combinatorische dekking (was voorheen

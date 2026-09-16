@@ -18,12 +18,10 @@ opponent_dossier.build_player_summary() staat:
     doc = fb.get_player(player_id) or all_docs.get(str(player_id)) or {}
     matches = doc.get("matches", []) or []
 Heeft een tegenstander GEEN eigen document in de players-collectie, dan is
-matches leeg. Gevolg, in cascade:
-  - winrate/partners/vorm/periodes  -> allemaal leeg (komen uit matches)
-  - klassement + historiek          -> leeg (ranking_doc is leeg)
-  - playing strength                -> leeg, want bulk_fetch_padelstat_ratings
-                                        loopt over fb.search_player_profiles()
-                                        en die speler heeft geen profiel
+matches leeg. Gevolg, in cascade: winrate/partners/vorm/periodes leeg,
+klassement + historiek leeg, playing strength leeg (want
+bulk_fetch_padelstat_ratings loopt over fb.search_player_profiles() en die
+speler heeft geen profiel).
 
 De poule-scrape haalt enkel FIXTURES en NAMEN op; ze maakt geen spelers aan.
 Tegenstanders bestonden dus enkel als naam in een uitslagenblad.
@@ -32,91 +30,72 @@ Tegenstanders bestonden dus enkel als naam in een uitslagenblad.
 WAT DIT BESTAND DOET
 --------------------------------------------------------------------------
 1. discover_opponent_players()  - vindt alle tegenstanders/partners die in de
-   matchrecords van onze eigen spelers voorkomen (opp1/opp2/partner met een
-   user_id) maar nog GEEN eigen player_profiles-document hebben.
-2. ensure_profiles()            - maakt voor die spelers een profiel aan, zodat
-   ze meetellen in elke bestaande bulk-actie (scrape, padelstats, klassement).
-3. run_padelstat_for_players()  - haalt de padelstats.be playing strength op
-   voor een LIJST van spelers, met dezelfde logica als
-   bulk_fetch_padelstat_ratings.bulk_fetch() maar gericht op enkel de spelers
-   die het nodig hebben (dus niet telkens iedereen opnieuw).
+   matchrecords van onze eigen spelers voorkomen maar nog GEEN eigen
+   player_profiles-document hebben.
+2. ensure_profiles()            - maakt voor die spelers een profiel aan.
+3. run_padelstat_for_players()  - haalt de padelstats.be playing strength op.
 4. run_klassement_for_players() - haalt de TVL-klassementshistoriek op.
 
-Zo wordt de padelstats-ophaling onderdeel van dezelfde geautomatiseerde run
-als de TVL-scrape, in plaats van een handmatig script dat je apart moet
-draaien.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16
+--------------------------------------------------------------------------
+run_klassement_for_players(), zelfde opbouw als de bestaande lokale flow in
+opponent_scout_ui.py (scrape_klassement() + klassement_to_history_summary()
++ extract_niveau_winrates() uit scrape_klassement.py).
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16 (op verzoek van Kim)
+PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 ("worst case")
 --------------------------------------------------------------------------
-BUG (opgelost): automatisch ontdekte tegenstanders (Klaudia Croene, Evy
-Verstraete, Caroline Clement) hadden wél matchdata en padelstat, maar
-STRUCTUREEL geen klassementshistoriek, terwijl handmatig toegevoegde spelers
-dat wél hadden. Oorzaak: klassement werd enkel opgehaald via een lokaal
-Streamlit-vinkje of de "Ververs alles"-knop, geen van beide draait in de
-GitHub Actions-workflow.
-Fix: run_klassement_for_players(), zelfde opbouw als de bestaande lokale
-flow in opponent_scout_ui.py (scrape_klassement() + klassement_to_history_
-summary() + extract_niveau_winrates() uit scrape_klassement.py).
+discover_opponent_players() heeft een interclub_only-parameter (standaard
+True): enkel matches met match_type == "interclub" leveren kandidaten op,
+zodat jarenlange tornooihistoriek geen honderden irrelevante ghost-profielen
+genereert. run_padelstat_for_players() en run_klassement_for_players()
+geven bovendien spelers MET bestaande matchdata voorrang boven ghosts (zie
+_prioritize()) wanneer een *_MAX-limiet spelers moet laten wachten.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 (op verzoek van Kim,
-"worst case")
+PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16
 --------------------------------------------------------------------------
-BUG (opgelost): check_player_data.py --team-of 1759548 toonde na een run dat
-discover_opponent_players() voor Anneleen Gallant (18 jaar matchdata, 2017-
-heden) in EEN keer 65 profielen aanmaakte voor eenmalige TORNOOI-
-tegenstanders (Scherpereel Ine, Declercq Charline, Claeys Bart, ...) - spelers
-die nooit meer terugkomen en irrelevant zijn voor interclub-opstelling-
-analyse. Oorzaak: discover_opponent_players() filterde NIET op match_type;
-ELKE match (tornooi + interclub) leverde kandidaten op.
-
-Dat is op zich onschadelijk, ware het niet dat die 65 nieuwe profielen
-VANAF DIE RUN meedingen naar dezelfde beperkte plekken
-(PADELSTAT_MAX_PER_RUN=25, KLASSEMENT_MAX_PER_RUN=8) als de spelers die er
-ECHT toe doen: Klaudia Croene, Evy Verstraete en Caroline Clement (je eigen
-interclub-teamgenoten/tegenstanders) bleven daardoor zonder
-klassementshistoriek staan, terwijl schaarse run-capaciteit ging naar
-tornooi-tegenstanders die je nooit meer analyseert.
-
-Fix, twee lagen:
-  1. discover_opponent_players() heeft nu een interclub_only-parameter
-     (standaard True): enkel matches met match_type == "interclub" leveren
-     kandidaten op. Tornooi-only tegenstanders worden niet langer als
-     profiel aangemaakt.
-  2. run_padelstat_for_players() en run_klassement_for_players() sorteren de
-     "te doen"-lijst nu zo dat spelers MET al bestaande matchdata (dus
-     aantoonbaar relevant) VOOR spelers ZONDER matchdata komen.
+ensure_profiles() zet een "discovered_at"-tijdstempel op elk NIEUW
+aangemaakt profiel, gebruikt door cleanup_ghost_profiles.py om te
+onderscheiden tussen een écht irrelevant profiel en een net ontdekte
+speler die nog geen kans kreeg om verrijkt te worden.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16 (op verzoek van Kim)
+PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
-Aanvulling voor cleanup_ghost_profiles.py: ensure_profiles() zet nu een
-"discovered_at"-tijdstempel (ISO 8601, UTC) op elk NIEUW aangemaakt profiel.
-Dit veld wordt NOOIT overschreven bij een bestaand profiel (ensure_profiles()
-wordt sowieso enkel aangeroepen voor spelers die nog niet gekend waren, zie
-discover_opponent_players()), en dient om het opruimscript veilig te laten
-onderscheiden tussen:
-  - een profiel dat AL EEN TIJDJE bestaat zonder ooit matchdata/padelstat/
-    klassement te hebben gekregen (waarschijnlijk écht irrelevant, veilig
-    op te ruimen);
-  - een profiel dat NET deze of vorige run ontdekt is en simpelweg nog geen
-    kans kreeg om verrijkt te worden (NIET opruimen, geef het tijd).
-Profielen van vóór deze aanvulling hebben geen discovered_at - het
-opruimscript behandelt die dan als "sowieso al oud genoeg".
+BUG (opgelost): "het padelstat getal zal voortdurend wijzigen. moet dus
+regelmatig geupdate worden. checken als dat werkt". Antwoord: het werkte
+NIET. run_padelstat_for_players() sloeg elke speler met EENMAAL een
+gecachete rating (fb.get_padelstat_rating(...).get("rating") is not None)
+voor ALTIJD over, tenzij refresh=True werd gezet -- en dat gebeurde nergens
+automatisch in de reguliere CI-run. Een speler kreeg dus zijn/haar
+padelstat-waarde precies EEN keer, nooit meer bijgewerkt, terwijl
+padelstats.be die waarde continu herberekent op basis van nieuwe resultaten.
+
+Fix, twee onderdelen:
+  1. save_padelstat_rating() wordt nog steeds ONGEWIJZIGD aangeroepen. Het
+     bestaande veld dat het als tijdstempel zet, heet -- geverifieerd in de
+     ACTUELE firebase_service.py -- "fetched_at" (NIET "scraped_at", zoals
+     bij klassement_history; de twee functies gebruiken bewust/toevallig een
+     andere naam). Dit gebruiken we als staleness-tijdstempel in plaats van
+     een apart nieuw veld te introduceren.
+  2. run_padelstat_for_players() beschouwt een speler nu als "te verversen"
+     als OFWEL er nog geen rating is, OFWEL de bestaande rating ouder is dan
+     PADELSTAT_STALE_AFTER_DAYS (standaard 14 dagen). refresh=True blijft
+     bestaan als "forceer ALLES te herdoen, ongeacht leeftijd" (traag, enkel
+     voor handmatig gebruik) -- de nieuwe standaardwerking (refresh=False)
+     doet nu automatisch OOK de verouderde ratings, niet enkel de volledig
+     ontbrekende. _prioritize() geeft binnen de te-verversen-lijst nog steeds
+     voorrang aan spelers met matchdata boven ghost-profielen.
 
 --------------------------------------------------------------------------
 SNELHEID
 --------------------------------------------------------------------------
 Elke padelstats-speler kost twee Playwright-paginabezoeken (~5-10 sec).
 Elke klassement-speler kost EEN Playwright-sessie met meerdere periode-
-selecties (~30-90s, want scrape_klassement() doorloopt élke beschikbare
-periode-optie in de dropdown). Daarom, voor BEIDE stappen:
-  - standaard worden enkel spelers ZONDER bestaande data opgehaald;
-  - er is een harde limiet per run (*_MAX_PER_RUN), zodat een run met
-    veel nieuwe tegenstanders niet eindeloos duurt. Wat niet gehaald wordt,
-    komt vanzelf in de volgende run aan bod;
-  - spelers MET matchdata krijgen voorrang op spelers zonder.
+selecties (~30-90s). Daarom, voor BEIDE stappen: een harde limiet per run
+(*_MAX_PER_RUN), spelers MET matchdata krijgen voorrang.
 """
 
 from __future__ import annotations
@@ -124,7 +103,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -143,6 +122,10 @@ logger = logging.getLogger(__name__)
 PADELSTAT_MAX_PER_RUN = 25
 # Beleefde pauze tussen padelstats-bezoeken.
 PADELSTAT_PAUSE_SECONDS = 1.5
+# PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16: na hoeveel dagen een
+# bestaande padelstat-rating als "verouderd" geldt en dus automatisch
+# opnieuw wordt opgehaald, ook zonder refresh=True.
+PADELSTAT_STALE_AFTER_DAYS = 14
 
 # Klassement kost een volledige Playwright-sessie per speler, dus een
 # beduidend lagere limiet dan padelstat.
@@ -161,6 +144,19 @@ def _norm_id(value) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        cleaned = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +180,7 @@ def discover_opponent_players(
     tegenstander (of partner) maar nog geen eigen profiel hebben.
 
     PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16: interclub_only=True
-    (standaard) beperkt de scan tot match_type == "interclub". Zonder dit
-    filter levert een speler met jarenlange tornooi-historiek tientallen
-    eenmalige, irrelevante tegenstanders op, die vervolgens meedingen naar de
-    beperkte padelstat-/klassement-capaciteit van elke run. Zet
-    interclub_only=False enkel als je bewust OOK tornooi-tegenstanders wil
-    opnemen.
+    (standaard) beperkt de scan tot match_type == "interclub".
 
     Returns {player_id: display_name} voor de ONTBREKENDE spelers.
     """
@@ -235,17 +226,8 @@ def discover_opponent_players(
 def ensure_profiles(players: dict, club: Optional[str] = None) -> list:
     """Maak player_profiles-documenten aan voor {player_id: naam}.
 
-    Bewust MINIMAAL: player_id + display_name (+ club indien gekend) +
-    added_by + discovered_at, met merge=True zodat een bestaand profiel
-    nooit overschreven wordt. Zodra het profiel bestaat, pikken alle
-    bestaande bulk-acties (scrape, padelstats, klassement) deze speler
-    vanzelf op.
-
     PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16: discovered_at wordt
-    hier gezet omdat dit de ENIGE plek is waar een profiel voor het eerst
-    wordt aangemaakt (discover_opponent_players() geeft enkel nog-onbekende
-    spelers door) - het veld weerspiegelt dus altijd het echte moment van
-    eerste ontdekking, nooit een latere merge.
+    hier gezet, enkel bij eerste aanmaak.
 
     Returns de lijst van aangemaakte player_id's.
     """
@@ -275,10 +257,7 @@ def ensure_profiles(players: dict, club: Optional[str] = None) -> list:
 # Gedeelde prioriteringshelper
 # ---------------------------------------------------------------------------
 def _has_matchdata(player_id: str) -> bool:
-    """True als deze speler minstens 1 match heeft in zijn/haar players-doc.
-    Gebruikt om relevante spelers (met matchdata) voorrang te geven op
-    'ghost'-profielen (enkel een naam, nooit zelf gescraped) wanneer een
-    *_MAX-limiet spelers moet laten wachten op een volgende run."""
+    """True als deze speler minstens 1 match heeft in zijn/haar players-doc."""
     try:
         doc = fb.get_player(player_id) or {}
     except Exception:  # noqa: BLE001
@@ -288,26 +267,51 @@ def _has_matchdata(player_id: str) -> bool:
 
 def _prioritize(candidates: list) -> list:
     """Sorteert een lijst van (player_id, ...)-tupels zodat spelers MET
-    matchdata vooraan komen. Stabiele sort: binnen elke groep blijft de
-    oorspronkelijke volgorde behouden."""
+    matchdata vooraan komen. Stabiele sort."""
     return sorted(candidates, key=lambda item: 0 if _has_matchdata(item[0]) else 1)
 
 
 # ---------------------------------------------------------------------------
 # 3. Padelstats playing strength ophalen
 # ---------------------------------------------------------------------------
+def _padelstat_is_stale(cached: Optional[dict], stale_after_days: int) -> bool:
+    """PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16.
+
+    True als er GEEN gecachete rating is, OF de rating ouder is dan
+    stale_after_days. Kan geen leeftijd bepaald worden (geen scraped_at-veld
+    -- bv. een heel oude, van vóór deze fix), dan wordt die conservatief ook
+    als 'stale' behandeld: beter een keer te veel verversen dan een blijvend
+    verouderd getal tonen."""
+    if not cached or cached.get("rating") is None:
+        return True
+    # BELANGRIJK: firebase_service.save_padelstat_rating() zet dit veld als
+    # "fetched_at" (geverifieerd in de actuele firebase_service.py) -- NIET
+    # "scraped_at" zoals bij klassement_history. Twee verschillende
+    # velden voor eenzelfde soort tijdstempel, per functie.
+    fetched_at = _parse_iso(cached.get("fetched_at"))
+    if fetched_at is None:
+        return True
+    age = datetime.now(timezone.utc) - fetched_at
+    return age > timedelta(days=stale_after_days)
+
+
 def run_padelstat_for_players(
     player_ids: list,
     refresh: bool = False,
     max_players: int = PADELSTAT_MAX_PER_RUN,
     pause_seconds: float = PADELSTAT_PAUSE_SECONDS,
+    stale_after_days: int = PADELSTAT_STALE_AFTER_DAYS,
 ) -> dict:
     """Haal de padelstats.be playing strength op voor deze spelers.
 
-    Zelfde logica als bulk_fetch_padelstat_ratings.bulk_fetch(), maar gericht
-    op een LIJST spelers i.p.v. iedereen. refresh=False: spelers met een
-    gecachete rating worden overgeslagen. Bij overschrijding van max_players
-    krijgen spelers MET bestaande matchdata voorrang (zie _prioritize()).
+    PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16: refresh=False (standaard)
+    haalt nu OOK spelers op wier bestaande rating ouder is dan
+    stale_after_days (zie _padelstat_is_stale()) -- niet enkel spelers die
+    nog nooit een rating kregen. refresh=True negeert de cache volledig
+    (forceert iedereen, traag, enkel voor handmatig gebruik).
+
+    Bij overschrijding van max_players krijgen spelers MET bestaande
+    matchdata voorrang (zie _prioritize()).
 
     Returns: {"opgehaald": n, "cache": n, "niet_gevonden": n, "fout": n,
     "overgeslagen_limiet": n}.
@@ -343,13 +347,13 @@ def run_padelstat_for_players(
                 cached = fb.get_padelstat_rating(key)
             except Exception:  # noqa: BLE001
                 cached = None
-            if cached and cached.get("rating") is not None:
+            if not _padelstat_is_stale(cached, stale_after_days):
                 samenvatting["cache"] += 1
                 continue
         te_doen.append((key, profiel))
 
     if not te_doen:
-        logger.info("[padelstat] Iedereen heeft al een playing strength — niets te doen.")
+        logger.info("[padelstat] Iedereen heeft al een actuele playing strength — niets te doen.")
         return samenvatting
 
     te_doen = _prioritize(te_doen)
@@ -357,14 +361,15 @@ def run_padelstat_for_players(
     if max_players and len(te_doen) > max_players:
         samenvatting["overgeslagen_limiet"] = len(te_doen) - max_players
         logger.info(
-            f"[padelstat] {len(te_doen)} speler(s) te doen, limiet is {max_players}. "
-            f"De overige {samenvatting['overgeslagen_limiet']} volgen in een volgende run "
+            f"[padelstat] {len(te_doen)} speler(s) te doen (nieuw of ouder dan "
+            f"{stale_after_days} dagen), limiet is {max_players}. De overige "
+            f"{samenvatting['overgeslagen_limiet']} volgen in een volgende run "
             "(spelers met matchdata kregen voorrang op ghost-profielen)."
         )
         te_doen = te_doen[:max_players]
 
     totaal = len(te_doen)
-    logger.info(f"[padelstat] Playing strength ophalen voor {totaal} speler(s)…")
+    logger.info(f"[padelstat] Playing strength ophalen/verversen voor {totaal} speler(s)…")
     for i, (player_id, profiel) in enumerate(te_doen, start=1):
         naam = profiel.get("display_name") or ""
         club = profiel.get("club") or ""
@@ -423,9 +428,7 @@ def run_klassement_for_players(
     pause_seconds: float = KLASSEMENT_PAUSE_SECONDS,
 ) -> dict:
     """Haalt de TVL-klassementshistoriek op voor deze spelers, met dezelfde
-    scrape_klassement.py-functies en opslagvorm als de bestaande lokale flow
-    in opponent_scout_ui._ensure_klassement(). Bij overschrijding van
-    max_players krijgen spelers MET bestaande matchdata voorrang.
+    scrape_klassement.py-functies en opslagvorm als de bestaande lokale flow.
 
     Returns: {"opgehaald": n, "cache": n, "fout": n, "overgeslagen_limiet": n}.
     """
@@ -461,9 +464,7 @@ def run_klassement_for_players(
         samenvatting["overgeslagen_limiet"] = len(te_doen) - max_players
         logger.info(
             f"[klassement] {len(te_doen)} speler(s) te doen, limiet is {max_players}. "
-            f"De overige {samenvatting['overgeslagen_limiet']} volgen in een volgende run "
-            "(elke speler kost een volledige Playwright-sessie, ~30-90s; spelers met "
-            "matchdata kregen voorrang op ghost-profielen)."
+            f"De overige {samenvatting['overgeslagen_limiet']} volgen in een volgende run."
         )
         te_doen = te_doen[:max_players]
 
@@ -509,17 +510,14 @@ def enrich(
     do_padelstat: bool = True,
     padelstat_refresh: bool = False,
     padelstat_max: int = PADELSTAT_MAX_PER_RUN,
+    padelstat_stale_after_days: int = PADELSTAT_STALE_AFTER_DAYS,
     do_klassement: bool = True,
     klassement_refresh: bool = False,
     klassement_max: int = KLASSEMENT_MAX_PER_RUN,
     interclub_only: bool = True,
 ) -> dict:
     """Volledige verrijkingsstap: tegenstanders ontdekken + profielen aanmaken
-    + padelstats ophalen + klassementshistoriek ophalen.
-
-    interclub_only=True (standaard) beperkt discover_opponent_players() tot
-    interclub-matches, zodat jarenlange tornooi-historiek geen honderden
-    irrelevante ghost-profielen genereert.
+    + padelstats ophalen/verversen + klassementshistoriek ophalen.
 
     Returns {"nieuwe_profielen": [...], "padelstat": {...}, "klassement": {...}}.
     """
@@ -541,7 +539,8 @@ def enrich(
 
     if do_padelstat:
         resultaat["padelstat"] = run_padelstat_for_players(
-            doelgroep, refresh=padelstat_refresh, max_players=padelstat_max
+            doelgroep, refresh=padelstat_refresh, max_players=padelstat_max,
+            stale_after_days=padelstat_stale_after_days,
         )
 
     if do_klassement:
@@ -570,9 +569,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-klassement", action="store_true", help="Geen klassementshistoriek ophalen.")
     parser.add_argument("--include-tournament", action="store_true",
                         help="Ontdek OOK tornooi-tegenstanders (standaard: enkel interclub).")
-    parser.add_argument("--refresh", action="store_true", help="Negeer zowel de padelstats- als klassement-cache.")
+    parser.add_argument("--refresh", action="store_true", help="Negeer zowel de padelstats- als klassement-cache VOLLEDIG (forceer iedereen, traag).")
     parser.add_argument("--max", type=int, default=PADELSTAT_MAX_PER_RUN,
                         help=f"Max padelstats-ophalingen deze run (standaard {PADELSTAT_MAX_PER_RUN}).")
+    parser.add_argument("--padelstat-stale-days", type=int, default=PADELSTAT_STALE_AFTER_DAYS,
+                        help=f"Ververs padelstat automatisch na dit aantal dagen (standaard {PADELSTAT_STALE_AFTER_DAYS}).")
     parser.add_argument("--klassement-max", type=int, default=KLASSEMENT_MAX_PER_RUN,
                         help=f"Max klassement-ophalingen deze run (standaard {KLASSEMENT_MAX_PER_RUN}).")
     parser.add_argument("--dry-run", action="store_true",
@@ -602,6 +603,7 @@ if __name__ == "__main__":
         do_padelstat=not args.no_padelstat,
         padelstat_refresh=args.refresh,
         padelstat_max=args.max,
+        padelstat_stale_after_days=args.padelstat_stale_days,
         do_klassement=not args.no_klassement,
         klassement_refresh=args.refresh,
         klassement_max=args.klassement_max,
@@ -613,8 +615,8 @@ if __name__ == "__main__":
     if res["padelstat"]:
         p = res["padelstat"]
         print(
-            f"Padelstats       : {p.get('opgehaald', 0)} opgehaald, "
-            f"{p.get('cache', 0)} uit cache, {p.get('niet_gevonden', 0)} niet gevonden, "
+            f"Padelstats       : {p.get('opgehaald', 0)} opgehaald/ververst, "
+            f"{p.get('cache', 0)} nog actueel, {p.get('niet_gevonden', 0)} niet gevonden, "
             f"{p.get('fout', 0)} fout"
         )
         if p.get("overgeslagen_limiet"):
