@@ -47,36 +47,46 @@ voor het eerst aan.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
-Kim's vraag: "bedoel was om dat niet lokaal te doen maar meteen mee te
-scrapen. check als dat al gebeurd is." Antwoord: JA, dat is al gebouwd.
-Sinds PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 haalt
-scraper/ci_scrape_all.py (via enrich_opponents.enrich()) de padelstats.be
-playing strength AUTOMATISCH op voor élke speler in de run - en dat is niet
-beperkt tot tegenstanders: enrich_opponents.enrich(player_ids, ...) gebruikt
-diezelfde player_ids (bij een normale run: ALLE eigen spelers uit
-player_profiles) als doelgroep voor de padelstat-stap. "python
-bulk_fetch_padelstat_ratings.py" was het OUDE, handmatige pad van vóór die
-datum en is voor normaal gebruik niet meer nodig.
+Ontbreekt de playing strength, dan verwees de caption hier vroeger naar een
+lokaal commando ('python bulk_fetch_padelstat_ratings.py'). Dat is sinds
+PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 achterhaald: de GitHub
+Actions-workflow (ci_scrape_all.py -> enrich_opponents.enrich()) haalt dit
+AUTOMATISCH op voor elke speler in de run, inclusief eigen spelers. De tekst
+legt dat nu uit i.p.v. een lokale actie te vragen, en biedt (enkel zichtbaar
+als een GitHub-token geconfigureerd staat) een knop om dit voor DEZE speler
+onmiddellijk te forceren.
 
-BUG (verouderde tekst, opgelost): de caption hieronder verwees nog naar dat
-oude, lokale commando, wat nu misleidend is - het geeft de indruk dat er
-iets handmatigs moet gebeuren, terwijl de bedoeling exact het omgekeerde is
-(automatisch via de GitHub Actions-sync).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG (opgelost): de "📅 Volgende match laden"-knop in page_lineup_lab.py riep
+enkel _load_poule_fixtures() aan — een kale requests-fetch zonder
+poule_id-scoping, die BOVENDIEN nooit iets naar Firestore schreef. Twee
+zichtbare gevolgen: (1) "Geen wedstrijden gevonden" voor teams die wél
+degelijk een geldige poule-URL hadden (de TVL-poule-tabel is een
+client-side gerenderde SPA; een kale requests.get() ziet de tabel niet),
+en (2) zelfs bij een gelukte fetch moest er bij ELKE herstart van de app
+opnieuw geklikt worden, want er werd niets bewaard.
 
-Blijft een speler tóch zonder playing strength staan, dan is de meest
-waarschijnlijke reden dat de workflow zelf nog niet (betrouwbaar) gedraaid
-heeft voor die speler - zie de aparte, lopende fix van de GitHub Actions
-schedule-trigger (vervangen door een externe GCP Cloud Scheduler-aanroep,
-zie gcp-triggers/mAIcoach-sync-trigger/) - of dat PADELSTAT_MAX (standaard
-25 per run) die speler nog niet bereikt heeft, of dat de speler simpelweg
-niet gevonden wordt op padelstats.be (bv. Boerjan Senne, bevestigd
-onvindbaar).
+Fix: _load_poule_schedule_robust(player_id, reeks_url) hieronder. Is lokaal
+scrapen beschikbaar (is_scraping_available()), dan wordt volledig
+gedelegeerd aan poule_playwright.update_player_poule(player_id) — DEZELFDE
+functie die de GitHub Actions-workflow en manual_poule_input.py al gebruiken.
+Die functie lost zelf, intern en robuuster, de vraag "welke poule-URL geldt
+voor deze speler" op (manuele override > gecachete URL > afgeleid uit het
+recentste interclub-uitslagenblad) — daarom wordt de meegegeven `reeks_url`
+in dit pad NIET gebruikt; die parameter dient uitsluitend voor de
+KALE-fallback hieronder. Slaagt de robuuste weg, dan staat het resultaat al
+in Firestore (interclub_schedule enz.) en wordt het via _get_saved_schedule()
+teruggelezen.
 
-Fix: de caption legt nu uit dat dit AUTOMATISCH gebeurt via de reguliere
-sync, en biedt (enkel als een GitHub-trigger geconfigureerd staat, via
-cloud_helpers.render_cloud_scrape_trigger - toont zichzelf niet als dat niet
-het geval is) een knop om dit ONMIDDELLIJK voor DEZE ENE speler te forceren,
-i.p.v. te verwijzen naar een lokaal script.
+Is lokaal scrapen NIET beschikbaar (Streamlit Community Cloud) of faalt de
+Playwright-weg onverwacht, dan valt deze functie terug op de oude, kale
+_load_poule_fixtures(reeks_url) — geen persistentie, geen pouleId-scoping,
+enkel een beste-poging live-fetch. page_lineup_lab.py herkent dit onderscheid
+aan `meta`: None bij de kale fallback, een dict bij de geslaagde robuuste weg
+(en herlaadt de pagina dan meteen, zodat een volgende sessie niet opnieuw
+hoeft te klikken).
 """
 import re
 import sys
@@ -368,12 +378,81 @@ def _render_table(df: pd.DataFrame, name_col: str, height=400):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner="Wedstrijdschema ophalen...")
 def _load_poule_fixtures(reeks_url: str):
+    """KALE fallback: een simpele requests-fetch, ZONDER poule_id-scoping en
+    ZONDER Firestore-persistentie. Gebruikt door
+    _load_poule_schedule_robust() hieronder wanneer lokaal scrapen niet
+    beschikbaar is (Streamlit Community Cloud) of de robuuste weg onverwacht
+    faalt."""
     try:
         html = ss.fetch_poule_schedule_html(reeks_url, delay=0.5)
         fixtures = ss.parse_poule_schedule(html)
         return fixtures, None
     except Exception as e:
         return [], str(e)
+
+
+def _load_poule_schedule_robust(player_id: str, reeks_url: str):
+    """PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16.
+
+    Robuuste, persisterende manier om het wedstrijdschema van een speler op
+    te halen wanneer de gebruiker op '📅 Volgende match laden' klikt.
+
+    Is lokaal scrapen beschikbaar, dan wordt volledig gedelegeerd aan
+    poule_playwright.update_player_poule(player_id) — dezelfde functie die
+    de GitHub Actions-workflow en manual_poule_input.py al gebruiken. Die
+    functie lost zelf, robuuster, op welke poule-URL geldt (manuele
+    override > gecachete URL > afgeleid uit het recentste interclub-
+    uitslagenblad), scopet op pouleId, en schrijft het resultaat naar
+    Firestore. De meegegeven `reeks_url` wordt in dit pad NIET gebruikt —
+    die dient uitsluitend voor de kale fallback hieronder.
+
+    Is lokaal scrapen niet beschikbaar (cloud) of faalt de Playwright-weg
+    onverwacht, dan valt dit terug op de oude _load_poule_fixtures(reeks_url)
+    (geen persistentie, geen pouleId-scoping).
+
+    Returns (fixtures, fetch_error, meta):
+        fixtures    : lijst fixture-dicts, of [] bij een fout.
+        fetch_error : None, of een leesbare foutmelding.
+        meta        : None als de KALE fallback gebruikt werd (dus NIET
+                      gepersisteerd naar Firestore); een dict (met o.a.
+                      'poule_label', 'poule_id') als de robuuste,
+                      persisterende pijplijn geslaagd is — page_lineup_lab.py
+                      herlaadt de pagina in dat geval, zodat de volgende
+                      doorloop het resultaat uit Firestore terugvindt.
+    """
+    if not is_scraping_available():
+        fixtures, error = _load_poule_fixtures(reeks_url)
+        return fixtures, error, None
+
+    try:
+        import poule_playwright as pp
+    except Exception:
+        # Playwright zou beschikbaar moeten zijn maar de module faalt toch
+        # te importeren -> val terug op de kale weg i.p.v. hard te crashen.
+        fixtures, error = _load_poule_fixtures(reeks_url)
+        return fixtures, error, None
+
+    try:
+        result = pp.update_player_poule(str(player_id), headless=True)
+    except Exception as e:
+        # Onverwachte fout in de robuuste weg -> nog een kans via de kale
+        # fallback, in plaats van de gebruiker meteen te laten vastlopen.
+        fixtures, error = _load_poule_fixtures(reeks_url)
+        if fixtures:
+            return fixtures, None, None
+        return [], str(e), None
+
+    if result.get("error"):
+        return [], result["error"], None
+
+    fixtures, _sched_at = _get_saved_schedule(player_id)
+    meta = {
+        "poule_id": result.get("poule_id"),
+        "poule_label": result.get("poule_label"),
+        "fixtures_count": result.get("fixtures"),
+        "source": result.get("source"),
+    }
+    return fixtures, None, meta
 
 
 def _clean_name(text: Optional[str]) -> str:
@@ -448,22 +527,11 @@ def _render_player_ranking_summary(player_id: str) -> None:
     Toont het officiële TVL-klassement en de padelstats.be playing strength
     DUIDELIJK (st.metric, twee kolommen) voor een gegeven speler.
 
-    Was voorheen een LOKALE functie in page_my_profile.py
-    (_render_profile_ranking_summary, PADEL_ANALYSIS_MYPROFILE_RANKING_
-    SUMMARY_2026-09-14), enkel zichtbaar op '👤 Mijn profiel'. Kim vroeg
-    dezelfde, duidelijke weergave ook op '🔍 Spelers' - vandaar hierheen
-    verplaatst (hernoemd, algemener) zodat BEIDE pagina's 'm kunnen
-    hergebruiken zonder de logica te dupliceren.
-
     PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16: ontbreekt de
-    playing strength, dan verwees de caption hier vroeger naar een lokaal
-    commando ('python bulk_fetch_padelstat_ratings.py'). Dat is sinds
-    PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 achterhaald: de
-    GitHub Actions-workflow (ci_scrape_all.py -> enrich_opponents.enrich())
-    haalt dit AUTOMATISCH op voor elke speler in de run, inclusief eigen
-    spelers. De tekst legt dat nu uit i.p.v. een lokale actie te vragen, en
-    biedt (enkel zichtbaar als een GitHub-token geconfigureerd staat) een
-    knop om dit voor DEZE speler onmiddellijk te forceren."""
+    playing strength, dan legt de caption uit dat dit AUTOMATISCH gebeurt via
+    de reguliere sync, met (enkel zichtbaar als een GitHub-token
+    geconfigureerd staat) een knop om dit voor DEZE speler onmiddellijk te
+    forceren."""
     official = _official_current_rank(player_id)
     try:
         cached = fb.get_padelstat_rating(player_id)
