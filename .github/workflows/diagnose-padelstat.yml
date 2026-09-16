@@ -1,0 +1,62 @@
+# .github/workflows/diagnose-padelstat.yml
+#
+# Eenmalige, HANDMATIG te starten workflow om diagnose_padelstat_search.py
+# in de cloud te draaien (GitHub Actions heeft, in tegenstelling tot
+# Streamlit Community Cloud, wel een browser/Playwright beschikbaar -- zie
+# scrape-padel.yml, dat dezelfde aanpak gebruikt voor de reguliere scrape).
+#
+# Doel: uitzoeken WAAROM padelstats_scraper.search_and_fetch_padelstat_rating()
+# voor bepaalde spelers (De Pourcq Hilde, Breda Hilde, Mondy Severine,
+# Vanlerberghe Vivianne) niets teruggeeft, zonder dat Kim dit lokaal met een
+# zichtbare browser moet testen.
+#
+# Voorwaarde: diagnose_padelstat_search.py moet in PadelAnalysis/scraper/
+# staan (zelfde map als padelstats_scraper.py).
+#
+# Gebruik:
+#   GitHub -> Actions -> "Diagnose padelstat search" -> Run workflow
+#   -> vul bij 'namen' de te testen spelernamen in, komma-gescheiden, bv.:
+#      Mondy Severine, Vanlerberghe Vivianne
+#   Na afloop: klik de run open -> stap "Diagnose uitvoeren" -> volledige
+#   tekstoutput staat in de log. Er wordt GEEN Firestore/Firebase-toegang
+#   gebruikt; dit script leest/schrijft niets, het test enkel padelstats.be.
+name: Diagnose padelstat search
+
+on:
+  workflow_dispatch:
+    inputs:
+      namen:
+        description: "Spelernamen, komma-gescheiden (bv. 'Mondy Severine, Vanlerberghe Vivianne')"
+        required: true
+        default: "Mondy Severine, Vanlerberghe Vivianne"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installeer dependencies (inclusief Playwright)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-scraper.txt
+          playwright install --with-deps chromium
+
+      - name: Diagnose uitvoeren
+        run: |
+          IFS=',' read -ra NAMEN_ARRAY <<< "${{ github.event.inputs.namen }}"
+          TRIMMED_NAMEN=()
+          for naam in "${NAMEN_ARRAY[@]}"; do
+            TRIMMED_NAMEN+=("$(echo "$naam" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')")
+          done
+          python diagnose_padelstat_search.py --headless "${TRIMMED_NAMEN[@]}"
