@@ -43,6 +43,40 @@ BEIDE pagina's dezelfde, duidelijke weergave (st.metric, twee kolommen)
 kunnen tonen zonder de logica te dupliceren. page_my_profile.py roept deze
 gedeelde versie nu aan i.p.v. zijn eigen kopie; page_players.py roept ze
 voor het eerst aan.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16 (op verzoek van Kim)
+--------------------------------------------------------------------------
+Kim's vraag: "bedoel was om dat niet lokaal te doen maar meteen mee te
+scrapen. check als dat al gebeurd is." Antwoord: JA, dat is al gebouwd.
+Sinds PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 haalt
+scraper/ci_scrape_all.py (via enrich_opponents.enrich()) de padelstats.be
+playing strength AUTOMATISCH op voor élke speler in de run - en dat is niet
+beperkt tot tegenstanders: enrich_opponents.enrich(player_ids, ...) gebruikt
+diezelfde player_ids (bij een normale run: ALLE eigen spelers uit
+player_profiles) als doelgroep voor de padelstat-stap. "python
+bulk_fetch_padelstat_ratings.py" was het OUDE, handmatige pad van vóór die
+datum en is voor normaal gebruik niet meer nodig.
+
+BUG (verouderde tekst, opgelost): de caption hieronder verwees nog naar dat
+oude, lokale commando, wat nu misleidend is - het geeft de indruk dat er
+iets handmatigs moet gebeuren, terwijl de bedoeling exact het omgekeerde is
+(automatisch via de GitHub Actions-sync).
+
+Blijft een speler tóch zonder playing strength staan, dan is de meest
+waarschijnlijke reden dat de workflow zelf nog niet (betrouwbaar) gedraaid
+heeft voor die speler - zie de aparte, lopende fix van de GitHub Actions
+schedule-trigger (vervangen door een externe GCP Cloud Scheduler-aanroep,
+zie gcp-triggers/mAIcoach-sync-trigger/) - of dat PADELSTAT_MAX (standaard
+25 per run) die speler nog niet bereikt heeft, of dat de speler simpelweg
+niet gevonden wordt op padelstats.be (bv. Boerjan Senne, bevestigd
+onvindbaar).
+
+Fix: de caption legt nu uit dat dit AUTOMATISCH gebeurt via de reguliere
+sync, en biedt (enkel als een GitHub-trigger geconfigureerd staat, via
+cloud_helpers.render_cloud_scrape_trigger - toont zichzelf niet als dat niet
+het geval is) een knop om dit ONMIDDELLIJK voor DEZE ENE speler te forceren,
+i.p.v. te verwijzen naar een lokaal script.
 """
 import re
 import sys
@@ -419,7 +453,17 @@ def _render_player_ranking_summary(player_id: str) -> None:
     SUMMARY_2026-09-14), enkel zichtbaar op '👤 Mijn profiel'. Kim vroeg
     dezelfde, duidelijke weergave ook op '🔍 Spelers' - vandaar hierheen
     verplaatst (hernoemd, algemener) zodat BEIDE pagina's 'm kunnen
-    hergebruiken zonder de logica te dupliceren."""
+    hergebruiken zonder de logica te dupliceren.
+
+    PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16: ontbreekt de
+    playing strength, dan verwees de caption hier vroeger naar een lokaal
+    commando ('python bulk_fetch_padelstat_ratings.py'). Dat is sinds
+    PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 achterhaald: de
+    GitHub Actions-workflow (ci_scrape_all.py -> enrich_opponents.enrich())
+    haalt dit AUTOMATISCH op voor elke speler in de run, inclusief eigen
+    spelers. De tekst legt dat nu uit i.p.v. een lokale actie te vragen, en
+    biedt (enkel zichtbaar als een GitHub-token geconfigureerd staat) een
+    knop om dit voor DEZE speler onmiddellijk te forceren."""
     official = _official_current_rank(player_id)
     try:
         cached = fb.get_padelstat_rating(player_id)
@@ -434,6 +478,14 @@ def _render_player_ranking_summary(player_id: str) -> None:
     )
     if padelstat is None:
         st.caption(
-            "Playing strength nog niet opgehaald van padelstats.be. Voer lokaal "
-            "'python bulk_fetch_padelstat_ratings.py' uit om aan te vullen."
+            "Playing strength wordt normaal AUTOMATISCH opgehaald van padelstats.be bij "
+            "elke reguliere data-update (geen lokale actie nodig). Staat ze hier nog op "
+            "'Onbekend', dan is meestal de update nog niet (recent genoeg) gedraaid voor "
+            "deze speler, of is deze speler niet gevonden op padelstats.be."
+        )
+        render_cloud_scrape_trigger(
+            key_prefix=f"ranking_padelstat_{player_id}",
+            player_ids=str(player_id),
+            mode="missing",
+            label="🔄 Playing strength nu ophalen",
         )
