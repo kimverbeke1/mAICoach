@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-
 from pathlib import Path
 import json
 import math
@@ -7,13 +6,40 @@ import math
 import pandas as pd
 import streamlit as st
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HISTORY_DIR = PROJECT_ROOT / "data" / "history"
 ACTIVITY_FILE = PROJECT_ROOT / "data" / "activities" / "activities.json"
 WELLNESS_FILE = PROJECT_ROOT / "data" / "wellness" / "wellness.json"
 KNOWLEDGE_FILE = PROJECT_ROOT / "data" / "athlete_knowledge.json"
 RUN_TOKENS = ("run", "running", "trail")
+
+# MATCHFITAI_STALE_CACHE_FIX_2026-09-16 (kritieke bugfix, gemeld door Kim):
+# BUG (opgelost): load_history()/load_wellness_frame()/load_activities_frame()
+# gebruikten @st.cache_data ZONDER ttl. Streamlit cachet zo'n resultaat
+# procesbreed en voor onbepaalde tijd -- tot het proces herstart of iemand
+# expliciet st.cache_data.clear() aanroept.
+#
+# training_dashboard.py._refresh_local_data_from_storage() ververst elke
+# 5 minuten wel de LOKALE bestanden via persistent_data.mirror_all_to_local(),
+# maar wist die cache niet. Gevolg: de lokale bestanden stonden allang
+# up-to-date (bv. wellness t.e.m. 16/09, bevestigd in de sync-run-output),
+# maar recovery_tab.py (via load_wellness_frame()) en de Dashboard-tab (via
+# load_history()) bleven de EERSTE-OOIT ingelezen versie tonen, tot iemand
+# handmatig op "Nu verversen" klikte (dat roept wel st.cache_data.clear() aan
+# in training_dashboard.py).
+#
+# context_builder.py (een apart, ongecachet leespad) toonde daardoor wel de
+# juiste "Actuele wellness"-datum in de caption bovenaan, terwijl de
+# Recovery-tab (HRV/slaap/readiness) en het Dashboard er inconsistent naast
+# lagen -- verwarrend omdat het op hetzelfde scherm stond.
+#
+# Fix: ttl=300 (5 minuten) toegevoegd op alle drie de loaders, gelijk aan
+# _MIRROR_CACHE_SECONDS in training_dashboard.py. Zo kan de cache nooit meer
+# dan 5 minuten ouder zijn dan de lokale bestanden, ook zonder handmatige
+# "Nu verversen"-klik. De expliciete st.cache_data.clear() bij die knop blijft
+# ongewijzigd werken (geeft een onmiddellijke verversing i.p.v. te wachten tot
+# de ttl verloopt).
+_CACHE_TTL_SECONDS = 300
 
 
 def load_json(path, default):
@@ -52,7 +78,7 @@ def is_running_sport(sport):
     return any(token in value for token in RUN_TOKENS)
 
 
-@st.cache_data
+@st.cache_data(ttl=_CACHE_TTL_SECONDS)
 def load_history():
     rows = []
     if not HISTORY_DIR.exists():
@@ -91,7 +117,7 @@ def load_history():
     return df.reset_index(drop=True)
 
 
-@st.cache_data
+@st.cache_data(ttl=_CACHE_TTL_SECONDS)
 def load_wellness_frame():
     records = load_json(WELLNESS_FILE, [])
     if not isinstance(records, list) or not records:
@@ -101,7 +127,6 @@ def load_wellness_frame():
     for record in records:
         if not isinstance(record, dict):
             continue
-
         date_value = text_date(
             record.get("id")
             or record.get("date")
@@ -152,7 +177,7 @@ def load_wellness_frame():
     return df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 
-@st.cache_data
+@st.cache_data(ttl=_CACHE_TTL_SECONDS)
 def load_activities_frame():
     records = load_json(ACTIVITY_FILE, [])
     if not isinstance(records, list) or not records:
@@ -162,7 +187,6 @@ def load_activities_frame():
     for record in records:
         if not isinstance(record, dict):
             continue
-
         date_value = text_date(
             record.get("start_date_local") or record.get("start_date")
         )
@@ -172,7 +196,6 @@ def load_activities_frame():
         duration_seconds = numeric(record.get("moving_time"))
         if duration_seconds is None:
             duration_seconds = numeric(record.get("elapsed_time"))
-
         distance_m = numeric(record.get("distance"))
         fitness = numeric(record.get("icu_ctl"))
         fatigue = numeric(record.get("icu_atl"))
