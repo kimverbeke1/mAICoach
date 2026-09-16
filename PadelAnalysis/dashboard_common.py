@@ -18,6 +18,7 @@ De paginamodules zelf:
     HERGEBRUIKT door zowel "👤 Mijn profiel" als "🔍 Spelers".
   - page_my_profile.py      : "👤 Mijn profiel"
   - page_players.py         : "🔍 Spelers"
+
 dashboard.py zelf is nu enkel nog de dunne entrypoint: st.set_page_config,
 CSS, navigatie, en de routing naar page_xxx().
 
@@ -25,11 +26,29 @@ BELANGRIJK: dit bestand doet ZELF geen st.set_page_config()/CSS-injectie -
 dat blijft in dashboard.py (het echte entrypoint-script), zodat het maar
 één keer per app-run gebeurt, ongeacht welke pagina-modules geïmporteerd
 worden.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim)
+--------------------------------------------------------------------------
+Kim wil bij spelers duidelijk het huidige (officiële) klassement EN de
+padelstats.be playing strength zien. Die weergave bestond al, maar enkel
+lokaal in page_my_profile.py als _render_profile_ranking_summary()
+(PADEL_ANALYSIS_MYPROFILE_RANKING_SUMMARY_2026-09-14) - dus zichtbaar op
+"👤 Mijn profiel", maar NIET op "🔍 Spelers", waar je elke andere speler
+bekijkt.
+
+Fix: de functie is hierheen verplaatst (algemener bruikbaar, dus hernoemd
+naar _render_player_ranking_summary(), zonder "profile" in de naam) zodat
+BEIDE pagina's dezelfde, duidelijke weergave (st.metric, twee kolommen)
+kunnen tonen zonder de logica te dupliceren. page_my_profile.py roept deze
+gedeelde versie nu aan i.p.v. zijn eigen kopie; page_players.py roept ze
+voor het eerst aan.
 """
 import re
 import sys
 from pathlib import Path
 from typing import Optional
+
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -50,11 +69,14 @@ import opponent_analysis as oa
 import lineup_quick as lq
 import player_inline_actions as pia
 import opponent_dossier as od
+
 try:
     import team_ai_advisor as taa
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
+
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
+
 
 # ─────────────────────────────────────────────
 # Datum-/tekst-helpers
@@ -147,6 +169,7 @@ def _go_to_player(player_id: str):
 
 def _scrape_progress_widget(label_prefix: str = ""):
     bar = st.progress(0.0, text=f"{label_prefix}Starten...")
+
     def _cb(i, total, label, status):
         if total > 0:
             frac = min(1.0, i / total)
@@ -159,6 +182,7 @@ def _scrape_progress_widget(label_prefix: str = ""):
         }.get(status, status)
         suffix = f" ({i}/{total})" if total else ""
         bar.progress(frac, text=f"{label_prefix}{status_txt}{suffix} — {label[:50]}")
+
     return bar, _cb
 
 
@@ -369,8 +393,9 @@ def _official_current_rank(player_id: str) -> Optional[float]:
     Geeft het OFFICIËLE, HUIDIGE TVL-klassement terug voor een eigen speler -
     rechtstreeks uit diens klassement_history, NIET via padelstats.be. Wordt
     gebruikt door zowel page_lineup_lab.py (Match1-regel in de rotatieplanner)
-    als page_my_profile.py (ranking-samenvatting bovenaan) - vandaar hier in
-    het gedeelde bestand geplaatst."""
+    als _render_player_ranking_summary() hieronder (ranking-samenvatting,
+    gebruikt door zowel page_my_profile.py als page_players.py) - vandaar hier
+    in het gedeelde bestand geplaatst."""
     try:
         doc = fb.get_player(player_id) or {}
     except Exception:
@@ -382,3 +407,33 @@ def _official_current_rank(player_id: str) -> Optional[float]:
     ranking_doc = doc if doc.get("klassement_history") else profile_doc
     rows = od._history_rows(ranking_doc)
     return float(rows[0]["rank"]) if rows else None
+
+
+def _render_player_ranking_summary(player_id: str) -> None:
+    """PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
+    Toont het officiële TVL-klassement en de padelstats.be playing strength
+    DUIDELIJK (st.metric, twee kolommen) voor een gegeven speler.
+
+    Was voorheen een LOKALE functie in page_my_profile.py
+    (_render_profile_ranking_summary, PADEL_ANALYSIS_MYPROFILE_RANKING_
+    SUMMARY_2026-09-14), enkel zichtbaar op '👤 Mijn profiel'. Kim vroeg
+    dezelfde, duidelijke weergave ook op '🔍 Spelers' - vandaar hierheen
+    verplaatst (hernoemd, algemener) zodat BEIDE pagina's 'm kunnen
+    hergebruiken zonder de logica te dupliceren."""
+    official = _official_current_rank(player_id)
+    try:
+        cached = fb.get_padelstat_rating(player_id)
+    except Exception:
+        cached = None
+    padelstat = cached.get("rating") if cached else None
+    c1, c2 = st.columns(2)
+    c1.metric("Officieel klassement", f"P{int(official)}" if official is not None else "Onbekend")
+    c2.metric(
+        "Playing strength (padelstats.be)",
+        f"P{padelstat}" if padelstat is not None else "Onbekend",
+    )
+    if padelstat is None:
+        st.caption(
+            "Playing strength nog niet opgehaald van padelstats.be. Voer lokaal "
+            "'python bulk_fetch_padelstat_ratings.py' uit om aan te vullen."
+        )

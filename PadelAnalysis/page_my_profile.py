@@ -1,33 +1,24 @@
 """
 page_my_profile.py — "👤 Mijn profiel"-pagina.
+
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14: losgemaakt uit dashboard.py.
+
+PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
+_render_profile_ranking_summary() is verhuisd naar dashboard_common.py als
+_render_player_ranking_summary(), zodat page_players.py dezelfde, duidelijke
+klassement/playing-strength-weergave kan hergebruiken (Kim wilde dit ook
+zien bij andere spelers, niet enkel bij zichzelf). Deze pagina roept nu de
+gedeelde versie aan i.p.v. een eigen kopie te onderhouden - het zichtbare
+gedrag op deze pagina is ongewijzigd.
 """
 import streamlit as st
 
 import dashboard_common as dc
-from dashboard_common import fb, _display_name, _get_all_profiles, _format_scraped_at, _official_current_rank
+from dashboard_common import (
+    fb, _display_name, _get_all_profiles, _format_scraped_at,
+    _render_player_ranking_summary,
+)
 from player_dashboard_shared import _render_refresh_controls, render_player_dashboard
-
-
-def _render_profile_ranking_summary(player_id: str) -> None:
-    """PADEL_ANALYSIS_MYPROFILE_RANKING_SUMMARY_2026-09-14."""
-    official = _official_current_rank(player_id)
-    try:
-        cached = fb.get_padelstat_rating(player_id)
-    except Exception:
-        cached = None
-    padelstat = cached.get("rating") if cached else None
-    c1, c2 = st.columns(2)
-    c1.metric("Officieel klassement", f"P{int(official)}" if official is not None else "Onbekend")
-    c2.metric(
-        "Playing strength (padelstats.be)",
-        f"P{padelstat}" if padelstat is not None else "Onbekend",
-    )
-    if padelstat is None:
-        st.caption(
-            "Playing strength nog niet opgehaald van padelstats.be. Voer lokaal "
-            "'python bulk_fetch_padelstat_ratings.py' uit om aan te vullen."
-        )
 
 
 def page_my_profile():
@@ -66,9 +57,10 @@ def page_my_profile():
         if st.button("✏️ Wijzig wie ik ben"):
             fb.save_app_settings({"home_player_id": None})
             st.rerun()
-    # PADEL_ANALYSIS_MYPROFILE_RANKING_SUMMARY_2026-09-14: officieel
-    # klassement + padelstats-playing-strength meteen bovenaan.
-    _render_profile_ranking_summary(home_id)
+    # PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16: gedeelde helper
+    # (was hier lokaal gedefinieerd als _render_profile_ranking_summary,
+    # nu in dashboard_common.py zodat page_players.py 'm ook kan gebruiken).
+    _render_player_ranking_summary(home_id)
     _render_refresh_controls(home_id, home_profile, key_prefix="myprofile")
     st.divider()
     render_player_dashboard(home_id, home_profile)

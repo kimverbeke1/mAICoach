@@ -1,11 +1,20 @@
 """
 page_players.py — "🔍 Spelers"-pagina.
+
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14: losgemaakt uit dashboard.py.
+
+PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
+Toont nu, net als "👤 Mijn profiel", duidelijk het officiële klassement en de
+padelstats.be playing strength van de geselecteerde speler (via de gedeelde
+dashboard_common._render_player_ranking_summary()). Voorheen toonde deze
+pagina enkel naam/club/ID - klassement en playing strength waren pas
+zichtbaar na doorklikken naar het tabblad 'Klassement' in
+render_player_dashboard().
 """
 import streamlit as st
 
 import dashboard_common as dc
-from dashboard_common import fb, _display_name, _get_all_profiles
+from dashboard_common import fb, _display_name, _get_all_profiles, _render_player_ranking_summary
 from player_dashboard_shared import _render_refresh_controls, render_player_dashboard
 
 
@@ -44,6 +53,10 @@ def page_players():
             st.caption(f"🏟️ {club} · ID: {player_id}")
         if _is_me:
             st.caption("👤 Dit ben jij")
+    # PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16: officieel klassement +
+    # padelstats.be playing strength, duidelijk zichtbaar (st.metric), meteen
+    # onder de naam - net als bij "👤 Mijn profiel".
+    _render_player_ranking_summary(player_id)
     with st.expander("⚠️ Speler verwijderen", expanded=False):
         st.warning(
             f"Speler '{_display_name(profile)}' definitief verwijderen?"
