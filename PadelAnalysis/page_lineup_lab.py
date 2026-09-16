@@ -35,7 +35,6 @@ maar voor "hen" het officiële TVL-klassement uit het historische
 uitslagenblad — twee VERSCHILLENDE meetsystemen tegenover elkaar. Concreet
 gemeld: Nico Recour / Carl Ide kregen een positieve edge tegen L'hoëst Bert /
 Van Rossom Sam, terwijl Bert/Sam een HOGERE padelstats-rating hadden.
-
 Fix hier: een opponent_ratings-dict wordt EENMALIG opgebouwd uit
 bundle["unique_players"] (de padelstats-rating van elke tegenstander, sinds
 PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 automatisch opgehaald) en
@@ -52,6 +51,66 @@ ll.make_pair_score_fn(), maar die functie past sinds deze datum zelf
 confidence-shrinkage toe (een koppel met 1 gezamenlijke, gewonnen wedstrijd
 krijgt niet langer synergie 1.0, maar wordt teruggetrokken richting het
 individuele gemiddelde totdat er genoeg gezamenlijke matches zijn).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG (opgelost, kern van de fix zit in dashboard_common.py): de "📅 Volgende
+match laden"-knop riep enkel _load_poule_fixtures() aan — een kale
+requests-fetch zonder poule_id-scoping, die BOVENDIEN nooit iets naar
+Firestore schreef. Twee zichtbare gevolgen bij Kim: (1) "Geen wedstrijden
+gevonden" voor teams die wél degelijk een geldige poule-URL hadden (de
+TVL-poule-pagina is een client-side gerenderde SPA; een kale requests.get()
+ziet de tabel niet), en (2) zelfs bij een gelukte fetch moest er bij ELKE
+herstart van de app opnieuw geklikt worden, want er werd niets bewaard.
+Fix hier: de fetch-aanroep in _render_volgende_match_and_scout() gebruikt nu
+dashboard_common._load_poule_schedule_robust(), die - wanneer lokaal
+scrapen beschikbaar is - dezelfde Playwright-gebaseerde, pouleId-scopende,
+Firestore-persisterende pijplijn gebruikt als poule_playwright.py (GitHub
+Actions / manual_poule_input.py). Slaagt die aanroep, dan wordt de pagina
+meteen herladen: bij die herlaadbeurt vindt de bestaande "saved_fixtures"-tak
+(hierboven, ongewijzigd) het schema onmiddellijk terug via
+_get_saved_schedule() — geen herhaalde klik meer nodig bij een volgende
+sessie. Daarnaast is een ontbrekende "🔁 Opnieuw proberen"-knop toegevoegd in
+de "geen wedstrijden gevonden"-tak (stond voorheen enkel in de
+fetch_error-tak).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG (opgelost): "bij de opstelling scenario's zie ik wel nog altijd maar 3
+scenario's. we gingen alle mogelijke combinaties bekijken en agregaatscore
+enz." Twee samenvallende oorzaken:
+  1. _SCENARIO_DISPLAY_TOP_N stond vast op 3 — enkel de beste 3 van de
+     berekende opties werden getoond per scenario, ongeacht hoeveel er
+     werkelijk berekend/bewaard waren.
+  2. De aanroep van ll.optimize_lineup_vs_scenario() gaf GEEN candidate_pool
+     mee, waardoor de ONDERLIGGENDE zoekruimte stilzwijgend beperkt bleef
+     tot lineup_lab.py's standaardwaarde (30) eigen koppelverdelingen VOOR
+     ze aan de tegenstander-borden werden toegewezen. Voor groepen vanaf
+     ±8 spelers (105+ mogelijke koppelverdelingen) werden dus NIET alle
+     combinaties doorgerekend — de Rotatieplanner gebruikte daarvoor al
+     wél _ROTATION_EXHAUSTIVE_LIMIT=400, een inconsistentie tussen de twee
+     secties.
+
+Fix, drie onderdelen:
+  1. _SCENARIO_CANDIDATE_POOL (=400, gelijk aan de Rotatieplanner) wordt nu
+     expliciet meegegeven aan optimize_lineup_vs_scenario(), zodat ECHT
+     alle haalbare koppelverdelingen meedingen.
+  2. _SCENARIO_SAVE_TOP_N is opgetrokken van 15 naar 400, zodat alle
+     berekende opties ook effectief bewaard worden (zowel in
+     st.session_state als bij "Analyse opslaan").
+  3. De UI toont per scenario nu standaard de beste 10
+     (_SCENARIO_DISPLAY_DEFAULT_N) in plaats van 3, met een checkbox "Toon
+     alle N berekende opties" om echt alles te zien.
+  4. NIEUW: een "📊 Aggregaatscore over alle scenario's"-sectie ONDER de
+     losse scenario-expanders. Voor elke eigen koppelverdeling die in
+     minstens één scenario een geldig resultaat had, wordt het gemiddelde
+     (+ min/max) van zijn score over ALLE scenario's berekend waarin die
+     combinatie voorkwam, aflopend gesorteerd. Dat geeft in één oogopslag
+     de opstelling die het robuust goed doet over alle gekende eerdere
+     opstellingen van de tegenstander heen, i.p.v. per scenario apart te
+     moeten vergelijken (zie _aggregate_scenario_scores()).
 """
 
 import streamlit as st
@@ -61,7 +120,8 @@ from dashboard_common import (
     fb, ll, ss, osu, oa, taa, is_scraping_available, render_cloud_scrape_trigger,
     _parse_match_date, _format_scraped_at, _display_name, _go_to_player,
     _clean_name, _get_all_profiles, _get_saved_poule_url, _save_poule_url,
-    _get_saved_schedule, _load_poule_fixtures, _official_current_rank,
+    _get_saved_schedule, _load_poule_fixtures, _load_poule_schedule_robust,
+    _official_current_rank,
 )
 
 # PADEL_ANALYSIS_MANUAL_POULE_URL_PERSIST_2026-09-15: optionele import, zodat
@@ -96,7 +156,10 @@ def _render_manual_url_fallback(
 
     expanded=False wordt gebruikt op de plaatsen waar er WEL al een schema is:
     het veld is dan beschikbaar maar staat ingeklapt, zodat het de normale
-    werking niet in de weg zit."""
+    werking niet in de weg zit. Sinds
+    PADEL_ANALYSIS_MANUAL_URL_ALWAYS_VISIBLE_2026-09-16 toont
+    manual_poule_input.render() zelf ALTIJD een beknopte, niet-ingeklapte
+    regel wanneer er al een URL actief is."""
     if manual_poule_input is not None:
         manual_poule_input.render(
             str(sel_player_id), player_name=sel_label,
@@ -257,10 +320,24 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_haveurl", expanded=False)
         return None
 
-    try:
-        fixtures, fetch_error = _load_poule_fixtures(reeks_url)
-    except Exception as e:
-        fixtures, fetch_error = [], str(e)
+    # PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16: gebruikt nu de
+    # robuuste, Playwright-gebaseerde, Firestore-persisterende pijplijn
+    # (dashboard_common._load_poule_schedule_robust) i.p.v. de kale
+    # requests-fetch die hier voorheen stond. Zie moduledocstring.
+    with st.spinner("Wedstrijdschema ophalen..."):
+        try:
+            fixtures, fetch_error, meta = _load_poule_schedule_robust(sel_player_id, reeks_url)
+        except Exception as e:
+            fixtures, fetch_error, meta = [], str(e), None
+
+    if meta is not None and fixtures and not fetch_error:
+        # De robuuste (Playwright) weg is gebruikt en geslaagd — het
+        # resultaat staat AL in Firestore (interclub_schedule). Herlaad de
+        # pagina: bij de volgende doorloop pikt de "saved_fixtures"-tak
+        # hierboven dit meteen op, zodat een volgende herstart van de app
+        # GEEN nieuwe klik meer vraagt.
+        st.session_state.pop(load_key, None)
+        st.rerun()
 
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
@@ -278,6 +355,12 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
 
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
+        # PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16: retry-knop
+        # toegevoegd — stond voorheen enkel in de fetch_error-tak hierboven,
+        # terwijl "0 fixtures zonder foutmelding" minstens even vaak voorkwam.
+        if st.button("🔁 Opnieuw proberen", key=f"retry_nofix_{sel_player_id}"):
+            _load_poule_fixtures.clear()
+            st.rerun()
         if st.button("✏️ Andere poule-link", key=f"reset_manual_nofix_{sel_player_id}"):
             st.session_state.pop(override_url_key, None)
             _save_poule_url(sel_player_id, "")
@@ -404,7 +487,7 @@ def _generate_rotation_candidates(
         raw, truncated = ll.optimize_lineup_vs_scenario(
             available_ids, required, synergy_fn, opponent_boards, player_ratings,
             player_official_ranks=official_ranks, opponent_ratings=opponent_ratings,
-            top_n=top_n,
+            top_n=top_n, candidate_pool=_ROTATION_EXHAUSTIVE_LIMIT,
         )
         for option in raw:
             pairs = [frozenset(a["our_pair"]) for a in option["assignment"]]
@@ -570,22 +653,74 @@ def _render_rotation_planner(
         st.rerun()
 
 
-# Aantal opties dat we ECHT berekenen/opslaan per tegenstander-scenario.
-_SCENARIO_SAVE_TOP_N = 15
-_SCENARIO_DISPLAY_TOP_N = 3
+# ─────────────────────────────────────────────
+# Opstelling-scenario's
+# PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16: zie moduledocstring.
+# ─────────────────────────────────────────────
+# Zoekruimte + hoeveel opties bewaard worden: gelijkgetrokken met de
+# Rotatieplanner (_ROTATION_EXHAUSTIVE_LIMIT=400), zodat ECHT alle haalbare
+# koppelverdelingen meedingen, niet enkel de eerste 30 (het oude, stille
+# standaardgedrag van lineup_lab.optimize_lineup_vs_scenario).
+_SCENARIO_CANDIDATE_POOL = 400
+_SCENARIO_SAVE_TOP_N = 400
+# Hoeveel opties standaard GETOOND worden per scenario (was vast op 3) — een
+# checkbox laat je alsnog alle berekende opties bekijken.
+_SCENARIO_DISPLAY_DEFAULT_N = 10
+# Idem voor de nieuwe aggregaatsectie (kan, bij grote groepen, honderden
+# unieke koppelverdelingen bevatten).
+_AGGREGATE_DISPLAY_DEFAULT_N = 20
+
+
+def _aggregate_scenario_scores(scenarios: list) -> list:
+    """PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16.
+
+    Bouwt, over ALLE scenario's heen, per unieke eigen koppelverdeling de
+    lijst van scores waarin die combinatie voorkwam (een "koppelverdeling"
+    is de verzameling (speler1, speler2)-paren, ONAFHANKELIJK van welk bord/
+    welke tegenstander ze toegewezen kregen — dat verschilt namelijk per
+    scenario, maar de vraag "wie speelt met wie" is scenario-onafhankelijk
+    en dus vergelijkbaar).
+
+    Returns een lijst van (combo_key, {"avg","min","max","count"}),
+    aflopend gesorteerd op avg. combo_key is een tuple van gesorteerde
+    (p1, p2)-tuples, dus stabiel en herbruikbaar als weergave-sleutel.
+    """
+    scores_by_combo: dict = {}
+    for entry in scenarios:
+        for option in (entry.get("results") or []):
+            pairs = sorted(
+                tuple(sorted(a["our_pair"])) for a in option.get("assignment", []) or []
+            )
+            if not pairs:
+                continue
+            combo_key = tuple(pairs)
+            scores_by_combo.setdefault(combo_key, []).append(option["total_score"])
+
+    aggregated = []
+    for combo_key, scores in scores_by_combo.items():
+        aggregated.append((combo_key, {
+            "avg": sum(scores) / len(scores),
+            "min": min(scores),
+            "max": max(scores),
+            "count": len(scores),
+        }))
+    aggregated.sort(key=lambda item: -item[1]["avg"])
+    return aggregated
 
 
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
-    """PADEL_ANALYSIS_LINEUP_SCENARIO_REDESIGN_2026-09-13 / _2026-09-14."""
+    """PADEL_ANALYSIS_LINEUP_SCENARIO_REDESIGN_2026-09-13 / _2026-09-14 /
+    _ALL_COMBINATIONS_AGGREGATE_2026-09-16."""
     st.divider()
     st.markdown('<div class="section-header">🧮 Opstelling-scenario\'s</div>', unsafe_allow_html=True)
     st.caption(
         "Per scenario (een eerdere opstelling van de tegenstander dit seizoen) berekenen we automatisch "
-        "de beste opties voor onze eigen opstelling. Geen voorspelling van wat ze NU zullen opstellen — "
-        "wel een idee van de mogelijkheden op basis van wat ze eerder deden."
+        "de beste opties voor onze eigen opstelling — over ALLE mogelijke koppelverdelingen heen. Geen "
+        "voorspelling van wat ze NU zullen opstellen — wel een idee van de mogelijkheden op basis van wat "
+        "ze eerder deden."
     )
 
-    with st.expander("ℹ️ Wat betekenen synergie, matchup-edge en score?", expanded=False):
+    with st.expander("ℹ️ Wat betekenen synergie, matchup-edge, score en aggregaatscore?", expanded=False):
         st.markdown(
             "- **Synergie**: hoe goed dit koppel historisch samen presteert. We gebruiken "
             "*confidence-shrinkage*: hoe minder gezamenlijke wedstrijden gekend zijn, hoe meer het "
@@ -597,11 +732,13 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "koppel op dat bord. Gebruikt de padelstats.be playing strength voor BEIDE koppels zodra "
             "die voor de tegenstander gekend is; is dat niet het geval, dan valt de vergelijking terug "
             "op het officiële klassement voor BEIDE zijden — nooit een mix van de twee schalen door "
-            "elkaar (dat gaf voorheen tegenstrijdige uitkomsten). Positief = wij naar verwachting "
-            "sterker; negatief = de tegenstander sterker.\n"
-            "- **Score**: synergie + matchup-edge, opgeteld over alle borden van dat scenario. "
-            "Hoger = een gunstiger ingeschatte opstelling — geen garantie, wel een onderbouwd "
-            "vertrekpunt."
+            "elkaar. Positief = wij naar verwachting sterker; negatief = de tegenstander sterker.\n"
+            "- **Score**: synergie + matchup-edge, opgeteld over alle borden van dat ENE scenario. "
+            "Hoger = een gunstiger ingeschatte opstelling voor dát specifieke scenario.\n"
+            "- **Aggregaatscore**: het GEMIDDELDE van de score van een koppelverdeling over ALLE "
+            "scenario's waarin ze voorkwam. Een combinatie die in elk scenario een score rond 1.5 haalt "
+            "is doorgaans robuuster dan een combinatie die in één scenario uitzonderlijk scoort maar in "
+            "andere scenario's ver daaronder zit — de min/max-kolommen tonen die spreiding."
         )
 
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
@@ -634,6 +771,14 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         st.info("Selecteer minstens 2 spelers om een opstelling te kunnen berekenen.")
         return
     available_ids = [own_label_to_id[lbl] for lbl in available_labels]
+
+    if len(available_ids) > 12:
+        st.caption(
+            f"⚠️ {len(available_ids)} spelers geselecteerd — het aantal mogelijke koppelverdelingen "
+            f"loopt dan snel op (bv. 105 bij 8 spelers, 10.395 bij 12). De berekening blijft beperkt "
+            f"tot de {_SCENARIO_CANDIDATE_POOL} beste kandidaten (op eigen synergie), niet letterlijk "
+            "alle miljoenen combinaties bij zeer grote groepen."
+        )
 
     suggested_boards = max((len(fx.get("boards", [])) for fx in bundle.get("previous_fixtures", [])), default=6) or 6
     c1, c2 = st.columns(2)
@@ -690,22 +835,28 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
 
     if needs_compute or recompute_clicked:
         computed = []
-        for s_idx, fx_bundle in enumerate(bundle["previous_fixtures"], start=1):
-            boards = fx_bundle.get("boards", [])
-            fx = fx_bundle.get("fixture", {})
-            entry = {
-                "s_idx": s_idx, "fixture": fx, "boards_count": len(boards),
-                "error": fx_bundle.get("error"), "results": None, "truncated": False,
-            }
-            if not entry["error"] and boards:
-                results, truncated = ll.optimize_lineup_vs_scenario(
-                    available_ids, max_per_player, synergy_fn, boards, player_ratings,
-                    player_official_ranks=official_ranks, opponent_ratings=opponent_ratings,
-                    top_n=_SCENARIO_SAVE_TOP_N,
-                )
-                entry["results"] = results
-                entry["truncated"] = truncated
-            computed.append(entry)
+        with st.spinner(f"Alle mogelijke koppelverdelingen doorrekenen (tot {_SCENARIO_CANDIDATE_POOL} kandidaten per scenario)..."):
+            for s_idx, fx_bundle in enumerate(bundle["previous_fixtures"], start=1):
+                boards = fx_bundle.get("boards", [])
+                fx = fx_bundle.get("fixture", {})
+                entry = {
+                    "s_idx": s_idx, "fixture": fx, "boards_count": len(boards),
+                    "error": fx_bundle.get("error"), "results": None, "truncated": False,
+                }
+                if not entry["error"] and boards:
+                    # PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16:
+                    # candidate_pool expliciet meegeven — zonder deze
+                    # parameter viel dit stil terug op lineup_lab.py's
+                    # standaard van 30, waardoor bij >~8 spelers NIET alle
+                    # koppelverdelingen werden overwogen.
+                    results, truncated = ll.optimize_lineup_vs_scenario(
+                        available_ids, max_per_player, synergy_fn, boards, player_ratings,
+                        player_official_ranks=official_ranks, opponent_ratings=opponent_ratings,
+                        top_n=_SCENARIO_SAVE_TOP_N, candidate_pool=_SCENARIO_CANDIDATE_POOL,
+                    )
+                    entry["results"] = results
+                    entry["truncated"] = truncated
+                computed.append(entry)
         st.session_state[compute_key] = {
             "opponent_name": opp.get("name"),
             "opponent_ploeg_id": opp.get("ploeg_id"),
@@ -736,12 +887,28 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                         st.warning("Geen geldige opstelling gevonden binnen deze beperkingen.")
                     continue
                 if entry["truncated"]:
-                    st.caption("⚠️ Grote zoekruimte — resultaat gebaseerd op beperkte zoekdiepte.")
+                    st.caption(
+                        f"⚠️ Meer dan {_SCENARIO_CANDIDATE_POOL} mogelijke koppelverdelingen — resultaat "
+                        "gebaseerd op de beste kandidaten binnen die zoekdiepte, niet letterlijk elke "
+                        "denkbare combinatie."
+                    )
 
                 total_computed = len(entry["results"])
-                display_results = entry["results"][:_SCENARIO_DISPLAY_TOP_N]
-                if total_computed > len(display_results):
-                    st.caption(f"Top {len(display_results)} van {total_computed} berekende opties getoond. Bij opslaan worden ALLE {total_computed} bewaard.")
+                # PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16: was
+                # een vaste top-3-afkapping; nu een instelbare weergave met
+                # een checkbox om ECHT alles te zien.
+                show_all_key = f"scenario_showall_{opp['ploeg_id']}_{s_idx}"
+                show_all = False
+                if total_computed > _SCENARIO_DISPLAY_DEFAULT_N:
+                    show_all = st.checkbox(
+                        f"Toon alle {total_computed} berekende opties (i.p.v. de beste {_SCENARIO_DISPLAY_DEFAULT_N})",
+                        key=show_all_key,
+                    )
+                display_results = entry["results"] if show_all else entry["results"][:_SCENARIO_DISPLAY_DEFAULT_N]
+                if show_all:
+                    st.caption(f"Alle {total_computed} berekende opties getoond.")
+                elif total_computed > len(display_results):
+                    st.caption(f"Beste {len(display_results)} van {total_computed} berekende opties getoond. Bij opslaan worden ALLE {total_computed} bewaard.")
 
                 for opt_idx, option in enumerate(display_results, start=1):
                     label = f"**Optie {opt_idx}" + (" (beste)" if opt_idx == 1 else "") + f" — score {option['total_score']}**"
@@ -812,6 +979,45 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             doc_id = fb.save_lineup_analysis(sel_player_id, payload)
             n_total_options = sum(len(s["options"]) for s in payload["scenarios"])
             st.success(f"Analyse opgeslagen ({n_total_options} opties over {len(payload['scenarios'])} scenario's). Te bekijken via het tabblad 'Opgeslagen analyses'.")
+
+        # PADEL_ANALYSIS_ALL_COMBINATIONS_AGGREGATE_2026-09-16: nieuwe sectie,
+        # zie moduledocstring en _aggregate_scenario_scores().
+        st.divider()
+        st.markdown("#### 📊 Aggregaatscore over alle scenario's")
+        st.caption(
+            "Voor elke eigen koppelverdeling die in minstens één scenario een geldig resultaat had: het "
+            "gemiddelde van zijn score over alle scenario's waarin die combinatie voorkwam. Zo zie je in "
+            "één overzicht welke opstelling het robuust goed doet over alle gekende eerdere opstellingen "
+            "van de tegenstander heen, i.p.v. per scenario apart te vergelijken."
+        )
+        aggregate = _aggregate_scenario_scores(stored["scenarios"])
+        if not aggregate:
+            st.info("Nog geen combinaties met een geldig resultaat in minstens 1 scenario.")
+        else:
+            show_all_agg_key = f"scenario_agg_showall_{opp['ploeg_id']}"
+            show_all_agg = False
+            if len(aggregate) > _AGGREGATE_DISPLAY_DEFAULT_N:
+                show_all_agg = st.checkbox(
+                    f"Toon alle {len(aggregate)} combinaties (i.p.v. de beste {_AGGREGATE_DISPLAY_DEFAULT_N})",
+                    key=show_all_agg_key,
+                )
+            weer_te_geven = aggregate if show_all_agg else aggregate[:_AGGREGATE_DISPLAY_DEFAULT_N]
+            agg_rows = []
+            for combo_key, info in weer_te_geven:
+                pair_labels = " | ".join(
+                    f"{name_lookup_global.get(p1, p1)}/{name_lookup_global.get(p2, p2)}"
+                    for p1, p2 in combo_key
+                )
+                agg_rows.append({
+                    "Koppelverdeling": pair_labels,
+                    "Gem. score": round(info["avg"], 3),
+                    "Min": round(info["min"], 3),
+                    "Max": round(info["max"], 3),
+                    "In # scenario's": info["count"],
+                })
+            st.dataframe(agg_rows, use_container_width=True, hide_index=True)
+            if not show_all_agg and len(aggregate) > len(weer_te_geven):
+                st.caption(f"Beste {len(weer_te_geven)} van {len(aggregate)} unieke koppelverdelingen getoond.")
 
     st.divider()
     chosen_scenario_boards = None
