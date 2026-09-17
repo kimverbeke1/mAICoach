@@ -1,0 +1,99 @@
+# .github/workflows/refresh-padelstat.yml
+#
+# Dagelijkse, VOLLEDIG GEÏSOLEERDE controle/herstel van padelstats.be
+# playing strength voor alle spelers (eigen team + tegenstanders).
+#
+# Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata):
+#   - scrape-padel.yml liep vast op de 30-minuten-limiet naarmate de
+#     spelerslijst groeide; dit script mag daar niet opnieuw tegenaan lopen.
+#   - "een speler verversen" loste padelstat-problemen tot nu toe niet op
+#     (zie refresh_padelstat_only.py se moduledocstring: PADELSTAT_LOGIC_
+#     VERSION-zelfherstel-mechanisme). Dit is de gerichte, op zichzelf
+#     staande oplossing daarvoor, om onafhankelijk van de bredere
+#     timeout-fix al te kunnen draaien.
+#
+# Verwerkt STANDAARD max 40 spelers per run (zie PADELSTAT_MAX hieronder) -
+# ruim binnen de tijdslimiet van deze workflow. Wie deze run niet aan bod
+# komt, wordt de VOLGENDE dagelijkse run opgepikt; na een paar dagen is
+# iedereen bijgewerkt (inclusief een eenmalige hercontrole van spelers wiens
+# waarde van vóór de scraper-bugfixes dateert), en blijft de run daarna kort.
+#
+# Vereiste repo secret (Settings -> Secrets and variables -> Actions):
+#   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
+#                                   scrape-padel.yml/sync-mAIcoach.yml)
+#
+# Handmatig testen/forceren: Actions -> Refresh padelstat -> Run workflow,
+# met desgewenst een aangepaste 'max' of 'force_all' input.
+name: Refresh padelstat (padelstats.be)
+
+on:
+  schedule:
+    # Dagelijks om 04:07 UTC. Bewust NIET op scrape-padel.yml se eigen
+    # cron-tijdstip, en bewust NIET op het volle uur (zie de bekende
+    # GitHub Actions schedule-onbetrouwbaarheid rond :00). Een gemiste dag
+    # is hier onschuldig: de volgende dag pikt gewoon verder op.
+    - cron: "7 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Max aantal spelers deze run"
+        required: false
+        default: "40"
+      force_all:
+        description: "Iedereen opnieuw controleren, ongeacht versie-marker (true/false)"
+        required: false
+        default: "false"
+      player:
+        description: "Enkel dit ene player_id controleren (optioneel, laat leeg voor normale werking)"
+        required: false
+        default: ""
+
+concurrency:
+  group: refresh-padelstat
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Ruim onder de 30-minuten-limiet die scrape-padel.yml deed vastlopen:
+    # bij PADELSTAT_MAX=40 en ~15-30s per speler blijft dit ruim binnen 20
+    # minuten. Expliciet begrensd zodat een onverwacht trage run wordt
+    # afgebroken i.p.v. de volgende dagelijkse run te blokkeren.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: PadelAnalysis/scraper/requirements-scraper.txt
+
+      - name: Installeer dependencies
+        working-directory: PadelAnalysis
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scraper/requirements-scraper.txt
+
+      - name: Installeer Playwright Chromium
+        working-directory: PadelAnalysis
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Padelstat-controle uitvoeren
+        working-directory: PadelAnalysis/scraper
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          PADELSTAT_MAX: ${{ github.event.inputs.max || '40' }}
+        run: |
+          ARGS="--max ${PADELSTAT_MAX}"
+          if [ "${{ github.event.inputs.force_all }}" = "true" ]; then
+            ARGS="$ARGS --force-all"
+          fi
+          if [ -n "${{ github.event.inputs.player }}" ]; then
+            ARGS="$ARGS --player ${{ github.event.inputs.player }}"
+          fi
+          echo "Uitvoeren: python refresh_padelstat_only.py $ARGS"
+          python refresh_padelstat_only.py $ARGS
