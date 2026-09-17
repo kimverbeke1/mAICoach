@@ -4,39 +4,38 @@
 # klassementshistoriek voor alle spelers (eigen team + tegenstanders).
 #
 # Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata)
-# EN van refresh-padelstat.yml (playing strength):
-#   - Klassement scrapen kost een VOLLEDIGE Playwright-sessie met meerdere
-#     periode-selecties (~30-90s per speler) - trager dan padelstat
-#     (~10-30s), dus een lagere batch-limiet is nodig.
-#   - Tot nu gebeurde klassement voor tegenstanders UITSLUITEND lokaal, via
-#     een checkbox in de Streamlit-UI die stopt zodra is_scraping_
-#     available() False is (altijd het geval op Streamlit Cloud, waar Kim
-#     uitsluitend test). Deze workflow is het ontbrekende, server-side
-#     equivalent.
+# EN van refresh-padelstat.yml (padelstats.be):
+#   - klassement scrapen is per speler trager (meerdere periodes na elkaar
+#     doorlopen), dus een kleinere batch per run dan padelstat;
+#   - klassement bestond tot nu toe UITSLUITEND als lokale, handmatige actie
+#     (checkbox in opponent_scout_ui.py), die op de gedeployde app niets
+#     deed (is_scraping_available() == False daar). Deze workflow is de
+#     structurele, server-side vervanging daarvan.
 #
 # Verwerkt STANDAARD max 15 spelers per run (zie KLASSEMENT_MAX hieronder).
-# Wie deze run niet aan bod komt, wordt de VOLGENDE dagelijkse run
-# opgepikt. Bevat ook een ZELFHERSTEL-mechanisme (zie refresh_klassement_
-# only.py: _is_klassement_usable()) voor spelers die eerder een vrijwel
-# lege klassementshistoriek kregen door een cookie-banner-bug in
-# scrape_klassement.py (PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_
-# 2026-09-17, inmiddels opgelost) - die spelers worden AUTOMATISCH herkend
-# en opnieuw geprobeerd, zonder dat Kim ze zelf hoeft aan te wijzen.
+# Wie deze run niet aan bod komt, wordt de VOLGENDE dagelijkse run opgepikt.
+#
+# Bevat een EENMALIG zelfherstel-mechanisme (zie refresh_klassement_only.py)
+# voor spelers die vóór de PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_
+# 2026-09-17 al eens (kapot) gescraped zijn: hun quasi-lege 'Huidige
+# pagina'-fallback-historiek wordt automatisch, met voorrang, opnieuw
+# geprobeerd.
 #
 # Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
 #                                   scrape-padel.yml/refresh-padelstat.yml)
 #
 # Handmatig testen/forceren: Actions -> Refresh klassement -> Run workflow,
-# met desgewenst een aangepaste 'max' of 'force_all' input.
-name: Refresh klassement (TVL)
+# met desgewenst een aangepaste 'max', 'force_all' of 'player' input.
+name: Refresh klassement (tennisenpadelvlaanderen.be)
 
 on:
   schedule:
-    # Dagelijks om 04:27 UTC - bewust een ANDER tijdstip dan scrape-padel.yml
-    # (workflow_dispatch-only sinds de Cloud Scheduler-migratie) en
-    # refresh-padelstat.yml (04:07 UTC), en bewust NIET op het volle uur.
-    - cron: "27 4 * * *"
+    # Dagelijks om 04:22 UTC. Bewust een ander tijdstip dan refresh-
+    # padelstat.yml (04:07) en scrape-padel.yml, en bewust NIET op het volle
+    # uur (bekende GitHub Actions schedule-onbetrouwbaarheid rond :00). Een
+    # gemiste dag is onschuldig: de volgende dag pikt gewoon verder op.
+    - cron: "22 4 * * *"
   workflow_dispatch:
     inputs:
       max:
@@ -44,11 +43,11 @@ on:
         required: false
         default: "15"
       max_periods:
-        description: "Max aantal periodes per speler om te scrapen"
+        description: "Max periodes per speler deze run (leeg = alle periodes)"
         required: false
-        default: "10"
+        default: ""
       force_all:
-        description: "Iedereen opnieuw controleren, ongeacht bestaande data (true/false)"
+        description: "Iedereen opnieuw controleren, ongeacht versie-marker (true/false)"
         required: false
         default: "false"
       player:
@@ -63,9 +62,10 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Ruim onder de 25 min die refresh-padelstat.yml als veilig bevestigde:
-    # bij KLASSEMENT_MAX=15 en ~30-90s per speler (trager dan padelstat)
-    # blijft dit ruim binnen de tijdslimiet.
+    # Ruim onder de 30-minuten-limiet die scrape-padel.yml eerder deed
+    # vastlopen: bij KLASSEMENT_MAX=15 en meerdere periodes per speler
+    # (~20-40s per speler, afhankelijk van het aantal periodes) blijft dit
+    # ruim binnen 25 minuten.
     timeout-minutes: 25
     steps:
       - name: Checkout repository
@@ -82,7 +82,6 @@ jobs:
         working-directory: PadelAnalysis
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
           pip install -r scraper/requirements-scraper.txt
 
       - name: Installeer Playwright Chromium
@@ -95,8 +94,12 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           KLASSEMENT_MAX: ${{ github.event.inputs.max || '15' }}
+          KLASSEMENT_MAX_PERIODS: ${{ github.event.inputs.max_periods }}
         run: |
-          ARGS="--max ${KLASSEMENT_MAX} --max-periods ${{ github.event.inputs.max_periods || '10' }}"
+          ARGS="--max ${KLASSEMENT_MAX}"
+          if [ -n "${KLASSEMENT_MAX_PERIODS}" ]; then
+            ARGS="$ARGS --max-periods-per-player ${KLASSEMENT_MAX_PERIODS}"
+          fi
           if [ "${{ github.event.inputs.force_all }}" = "true" ]; then
             ARGS="$ARGS --force-all"
           fi
@@ -105,12 +108,3 @@ jobs:
           fi
           echo "Uitvoeren: python refresh_klassement_only.py $ARGS"
           python refresh_klassement_only.py $ARGS
-
-      - name: Debug-HTML uploaden bij een 'Huidige pagina'-fallback (indien aanwezig)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: klassement-debug-html
-          path: PadelAnalysis/scraper/klassement_debug.html
-          if-no-files-found: ignore
-          retention-days: 7
