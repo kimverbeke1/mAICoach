@@ -175,11 +175,18 @@ def select_players_to_process(
 ) -> list:
     """Kiest WELKE spelers deze run verwerkt worden. Prioriteit: spelers
     zonder ENIGE klassementshistoriek eerst (waarschijnlijk nooit geprobeerd),
-    dan spelers met een 'leeg door mislukte scrape'-record (zelfherstel)."""
+    dan spelers met een 'leeg door mislukte scrape'-record (zelfherstel).
+
+    PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17: only_player_id
+    ondersteunt nu ook een KOMMA-GESCHEIDEN lijst van player_id's (bv.
+    "111,222,333"), niet enkel een los ID — nodig zodat een "🎯 Klassement nu
+    ophalen voor deze ploeg"-knop in opponent_scout_ui.py in één workflow-run
+    exact de tegenstander-roster kan targeten, ongeacht ALTIJD gerespecteerd
+    (deze spelers worden NOOIT overgeslagen door de max-cap, zie run())."""
     if only_player_id:
-        pid = _norm_id(only_player_id)
-        match = next((p for p in profiles if _norm_id(p.get("player_id")) == pid), None)
-        return [match] if match else []
+        gevraagde_ids = {_norm_id(pid) for pid in str(only_player_id).split(",") if pid.strip()}
+        matches = [p for p in profiles if _norm_id(p.get("player_id")) in gevraagde_ids]
+        return matches
 
     kandidaten = []
     for p in profiles:

@@ -22,11 +22,9 @@ WAAROM "VERVERSEN" TOT NU TOE NIET HIELP (kernprobleem, hier opgelost)
 --------------------------------------------------------------------------
 enrich_opponents.run_padelstat_for_players() (en dus ook de "Ververs alles"-
 knop in opponent_scout_ui.py) doet, zonder force=True:
-
     cached = fb.get_padelstat_rating(pid)
     if cached and cached.get("rating") is not None:
         continue  # overslaan: "er staat al iets"
-
 Dat "er staat al iets" is precies het probleem. Deze sessie zijn twee
 bugs in padelstats_scraper.py opgelost die er eerder voor zorgden dat de
 gevonden waarde VERKEERD kon zijn of de scrape gewoon MISLUKTE:
@@ -39,7 +37,6 @@ gevonden waarde VERKEERD kon zijn of de scrape gewoon MISLUKTE:
 Elke speler wiens rating VOOR deze fixes werd opgehaald, kan dus een foute
 of ontbrekende waarde hebben -- en een gewone refresh slaat die speler
 STRUCTUREEL over, want er "staat al iets" (of het faalde stil).
-
 Fix: dit script stempelt elke succesvolle opzoeking met een
 PADELSTAT_LOGIC_VERSION-marker (padelstat_logic_version-veld op het
 player_profiles-document). Bij elke run wordt een speler als "moet
@@ -49,7 +46,7 @@ gecontroleerd worden" beschouwd zodra:
      versie hieronder (dus: nooit gecontroleerd MET de gerepareerde
      scraper) -- dit is het EENMALIGE zelfherstel-mechanisme dat oude,
      mogelijk foute waarden alsnog corrigeert, zonder dat Kim iets hoeft
-     te doen, ON daarna nooit meer onnodig, want eenmaal bijgewerkte
+     te doen, en daarna nooit meer onnodig, want eenmaal bijgewerkte
      spelers krijgen de nieuwe versie-marker en worden dus overgeslagen.
 Verhoog PADELSTAT_LOGIC_VERSION wanneer er ooit weer een fix in
 padelstats_scraper.py komt die een NIEUWE algehele hercontrole rechtvaardigt.
@@ -71,13 +68,33 @@ Prioriteitsvolgorde binnen een run:
   3. (bij --force-all) iedereen, ongeacht versie-marker.
 
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17 (op verzoek van Kim,
+"dat moet wel werken via github actions... bekijk dat eens van dichterbij")
+--------------------------------------------------------------------------
+BUG/BEPERKING (opgelost): op Streamlit Cloud bestond GEEN ENKELE directe
+manier om padelstat onmiddellijk te forceren voor een specifieke
+tegenstander-ploeg -- de "🔄 Ververs alles voor deze ploeg"-knop in
+opponent_scout_ui.py werd enkel getoond als is_scraping_available() True is
+(nooit het geval op Cloud), en --player accepteerde tot nu maar 1 los ID.
+
+Fix: --player accepteert nu ook een KOMMA-GESCHEIDEN lijst van player_id's
+(bv. "111,222,333"), zodat een nieuwe "🎯 Playing strength nu ophalen voor
+deze ploeg"-knop in opponent_scout_ui.py in EEN workflow-run exact de
+tegenstander-roster kan targeten via refresh-padelstat.yml se
+workflow_dispatch. Bij een expliciete --player-lijst worden ALLE gevraagde
+spelers verwerkt, OOK als dat er meer zijn dan --max (de max-cap geldt
+enkel voor de generieke, prioriteit-gebaseerde dagelijkse selectie, niet
+voor een expliciet aangewezen doelgroep).
+
+--------------------------------------------------------------------------
 GEBRUIK
 --------------------------------------------------------------------------
     python refresh_padelstat_only.py --dry-run
     python refresh_padelstat_only.py
     python refresh_padelstat_only.py --max 60
-    python refresh_padelstat_only.py --player 1759548          (1 speler, altijd)
-    python refresh_padelstat_only.py --force-all --max 20      (iedereen herzien)
+    python refresh_padelstat_only.py --player 1759548              (1 speler, altijd)
+    python refresh_padelstat_only.py --player 111,222,333          (meerdere spelers, altijd)
+    python refresh_padelstat_only.py --force-all --max 20          (iedereen herzien)
 """
 from __future__ import annotations
 
@@ -127,16 +144,13 @@ def _all_profiles() -> list:
 
 def needs_check(profile: dict, force_all: bool = False) -> tuple[bool, str]:
     """Bepaalt of deze speler deze run gecontroleerd moet worden, en waarom.
-
     Returns (moet_gecontroleerd, reden). De reden wordt gebruikt om de
     prioriteitsvolgorde te bepalen (zie module-docstring)."""
     if force_all:
         return True, "force-all"
-
     version = profile.get("padelstat_logic_version")
     if version != PADELSTAT_LOGIC_VERSION:
         return True, "verouderde-versie (mogelijk foute oude waarde)"
-
     player_id = _norm_id(profile.get("player_id"))
     try:
         cached = fb.get_padelstat_rating(player_id)
@@ -144,7 +158,6 @@ def needs_check(profile: dict, force_all: bool = False) -> tuple[bool, str]:
         cached = None
     if not cached or cached.get("rating") is None:
         return True, "geen rating bekend"
-
     return False, "al gecontroleerd met huidige scraper-versie"
 
 
@@ -155,12 +168,19 @@ def select_players_to_process(
     only_player_id: Optional[str] = None,
 ) -> list:
     """Kiest WELKE spelers deze run verwerkt worden, met prioriteit voor
-    zelfherstel (verouderde versie) boven nieuw-ontbrekend."""
-    if only_player_id:
-        pid = _norm_id(only_player_id)
-        match = next((p for p in profiles if _norm_id(p.get("player_id")) == pid), None)
-        return [match] if match else []
+    zelfherstel (verouderde versie) boven nieuw-ontbrekend.
 
+    PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17: only_player_id
+    ondersteunt nu ook een KOMMA-GESCHEIDEN lijst van player_id's (bv.
+    "111,222,333"), niet enkel een los ID — nodig zodat een "🎯 Playing
+    strength nu ophalen voor deze ploeg"-knop in opponent_scout_ui.py in één
+    workflow-run exact de tegenstander-roster kan targeten. Deze spelers
+    worden ALTIJD verwerkt, ongeacht max_per_run (die cap geldt enkel voor
+    de generieke, prioriteit-gebaseerde dagelijkse selectie hieronder)."""
+    if only_player_id:
+        gevraagde_ids = {_norm_id(pid) for pid in str(only_player_id).split(",") if pid.strip()}
+        matches = [p for p in profiles if _norm_id(p.get("player_id")) in gevraagde_ids]
+        return matches
     kandidaten = []
     for p in profiles:
         if not p.get("player_id") or not p.get("display_name"):
@@ -168,7 +188,6 @@ def select_players_to_process(
         moet, reden = needs_check(p, force_all=force_all)
         if moet:
             kandidaten.append((p, reden))
-
     prioriteit = {"force-all": 0, "verouderde-versie (mogelijk foute oude waarde)": 1, "geen rating bekend": 2}
     kandidaten.sort(key=lambda item: prioriteit.get(item[1], 9))
     return [p for p, _ in kandidaten[:max_per_run]]
@@ -179,27 +198,22 @@ def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> 
     stempelt het resultaat met PADELSTAT_LOGIC_VERSION (zelfherstel-marker),
     ONGEACHT of er al eerder een (mogelijk foute) waarde stond."""
     import padelstats_scraper as pss  # lazy: enkel nodig als deze stap draait
-
     result = {"player_id": player_id, "naam": naam, "status": None, "rating": None, "note": None}
-
     try:
         gevonden = pss.search_and_fetch_padelstat_rating(naam, club=club or None)
     except Exception as e:  # noqa: BLE001
         result["status"] = "fout"
         result["note"] = str(e)
         return result
-
     if not gevonden or gevonden.get("rating") is None:
         result["status"] = "niet_gevonden"
         if not dry_run:
             _stamp_checked(player_id, found=False)
         return result
-
     result["status"] = "opgehaald"
     result["rating"] = gevonden.get("rating")
     if gevonden.get("club_disambiguation_note"):
         result["note"] = gevonden["club_disambiguation_note"]
-
     if not dry_run:
         try:
             fb.save_padelstat_rating(
@@ -214,7 +228,6 @@ def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> 
             result["note"] = str(e)
             return result
         _stamp_checked(player_id, found=True)
-
     return result
 
 
@@ -244,7 +257,6 @@ def run(
     dry_run: bool = False,
 ) -> dict:
     profiles = _all_profiles()
-
     # Telling van ALLE kandidaten (voor rapportage), los van de max-cap.
     # Zelfde filter als select_players_to_process (player_id + display_name
     # vereist) zodat een profiel zonder bruikbare naam niet eeuwig als
@@ -254,7 +266,6 @@ def run(
         if p.get("player_id") and p.get("display_name") and needs_check(p, force_all=force_all)[0]
     ] if not only_player_id else []
     te_verwerken = select_players_to_process(profiles, max_per_run, force_all=force_all, only_player_id=only_player_id)
-
     logger.info(
         f"{len(profiles)} speler(s) totaal in player_profiles. "
         f"{len(alle_kandidaten) or len(te_verwerken)} kandidaat/kandidaten voor controle, "
@@ -271,17 +282,14 @@ def run(
             "deze_run": len(te_verwerken),
             "resultaten": [],
         }
-
     resultaten = []
     for i, p in enumerate(te_verwerken, start=1):
         pid = _norm_id(p.get("player_id"))
         naam = p.get("display_name") or pid
         club = p.get("club") or ""
         logger.info(f"({i}/{len(te_verwerken)}) {naam} ({pid}, club='{club}')...")
-
         r = refresh_one(pid, naam, club, dry_run=dry_run)
         resultaten.append(r)
-
         if r["status"] == "opgehaald":
             note = f" — {r['note']}" if r.get("note") else ""
             logger.info(f"  -> P{r['rating']}{note}")
@@ -289,10 +297,8 @@ def run(
             logger.info("  -> niet gevonden op padelstats.be")
         else:
             logger.warning(f"  -> {r['status']}: {r.get('note')}")
-
         if i < len(te_verwerken):
             time.sleep(pause_seconds)
-
     samenvatting = {
         "totaal_profielen": len(profiles),
         "kandidaten": len(alle_kandidaten),
@@ -323,11 +329,10 @@ if __name__ == "__main__":
     parser.add_argument("--force-all", action="store_true",
                         help="Negeer de versie-marker en controleer IEDEREEN opnieuw (traag; gebruik samen met --max).")
     parser.add_argument("--player", type=str, default=None,
-                        help="Enkel deze speler controleren (player_id), altijd, ongeacht versie-marker.")
+                        help="Enkel deze speler(s) controleren, altijd (player_id, of komma-gescheiden lijst).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Toon enkel wie verwerkt zou worden, scrape niets, schrijf niets weg.")
     args = parser.parse_args()
-
     resultaat = run(
         max_per_run=args.max,
         pause_seconds=args.pause,
@@ -335,7 +340,6 @@ if __name__ == "__main__":
         only_player_id=args.player,
         dry_run=args.dry_run,
     )
-
     print("\n=== Samenvatting padelstat-controle ===")
     print(f"Totaal profielen        : {resultaat['totaal_profielen']}")
     print(f"Kandidaten (nog te doen) : {resultaat['kandidaten']}")
