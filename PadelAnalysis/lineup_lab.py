@@ -33,47 +33,18 @@ PADEL_ANALYSIS_SYNERGY_CONFIDENCE_SHRINKAGE_2026-09-15 (op verzoek van Kim)
 --------------------------------------------------------------------------
 BUG (opgelost): make_pair_score_fn() gaf bij EEN enkele gezamenlijke,
 gewonnen wedstrijd een synergie van 1.0 terug (min_matches_for_synergy=1
-liet dat al toe als "genoeg data"). Concreet gemeld voorbeeld: Nico Recour /
-Mortier Stijn speelden precies 1 keer samen, wonnen die ene wedstrijd, en
-kregen daardoor synergie 1.0 — een cijfer dat evenveel gewicht kreeg als een
-koppel met 20 gezamenlijke wedstrijden.
-
-Fix: CONFIDENCE-SHRINKAGE i.p.v. een harde aan/uit-drempel. Het
-koppelresultaat wordt steeds gemengd met het gemiddelde van de individuele
-winrates van beide spelers, met een gewicht dat toeneemt naarmate er meer
-gezamenlijke wedstrijden gekend zijn:
+liet dat al toe als "genoeg data"). Fix: CONFIDENCE-SHRINKAGE i.p.v. een
+harde aan/uit-drempel:
     weight = known_matches / (known_matches + confidence_k)
     score  = weight * paar_winrate + (1 - weight) * individueel_gemiddelde
-Met de standaardwaarde confidence_k=3.0:
-    1 gezamenlijke match  -> weight ≈ 0.25 (overwegend individueel gemiddelde)
-    6 gezamenlijke matches -> weight ≈ 0.67
-    20 gezamenlijke matches -> weight ≈ 0.87 (overwegend het koppelresultaat)
-Dit vervangt het oude, harde min_matches_for_synergy-gedrag; de parameter
-blijft bestaan voor eventuele achterwaartse compatibiliteit maar wordt niet
-langer gebruikt als aan/uit-schakelaar.
 
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_MATCHUP_SCALE_CONSISTENCY_2026-09-15 (op verzoek van Kim)
 --------------------------------------------------------------------------
 BUG (opgelost): matchup_edge() kreeg voor "ons" de padelstats.be playing
-strength (via opponent_analysis.get_own_player_rating(), continu
-herberekend) maar voor "hen" het OFFICIËLE TVL-klassement uit het historische
-uitslagenblad (opp1_ranking/opp2_ranking, enkel per seizoen bijgewerkt).
-Concreet gemeld voorbeeld: Nico Recour / Carl Ide kregen een matchup-edge van
-+0.67 (in ons voordeel) tegen L'hoëst Bert / Van Rossom Sam, terwijl Bert en
-Sam een HOGERE padelstats-rating hadden dan Nico en Carl — het cijfer klopte
-dus niet met de eigen padelstat-vergelijking, omdat twee VERSCHILLENDE
-meetsystemen tegenover elkaar gezet werden.
-
-Fix: optimize_lineup_vs_scenario() kiest nu PER BORD een consistente schaal:
-    - is de padelstats-rating van BEIDE tegenstanders op dat bord gekend
-      (opponent_ratings, sinds PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15
-      automatisch opgehaald voor elke tegenstander) -> gebruik padelstat voor
-      BEIDE zijden (ons via player_ratings, hen via opponent_ratings);
-    - anders -> val voor BEIDE zijden terug op het officiële klassement
-      (player_official_ranks voor ons, de "ranking"-tekst op het bord voor
-      hen), zodat er nooit twee verschillende schalen tegen elkaar
-      afgewogen worden.
+strength maar voor "hen" het OFFICIËLE TVL-klassement — twee VERSCHILLENDE
+meetsystemen tegenover elkaar. Fix: optimize_lineup_vs_scenario() kiest nu
+PER BORD een consistente schaal (beide padelstat, of beide officieel).
 
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17 (op verzoek van Kim,
@@ -82,77 +53,62 @@ spelers match1/match2")
 --------------------------------------------------------------------------
 BUG (opgelost): optimize_lineup_vs_scenario() zocht voor elke kandidaat-
 koppelverdeling van ONS naar de SCORE-MAXIMALISERENDE toewijzing van onze
-paren aan hun borden (`itertools.permutations(range(n_boards), n)`, alle
-mogelijke toewijzingen doorlopen en de beste kiezen). Dat is GEEN geldige
-weergave van de werkelijkheid: in het echte interclub-reglement leggen BEIDE
-teams onafhankelijk van elkaar hun eigen bordvolgorde vast (sterkste paar op
-Match 1, aflopend volgens het OFFICIËLE klassement), en wordt bord-tegen-
-bord gespeeld (Match 1 vs Match 1, Match 2 vs Match 2, ...). Er is dus GEEN
-vrije keuze om, voor eenzelfde koppelverdeling, ons zwakste paar tegen hun
-zwakste bord te laten uitkomen als dat toevallig een hogere score oplevert -
-die vrijheid bestond in de code, maar niet in de werkelijkheid. De regel
-werd voorheen enkel gebruikt om ACHTERAF een "Match N"-label op te plakken
-in de Rotatieplanner-UI (_rank_pairs_by_official_rank in page_lineup_lab.py),
-niet om de score zelf te bepalen.
-
-Fix: optimize_lineup_vs_scenario() past de regel nu ZELF, INTERN toe, voor
-beide zijden onafhankelijk:
-  1. Hun borden (opponent_boards) worden ALTIJD eerst herordend op hun
-     OFFICIËLE klassement (_sort_boards_by_opponent_official_rank) - los van
-     de volgorde waarin ze zijn meegegeven (historische data heeft immers
-     geen gegarandeerde sterkte-volgorde; board_position uit
-     opponent_scout.py is enkel de tabelvolgorde op het uitslagenblad, geen
-     bevestigde ranking).
-  2. Voor ELKE kandidaat-koppelverdeling van ons wordt ONZE bordvolgorde
-     ZELF ook bepaald via de officiële regel (rank_pairs_by_official_rank,
-     nu een publieke, canonieke functie i.p.v. een privé-kopie in
-     page_lineup_lab.py), op basis van player_official_ranks (met
-     player_ratings als terugval).
-  3. Bord i (ons, na herordening) speelt VERPLICHT tegen bord i (hen, na
-     herordening) - geen enkele andere toewijzing wordt nog overwogen.
-Gevolg: de itertools.permutations-zoektocht is volledig verdwenen (sneller
-EN correcter). De berekende scores kunnen HOGER of LAGER uitvallen dan
-voorheen (meestal iets lager, omdat de kunstmatige "beste toewijzing"-vrijheid
-wegvalt) - dat is een BEWUSTE, gewenste wijziging, geen regressie: de
-getoonde cijfers weerspiegelen nu een opstelling die ook echt, reglementair
-zo gespeeld zou worden.
+paren aan hun borden — een vrijheid die in het echte interclub-reglement
+niet bestaat. Fix: de OFFICIËLE regel wordt nu ZELF, intern, consequent
+toegepast aan BEIDE kanten (bordvolgorde bepaald door officieel klassement,
+Bord i vs Bord i verplicht) — zie ook de verdere verfijning hieronder.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_ALL_THEORETICAL_OPPONENT_SCENARIOS_2026-09-17 (op verzoek van
-Kim: "ik wil alle scenario's bekijken en voor elk van hun opstellingen, onze
-beste opstelling daar tegenover zetten")
+PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17 (op verzoek van Kim, na
+het aanleveren van Reglement_Padel_Senior_Cup.pdf — kritieke correctie)
 --------------------------------------------------------------------------
-NIEUW (geen bugfix): tot nu toe kon de "Opstelling-scenario's"-sectie in
-page_lineup_lab.py uitsluitend rekenen op HISTORISCH AL GESPEELDE
-opstellingen van de tegenstander (bundle["previous_fixtures"], typisch maar
-1-3 stuks beschikbaar dit seizoen). Kim wil ALLE THEORETISCH MOGELIJKE
-opstellingen bekijken die de tegenstander zou kunnen kiezen uit een door Kim
-aangeduide groep spelers, niet enkel wat ze al eerder deden.
+BUG (opgelost): rank_pairs_by_official_rank() vergeleek duo's op basis van
+het HOOGSTE individuele klassement van de 2 spelers in dat duo
+(`max(official_ranks.get(pid) for pid in pair)`). Het officiële reglement
+(art. 6.6): "Tijdens de ontmoeting worden duo's samengesteld op basis van
+de SOM van de klassementen van de spelers per rotatie [...] Hierbij moet in
+match 1/3 het sterke duo aantreden en in match 2/4 het zwakkere duo." — de
+vergelijking gebeurt dus op de SOM van de 2 klassementen, niet op het
+hoogste van de twee. Bij twee spelers met klassement P200+P200 (som 400) en
+een ander duo met P350+P50 (som 400): deze zouden voorheen VERSCHILLEND
+geordend kunnen worden (max 200 vs max 350) terwijl het reglement ze als
+GELIJK beschouwt (som 400 = som 400, "mag de ploeg kiezen").
+Fix: rank_pairs_by_official_rank() gebruikt nu SUM i.p.v. MAX.
 
-Nieuwe functies:
-  - _all_perfect_matchings(players): exhaustieve enumeratie van alle manieren
-    om een (even) groep spelers in paren te verdelen. Zuivere combinatoriek,
-    geen enkele aanname over sterkte.
-  - generate_all_opponent_lineups(opponent_players, total_boards,
-    opponent_official_ranks, max_variants): bouwt hierop verder en past de
-    officiële regel toe (zie hierboven) om, per mogelijke koppelverdeling,
-    de (of bij gelijke sterkte: ALLE) geldige bordvolgorde(s) te bepalen -
-    inclusief het geval waarbij de tegenstander MEER spelers ter beschikking
-    heeft dan er wedstrijden zijn (dan wordt ook "wie rust" als aparte
-    keuze meegeteld, via itertools.combinations). Geeft resultaten terug in
-    het bestaande "boards"-formaat, zodat ze DIRECT aan
-    optimize_lineup_vs_scenario() doorgegeven kunnen worden - exact dezelfde
-    functie die ook de historische scenario's en de Rotatieplanner al
-    gebruiken, nu dus ook hergebruikt voor volledig theoretische scenario's.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_RULES_2026-09-17 (op verzoek van Kim, 3 concrete
+vragen na het aanleveren van Reglement_Padel_Senior_Cup.pdf)
+--------------------------------------------------------------------------
+Kim's vragen:
+  1. "paarverdelingen die niet aan de grenzen voldoen mag je uitsluiten en
+     niet tonen" — combinaties buiten de toegelaten punten-grenzen PER
+     ROTATIE (art. 2.1/9.3.3/9.3.4) moeten uitgesloten worden.
+  2. "match 1 van de rotatie = sterkste opstelling" — bevestigd/verfijnd:
+     dit geldt PER ROTATIE (2 gelijktijdige wedstrijden), niet over de hele
+     ontmoeting heen — zie PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17
+     hierboven voor de bijhorende correctie (som i.p.v. max).
+  3. Andere tornooien (Mixed, Open, Vrouwen) later — parameters moeten
+     zichtbaar/instelbaar zijn per tornooiversie (zie tournament_rules.py +
+     page_lineup_lab.py:_render_tournament_rules_selector()).
 
-Kim's eigen, bevestigde rekensom (zie het gesprek): bij N spelers, allemaal
-gelijk geklasseerd (geen afdwingbare volgorde), is het aantal opstellingen
-N!/2^(N/2); zodra klassementen wél overal een volgorde afdwingen, valt dit
-terug tot enkel (N-1)!! (de bordvolgorde ligt dan vast per koppelverdeling).
-Beide grensgevallen worden door generate_all_opponent_lineups() correct
-gegenereerd (volledig gelijke/onbekende sterkte -> alle ordeningen; volledig
-verschillende sterkte -> exact 1 ordening per koppelverdeling; gemengde
-gevallen -> alles ertussenin, per sterkte-groep apart).
+Nieuwe functies (gebruiken tournament_rules.py, optioneel — bestaande
+aanroepers die geen `tournament_rules`/`rules` meegeven blijven ONGEWIJZIGD
+werken, geen breaking change):
+  - group_boards_into_rotations(): groepeert een geordende lijst borden 2-aan-
+    2 (rotatie 1 = index 0-1, rotatie 2 = index 2-3, ...) — reglement 8.7.1:
+    "Er worden 4 wedstrijden gespeeld in 2 rotaties (van telkens 2
+    wedstrijden gelijktijdig op 2 terreinen)."
+  - evaluate_rotation(): voor 2 duo's (1 rotatie) samen: berekent de SOM van
+    alle 4 spelers hun klassement, bepaalt de juiste volgorde (sterkste duo
+    eerst, som-gebaseerd) en toetst het totaal aan de reglementsgrenzen
+    (tournament_rules.rotation_points_bounds_ok). Retourneert ook WAAROM een
+    rotatie ongeldig is, zodat de UI dat kan tonen i.p.v. enkel te verbergen.
+  - filter_and_order_lineup_by_rotations(): past het bovenstaande toe op een
+    VOLLEDIGE koppelverdeling (alle rotaties van 1 ontmoeting ineens):
+    ordent élke rotatie intern (som-gebaseerd) en geeft aan of de VOLLEDIGE
+    koppelverdeling geldig is (alle rotaties binnen de grenzen) — gebruikt
+    door optimize_lineup_vs_scenario() om ongeldige kandidaten uit te
+    sluiten (vraag 1) vóór ze uberhaupt gescoord worden.
 """
 import heapq
 import itertools
@@ -378,16 +334,7 @@ def make_pair_score_fn(
     """
     PADEL_ANALYSIS_SYNERGY_CONFIDENCE_SHRINKAGE_2026-09-15: score voor een
     koppel (a,b) via confidence-shrinkage in plaats van een harde
-    aan/uit-drempel:
-        weight = known_matches / (known_matches + confidence_k)
-        score  = weight * paar_winrate + (1 - weight) * individueel_gemiddelde
-    Bij 0 gezamenlijke matches: enkel het individuele gemiddelde (of 0.5 als
-    ook dat ontbreekt). Bij veel gezamenlijke matches: nadert het
-    koppelresultaat zelf.
-
-    min_matches_for_synergy blijft bestaan voor achterwaartse compatibiliteit
-    (oude aanroepers geven dit nog mee) maar heeft geen effect meer op het
-    resultaat — de shrinkage regelt dit nu vloeiend i.p.v. met een harde knip.
+    aan/uit-drempel.
     """
     indiv_cache: Dict[str, Optional[float]] = {}
 
@@ -508,51 +455,183 @@ def score_actual_lineup(boards: List[dict], synergy_fn: Callable[[str, str], flo
 # ─────────────────────────────────────────────
 # Officiële bordvolgorde-regel (gedeeld: eigen kant EN tegenstander-kant)
 # ─────────────────────────────────────────────
+def _pair_strength_sum(pair, official_ranks: Dict[str, Optional[float]]) -> float:
+    """PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17: SOM van de
+    klassementen van de 2 spelers in het duo (reglement art. 6.6), NIET het
+    hoogste individuele klassement (dat was de vorige, foutieve conventie)."""
+    return sum((official_ranks.get(pid) or 0) for pid in pair)
+
+
 def rank_pairs_by_official_rank(pairs: List[frozenset], official_ranks: Dict[str, Optional[float]]) -> List[frozenset]:
     """PADEL_ANALYSIS_MATCH1_STRONGEST_RULE_2026-09-14 / PADEL_ANALYSIS_
-    OFFICIAL_BOARD_ORDER_FIX_2026-09-17: sorteert een lijst koppels (frozensets
-    van 2 speler-id's) aflopend op de sterkte van het paar (het HOOGSTE
-    officiële klassement van de twee spelers in dat paar) - het paar met de
-    sterkste speler komt eerst (= 'Match 1' / Bord 1).
+    OFFICIAL_BOARD_ORDER_FIX_2026-09-17 / PADEL_ANALYSIS_SUM_BASED_PAIR_
+    STRENGTH_2026-09-17: sorteert een lijst koppels (frozensets van 2
+    speler-id's) aflopend op de SOM van de klassementen van de 2 spelers in
+    dat duo (art. 6.6: "op basis van de som van de klassementen van de
+    spelers") — het duo met de hoogste som komt eerst (= 'Match 1'/'Match 3'
+    / laagst genummerde bord van de rotatie).
 
-    Dit is de PUBLIEKE, canonieke versie (voorheen een privé-kopie
-    '_rank_pairs_by_official_rank' in page_lineup_lab.py, enkel gebruikt om
-    ACHTERAF een label op te plakken). Sinds PADEL_ANALYSIS_OFFICIAL_BOARD_
-    ORDER_FIX_2026-09-17 gebruikt optimize_lineup_vs_scenario() dezelfde
-    regel INTERN om de bordvolgorde zelf te bepalen (niet enkel voor de
-    latere UI-labeling) - vandaar de verhuizing naar hier, zodat er maar één
-    plek is die deze regel definieert."""
-    def pair_strength(pair):
-        return max((official_ranks.get(pid) or 0) for pid in pair)
-    return sorted(pairs, key=pair_strength, reverse=True)
+    LET OP: deze functie sorteert een VLAKKE lijst (globaal), wat voor een
+    ontmoeting van MEER dan 1 rotatie (>2 boards) niet meer overeenkomt met
+    het reglement — daar geldt de sterkste-eerst-regel PER ROTATIE apart,
+    niet over de hele ontmoeting heen (zie group_boards_into_rotations() /
+    evaluate_rotation() hieronder, PADEL_ANALYSIS_ROTATION_RULES_2026-09-17).
+    Deze functie blijft bestaan voor het eenvoudige/veelvoorkomende geval van
+    exact 1 rotation (2 boards, bv. de Rotatieplanner met 4 spelers) en voor
+    achterwaartse compatibiliteit."""
+    return sorted(pairs, key=lambda pair: _pair_strength_sum(pair, official_ranks), reverse=True)
 
 
 def _sort_boards_by_opponent_official_rank(opponent_boards: List[dict]) -> List[dict]:
-    """PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17.
+    """PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17, aangepast in
+    PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17.
 
-    Sorteert tegenstander-borden op HUN officiële klassement (het
-    'ranking'-veld per speler op dat bord), aflopend - het bord met de
-    sterkste tegenstander-speler komt eerst (= hun Bord 1).
+    Sorteert tegenstander-borden op de SOM van de officiële klassementen van
+    de 2 spelers op dat bord (aflopend) — het bord met de hoogste som komt
+    eerst (= hun Bord 1). Voorheen (PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_
+    2026-09-17, eerste versie) werd het MAXIMUM van de 2 spelers gebruikt;
+    dat is gecorrigeerd naar de SOM, consistent met art. 6.6 en met
+    rank_pairs_by_official_rank() hierboven.
 
-    Dit is bewust gebaseerd op het OFFICIËLE klassement (parse_ranking van
-    het 'ranking'-tekstveld), NIET op padelstats.be playing strength - de
-    regel zelf is een reglementair gegeven (gebaseerd op het officiële TVL-
-    klassement), terwijl padelstat elders enkel gebruikt wordt om de
-    verwachte MATCHUP-EDGE in te schatten (een aparte vraag: 'hoe sterk
-    verschillen twee gekoppelde borden van elkaar', niet 'wie moet op welk
-    bord staan').
-
-    Ontbreekt het 'ranking'-veld voor (een deel van) een bord, dan telt dat
-    bord als sterkte 0 voor de sortering - een ontbrekend klassement is geen
+    Ontbreekt het 'ranking'-veld voor (een deel van) een bord, dan telt die
+    speler als sterkte 0 voor de som — een ontbrekend klassement is geen
     reden om een bord kunstmatig hoger te plaatsen. Python's sort is stabiel,
     dus bij gelijke sterkte blijft de oorspronkelijke (meegegeven) volgorde
     behouden."""
     def strength(board):
         pair = board.get("opponent_pair", []) or []
         vals = [parse_ranking(p.get("ranking")) for p in pair]
-        vals = [v for v in vals if v is not None]
-        return max(vals) if vals else 0
+        return sum(v for v in vals if v is not None)
     return sorted(opponent_boards, key=strength, reverse=True)
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_ROTATION_RULES_2026-09-17: rotatie-gebaseerde regels
+# (punten-per-rotatie-grenzen + sterkste-duo-per-rotatie), op verzoek van
+# Kim na het aanleveren van Reglement_Padel_Senior_Cup.pdf.
+# ─────────────────────────────────────────────
+def group_boards_into_rotations(items: list, per_rotation: int = 2) -> List[list]:
+    """Groepeert een geordende lijst (borden, of paren) 2-aan-2 (of
+    `per_rotation`-aan-`per_rotation`) in opeenvolgende rotaties: rotatie 1 =
+    index 0..per_rotation-1, rotatie 2 = de volgende `per_rotation`, enz. —
+    reglement art. 8.7.1: "Er worden 4 wedstrijden gespeeld in 2 rotaties
+    (van telkens 2 wedstrijden gelijktijdig op 2 terreinen)."
+
+    Een onvolledige laatste groep (te weinig items voor een volle rotatie)
+    wordt WEL teruggegeven als aparte, kortere groep — de aanroeper
+    beslist zelf hoe daarmee om te gaan (bv. geen punten-check toepassen op
+    een onvolledige rotatie)."""
+    return [items[i:i + per_rotation] for i in range(0, len(items), per_rotation)]
+
+
+def evaluate_rotation(
+    duo_a: frozenset,
+    duo_b: frozenset,
+    official_ranks: Dict[str, Optional[float]],
+    rules: Optional[dict] = None,
+) -> dict:
+    """PADEL_ANALYSIS_ROTATION_RULES_2026-09-17.
+
+    Evalueert 1 volledige rotatie (2 duo's = 2 gelijktijdige wedstrijden,
+    4 spelers samen) tegen het reglement:
+      1. bepaalt welk duo het sterkste is (SOM van de 2 klassementen per
+         duo, art. 6.6) -> dat duo hoort op het laagst genummerde bord van
+         deze rotatie (Match 1 of Match 3);
+      2. berekent de SOM van ALLE 4 spelers samen (de "punten per rotatie")
+         en toetst die aan `rules` (tournament_rules.get_afdeling_rules(...),
+         of None = geen check/altijd geldig).
+
+    Bij gelijke som (`duo_a` en `duo_b` even sterk): art. 6.6 laatste zin
+    ("mag de ploeg kiezen welk duo waar opgesteld wordt") — de MEEGEGEVEN
+    volgorde (duo_a eerst) wordt in dat geval behouden, geen dwingende
+    herschikking nodig.
+
+    Returns:
+        {
+          "ordered_pairs": [sterkste_of_gelijk_duo, andere_duo],
+          "total_points": float,  # som van alle 4 spelers samen
+          "valid": bool,          # False als rules gegeven en buiten bereik
+          "reason": str,          # leesbare toelichting (ook bij valid=True)
+        }
+    """
+    sum_a = _pair_strength_sum(duo_a, official_ranks)
+    sum_b = _pair_strength_sum(duo_b, official_ranks)
+    ordered = [duo_a, duo_b] if sum_a >= sum_b else [duo_b, duo_a]
+    total_points = sum_a + sum_b
+
+    valid, reason = True, f"{total_points:.0f} punten (geen reglement-check actief)"
+    if rules is not None:
+        try:
+            import tournament_rules as _tr
+            valid, reason = _tr.rotation_points_bounds_ok(total_points, rules)
+        except Exception:
+            # tournament_rules niet beschikbaar of onverwachte fout -> nooit
+            # blokkeren op een defensieve import-fout, gewoon niet filteren.
+            valid, reason = True, f"{total_points:.0f} punten (reglement-check niet beschikbaar)"
+
+    return {
+        "ordered_pairs": ordered,
+        "total_points": total_points,
+        "valid": valid,
+        "reason": reason,
+    }
+
+
+def filter_and_order_lineup_by_rotations(
+    pairs: List[frozenset],
+    official_ranks: Dict[str, Optional[float]],
+    rules: Optional[dict] = None,
+) -> dict:
+    """PADEL_ANALYSIS_ROTATION_RULES_2026-09-17.
+
+    Past evaluate_rotation() toe op een VOLLEDIGE koppelverdeling (alle
+    rotaties van 1 ontmoeting ineens, in de volgorde waarin `pairs` werd
+    meegegeven — groepering via group_boards_into_rotations()).
+
+    Gebruikt door optimize_lineup_vs_scenario() om, VOORDAT er gescoord
+    wordt, kandidaten uit te sluiten waarvan minstens 1 rotatie buiten de
+    toegelaten puntengrenzen valt (Kim's vraag 1: "paarverdelingen die niet
+    aan de grenzen voldoen mag je uitsluiten en niet tonen").
+
+    Returns:
+        {
+          "ordered_pairs": [...],  # ALLE paren, in de juiste bordvolgorde
+                                    # (per rotatie: sterkste eerst)
+          "rotations": [ {ordered_pairs, total_points, valid, reason}, ... ],
+          "all_valid": bool,       # False zodra 1 rotatie ongeldig is
+        }
+
+    Een eventuele onvolledige laatste "rotatie" (oneven totaal aantal paren
+    — zou in de praktijk niet mogen voorkomen bij Senior Cup, maar dit blijft
+    defensief werken voor andere/toekomstige tornooien met een andere
+    structuur) wordt NOOIT als ongeldig beschouwd puur op basis van de
+    puntengrens (er is geen "2de duo" om de som mee te vormen)."""
+    rotations_raw = group_boards_into_rotations(pairs, per_rotation=2)
+    ordered_pairs: List[frozenset] = []
+    rotation_results = []
+    all_valid = True
+
+    for group in rotations_raw:
+        if len(group) < 2:
+            # Onvolledige rotatie (oneven totaal aantal paren) -- geen
+            # zinvolle som-check mogelijk, gewoon ongewijzigd doorgeven.
+            ordered_pairs.extend(group)
+            rotation_results.append({
+                "ordered_pairs": group, "total_points": None,
+                "valid": True, "reason": "onvolledige rotatie, geen check mogelijk",
+            })
+            continue
+        result = evaluate_rotation(group[0], group[1], official_ranks, rules)
+        ordered_pairs.extend(result["ordered_pairs"])
+        rotation_results.append(result)
+        if not result["valid"]:
+            all_valid = False
+
+    return {
+        "ordered_pairs": ordered_pairs,
+        "rotations": rotation_results,
+        "all_valid": all_valid,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -576,8 +655,7 @@ def matchup_edge(our_ranks: List[Optional[float]], their_ranks: List[Optional[fl
 
     KRITIEK: our_ranks en their_ranks MOETEN op dezelfde schaal/metriek
     zitten (beide padelstat, OF beide officieel klassement) — zie
-    PADEL_ANALYSIS_MATCHUP_SCALE_CONSISTENCY_2026-09-15. Deze functie zelf
-    doet geen schaalkeuze; dat gebeurt in optimize_lineup_vs_scenario().
+    PADEL_ANALYSIS_MATCHUP_SCALE_CONSISTENCY_2026-09-15.
 
     HOGER GETAL = STERKER. Genormaliseerd zodat het ongeveer in dezelfde
     grootte-orde ligt als een winrate-verschil (0–1-achtig).
@@ -631,45 +709,41 @@ def optimize_lineup_vs_scenario(
     opponent_ratings: Optional[Dict[str, Optional[float]]] = None,
     top_n: int = 3,
     candidate_pool: int = 30,
+    tournament_rules_dict: Optional[dict] = None,
 ) -> Tuple[List[dict], bool]:
     """
     Zoekt, voor een SPECIFIEK tegenstander-scenario (hun koppels, bv. uit een
-    eerdere wedstrijd OF een volledig theoretisch scenario - zie
-    generate_all_opponent_lineups()), de beste koppelvorming aan ONZE kant.
+    eerdere wedstrijd OF een volledig theoretisch scenario), de beste
+    koppelvorming aan ONZE kant.
 
-    PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17 (kritieke bugfix, zie
-    moduledocstring voor het volledige, gemelde probleem): bepaalt NIET
-    LANGER de score-maximaliserende toewijzing van onze paren aan hun borden
-    via een vrije zoektocht (dat overtrad de echte 'sterkste paar op Match 1'
-    -regel). In plaats daarvan wordt de OFFICIËLE regel nu ZELF, intern,
-    consequent toegepast aan BEIDE kanten:
-      1. hun borden worden herordend op HUN officiële klassement (aflopend);
-      2. voor elke kandidaat-koppelverdeling van ons wordt ONZE bordvolgorde
-         ZELF ook bepaald via diezelfde regel (op player_official_ranks, met
-         player_ratings als terugval);
-      3. bord i (ons) speelt VERPLICHT tegen bord i (hen) - geen andere
-         toewijzing wordt nog overwogen.
-    Dit is sneller (geen permutatie-zoektocht meer nodig) EN correcter.
+    PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17 / PADEL_ANALYSIS_SUM_
+    BASED_PAIR_STRENGTH_2026-09-17 / PADEL_ANALYSIS_ROTATION_RULES_2026-09-17:
+    de bordvolgorde ligt VERPLICHT vast via het officiële klassement (SOM per
+    duo, PER ROTATIE van 2 borden — niet globaal over de hele ontmoeting), en
+    kandidaten waarvan minstens 1 rotatie buiten de reglementair toegelaten
+    puntengrenzen valt, worden UITGESLOTEN (niet enkel gelabeld) zodra
+    `tournament_rules_dict` is meegegeven.
+
+    tournament_rules_dict: optioneel, het resultaat van
+        tournament_rules.get_afdeling_rules(tornooi, categorie, afdeling)
+    Wordt dit NIET meegegeven (None, standaard): GEEN filtering op
+    puntengrenzen — volledig achterwaarts compatibel met bestaande
+    aanroepers die nog geen tornooi/afdeling geselecteerd hebben.
 
     opponent_boards: lijst van {"opponent_pair": [{"name","user_id","ranking"(optioneel)}, ...]}
     player_ratings: pid -> padelstats.be playing strength voor ONZE spelers
-      (HOGER = STERKER). Wordt gebruikt wanneer voor een bord ook de
-      tegenstander-padelstat gekend is (zie opponent_ratings) - enkel voor de
-      EDGE-berekening, niet voor de bordvolgorde zelf.
+      (HOGER = STERKER). Enkel gebruikt voor de EDGE-berekening.
     player_official_ranks: pid -> officieel TVL-klassement voor ONZE spelers.
-      Bepaalt ONZE bordvolgorde (stap 2 hierboven), en dient daarnaast als
-      terugval-schaal voor de edge-berekening wanneer de tegenstander geen
-      padelstat-rating heeft. Ontbreekt dit, dan valt de code terug op
-      player_ratings voor BEIDE doeleinden (oud gedrag, met het risico op
-      een schaalmismatch bij de edge - zie PADEL_ANALYSIS_MATCHUP_SCALE_
-      CONSISTENCY_2026-09-15).
+      Bepaalt ONZE bordvolgorde EN de reglement-puntensom, en dient daarnaast
+      als terugval-schaal voor de edge-berekening.
     opponent_ratings: user_id (van TEGENSTANDER-spelers) -> padelstats.be
-      playing strength, enkel gebruikt voor de EDGE-berekening (niet voor de
-      bordvolgorde, die is altijd op het OFFICIËLE klassement gebaseerd).
+      playing strength, enkel gebruikt voor de EDGE-berekening.
 
     Returns: (resultaten, truncated) — resultaten = lijst van
-      {"total_score", "assignment": [{"our_pair":(p1,p2), "synergy":.., "edge":.., "opponent_board":{...}}]}
-      gesorteerd van beste naar slechtste, max top_n.
+      {"total_score", "assignment": [...], "rotations": [...], "all_valid": bool}
+      gesorteerd van beste naar slechtste, max top_n. Kandidaten met
+      all_valid=False worden NOOIT teruggegeven (uitgesloten, niet enkel
+      gemarkeerd) zodra tournament_rules_dict is meegegeven.
     """
     candidates, truncated = optimize_lineup(players, required, own_synergy_fn, top_n=candidate_pool)
     if not candidates:
@@ -682,7 +756,19 @@ def optimize_lineup_vs_scenario(
     results = []
     for synergy_total, pairs in candidates:
         pair_list = list(pairs)
-        ordered_our_pairs = rank_pairs_by_official_rank(pair_list, fallback_our_ranks)
+
+        # PADEL_ANALYSIS_ROTATION_RULES_2026-09-17: eerst PER ROTATIE (2
+        # paren tegelijk) ordenen én toetsen aan de puntengrenzen, i.p.v. de
+        # oude, globale rank_pairs_by_official_rank()-sortering over ALLE
+        # paren ineens (die geen rekening hield met de rotatie-indeling of
+        # de puntengrenzen).
+        rotation_eval = filter_and_order_lineup_by_rotations(
+            pair_list, fallback_our_ranks, rules=tournament_rules_dict,
+        )
+        if tournament_rules_dict is not None and not rotation_eval["all_valid"]:
+            continue  # Kim's vraag 1: uitsluiten, niet tonen.
+
+        ordered_our_pairs = rotation_eval["ordered_pairs"]
         n = min(len(ordered_our_pairs), n_boards)
         if n == 0:
             continue
@@ -708,7 +794,12 @@ def optimize_lineup_vs_scenario(
                 "edge_scale": scale,
                 "opponent_board": board,
             })
-        results.append({"total_score": round(total, 3), "assignment": assignment})
+        results.append({
+            "total_score": round(total, 3),
+            "assignment": assignment,
+            "rotations": rotation_eval["rotations"],
+            "all_valid": rotation_eval["all_valid"],
+        })
 
     seen = set()
     deduped = []
@@ -731,8 +822,7 @@ def _all_perfect_matchings(players: List[str]) -> List[List[frozenset]]:
 
     Enkel bedoeld voor kleine groepen (praktisch tot een 10-tal spelers) -
     gebruikt om ALLE theoretisch mogelijke tegenstander-opstellingen te
-    genereren; die groepen tellen in de praktijk typisch 4-8 spelers.
-    Complexiteit: (n-1)!! resultaten, elk O(n) om op te bouwen."""
+    genereren; die groepen tellen in de praktijk typisch 4-8 spelers."""
     if len(players) == 0:
         return [[]]
     if len(players) % 2 != 0:
@@ -760,43 +850,11 @@ def generate_all_opponent_lineups(
     van Kim): genereert ALLE theoretisch mogelijke opstellingen die de
     tegenstander met `opponent_players` zou kunnen opstellen voor
     `total_boards` wedstrijden, MET toepassing van de officiële regel
-    (sterkste paar op Match 1, aflopend per officieel klassement).
+    (sterkste paar op Match 1, aflopend per officieel klassement, SOM-
+    gebaseerd sinds PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17).
 
-    opponent_players: [{"user_id":.., "name":..}, ...] - de spelers die Kim
-        aanduidt als 'komt waarschijnlijk in aanmerking' (bv. de volledige
-        gekende roster, of een handmatig ingeperkte selectie - net zoals bij
-        'Beschikbare eigen spelers' voor onze eigen kant).
-    total_boards: hoeveel wedstrijden er gespeeld worden (dus 2*total_boards
-        spelers effectief op het veld; is opponent_players groter, dan wordt
-        ELKE mogelijke keuze wie er rust OOK meegeteld/gegenereerd, via
-        itertools.combinations - exact de "wie speelt" x "hoe verdelen we
-        hen"-vermenigvuldiging die Kim zelf berekende).
-    opponent_official_ranks: user_id -> officieel klassement (hoger=sterker).
-        Ontbreekt dit voor (een deel van) de groep, dan worden paren met een
-        onbekende sterkte behandeld als "gelijk aan elkaar" (de regel legt
-        dan geen volgorde op TUSSEN HEN ONDERLING, wel nog t.o.v. paren met
-        een gekende, hogere sterkte) - ALLE onderling geldige volgordes
-        tussen zulke gelijk-sterke paren worden als aparte varianten
-        teruggegeven. Dit reproduceert precies Kim's eigen, bevestigde
-        wiskunde: bij volledig gelijke/onbekende sterkte is het aantal
-        opstellingen N!/2^(N/2); zodra de regel overal een volgorde afdwingt,
-        valt dit terug tot (N-1)!! - en bij een gemengde groep (sommige
-        spelers wel, andere geen gekend klassement) valt het resultaat
-        ergens daartussenin, per sterkte-groep apart geteld.
-
-    Returns (lineups, meta):
-        lineups: lijst van "boards"-lijsten, ELK in het bestaande, standaard
-            formaat [{"opponent_pair": [{"name","user_id","ranking"}, ...]}, ...],
-            reeds in bordvolgorde (index 0 = Bord 1) volgens de officiële
-            regel (of, bij gelijke/onbekende sterkte, in een van de geldige
-            volgordes) - rechtstreeks bruikbaar als `opponent_boards`-
-            argument voor optimize_lineup_vs_scenario().
-        meta: {"total_theoretical": int, "truncated": bool,
-               "players_used": int, "resting_combinations": int}
-            "total_theoretical" is het WERKELIJKE, volledige aantal (ook als
-            er door max_variants uiteindelijk minder gematerialiseerd/
-            teruggegeven worden), zodat de UI altijd het eerlijke totaal kan
-            tonen, ook wanneer niet alles berekend wordt.
+    Returns (lineups, meta) — zie eerdere versie voor volledige details.
+    Elke lineup is reeds gesorteerd op sterkte via de SOM-conventie.
     """
     ids = [str(p["user_id"]) for p in opponent_players]
     name_by_id = {str(p["user_id"]): p.get("name", str(p["user_id"])) for p in opponent_players}
@@ -817,9 +875,10 @@ def generate_all_opponent_lineups(
         matchings = _all_perfect_matchings(list(playing_ids))
         for matching in matchings:
             def _pair_strength(pair):
+                # PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17: som i.p.v. max.
                 vals = [rank_by_id.get(pid) for pid in pair]
-                vals = [v for v in vals if v is not None]
-                return max(vals) if vals else None
+                known = [v for v in vals if v is not None]
+                return sum(known) if known else None
 
             groups: Dict[Optional[float], List[frozenset]] = {}
             for pair in matching:
