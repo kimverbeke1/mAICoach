@@ -12,55 +12,51 @@ PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 loste de STRUCTURELE
 oorzaak op (discover_opponent_players() ontdekt sindsdien enkel nog
 interclub-tegenstanders, geen eenmalige tornooi-tegenstanders meer). Maar de
 al aangemaakte "ghost"-profielen van VOOR die fix bestaan nog gewoon in
-Firestore — bv. de 65 profielen die uit Anneleen Gallant's 18 jaar
-tornooihistoriek ontstonden (Scherpereel Ine, Declercq Charline, Claeys
-Bart, ...). Die maken de Spelers-lijst en elke multiselect ("wie speelt
-mee", "Beschikbare eigen spelers") onnodig lang, en dingen bovendien mee
-naar de beperkte padelstat-/klassement-capaciteit van elke CI-run (zie
-enrich_opponents.py, _prioritize()) — ook al is die competitie sinds de
-prioritering minder schadelijk, blijft de LIJST zelf onoverzichtelijk.
+Firestore, en maken de Spelers-lijst en elke multiselect onnodig lang.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17 (op verzoek van Kim, "de lijst
+van spelers is gigantisch geworden")
+--------------------------------------------------------------------------
+BUG (opgelost): naast enrich_opponents.py's automatische ontdekking
+(added_by="auto_opponent_discovery") bestaat er een TWEEDE, aparte bron van
+automatisch aangemaakte profielen: opponent_scout.py's "🔍 Tegenstander
+analyseren"-knop, gebruikt telkens Kim een nieuwe/nog niet gespeelde
+tegenstander bekijkt in "Volgende match". Elke keer de tegenstander-ploeg
+wijzigt (nieuwe rotatie, nieuwe poule), krijgen NIEUWE spelers een profiel
+via dit pad. Deze profielen kregen VOORHEEN geen enkele added_by-marker
+(zie opponent_scout.py's moduledocstring PADEL_ANALYSIS_SCOUT_PROFILE_
+INTEGRITY_2026-09-17), waardoor dit opruimscript ze structureel MISTE — dit
+verklaart waarom de Spelers-lijst bleef aangroeien ondanks eerdere opruiming.
+
+Fix: find_ghost_profiles() beschouwt nu BEIDE markers
+("auto_opponent_discovery" EN "opponent_scout") als "automatisch ontdekt,
+dus kandidaat voor opruiming" (mits de overige criteria hieronder ook
+voldaan zijn). Profielen met added_by="manual" (page_add_player.py, sinds
+dezelfde datum expliciet gezet) of HELEMAAL GEEN added_by-veld (oudere,
+van-vóór-deze-fix handmatige profielen -- veilig behandeld als "onbekende
+oorsprong, dus NIET opruimen") worden nooit aangeraakt.
 
 --------------------------------------------------------------------------
 WAT DIT SCRIPT WEL EN NIET VERWIJDERT
 --------------------------------------------------------------------------
 Verwijderd wordt UITSLUITEND een profiel dat:
-  1. added_by == "auto_opponent_discovery" (dus NOOIT een profiel dat je
-     zelf via '➕ Speler toevoegen' hebt aangemaakt, en NOOIT je eigen
-     'home'-profiel — die hebben dat veld niet);
-  2. GEEN matches heeft op het bijhorende players-document (dus nooit
-     effectief gescraped/gespeeld tegen een van je eigen spelers is
-     opgeslagen; puur een naam-registratie);
-  3. GEEN padelstat-rating en GEEN klassement_history heeft (dus geen
-     enkel teken van eerdere, succesvolle verrijking);
-  4. NIET de opgeslagen poule_reeks_url_manual heeft ingesteld (extra
-     veiligheidsmarge: een handmatig ingestelde poule-URL wijst op bewuste
-     betrokkenheid van deze speler bij een lopende analyse).
-  5. Oud genoeg is: als het profiel een discovered_at-tijdstempel heeft
-     (toegevoegd sinds deze cleanup-fix), moet dat MINSTENS
-     --min-age-days (standaard 3) dagen oud zijn. Dat voorkomt dat een
-     zonet ontdekte, LEGITIEME interclub-tegenstander per ongeluk verwijderd
-     wordt vlak voordat zijn/haar matchdata in een volgende CI-run
-     opgehaald had kunnen worden. Ontbreekt discovered_at (profiel van
-     vóór deze fix), dan wordt de leeftijdscheck overgeslagen — die
-     profielen zijn per definitie al oud genoeg.
+  1. added_by in {"auto_opponent_discovery", "opponent_scout"} — dus NOOIT
+     een profiel zonder added_by-veld (onbekende oorsprong -> niet
+     aanraken) en NOOIT added_by="manual";
+  2. GEEN matches heeft op het bijhorende players-document;
+  3. GEEN padelstat-rating en GEEN klassement_history heeft;
+  4. NIET de opgeslagen poule_reeks_url_manual heeft ingesteld;
+  5. Oud genoeg is (discovered_at ontbreekt OF ouder dan --min-age-days).
 
-Standaard draait dit script in --dry-run: het toont enkel WELKE profielen
-verwijderd zouden worden, zonder iets te wissen. Pas met --execute wordt er
-ook effectief verwijderd (uit zowel player_profiles als players).
+Standaard draait dit script in --dry-run. Pas met --execute wordt er ook
+effectief verwijderd (uit zowel player_profiles als players).
 
 --------------------------------------------------------------------------
 GEBRUIK
 --------------------------------------------------------------------------
-    # Eerst altijd bekijken wat er verwijderd zou worden:
     python cleanup_ghost_profiles.py --dry-run
-
-    # Pas als de lijst er goed uitziet, echt uitvoeren:
     python cleanup_ghost_profiles.py --execute
-
-    # Optioneel: enkel spookprofielen bekijken die via een specifieke eigen
-    # speler ontdekt werden (handig om bv. enkel Anneleens ruis op te
-    # ruimen):
-    python cleanup_ghost_profiles.py --dry-run --discovered-via 1759548
 """
 
 from __future__ import annotations
@@ -71,7 +67,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-# --- path setup: zelfde patroon als scrape_player.py ---
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
 for _p in [str(_HERE), str(_ROOT)]:
@@ -83,6 +78,11 @@ import firebase_service as fb  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_AGE_DAYS = 3
+
+# PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17: BEIDE markers gelden als
+# "automatisch ontdekt, dus kandidaat voor opruiming" -- added_by="manual"
+# of een ontbrekend added_by-veld worden NOOIT als kandidaat beschouwd.
+AUTO_DISCOVERED_MARKERS = {"auto_opponent_discovery", "opponent_scout"}
 
 
 def _norm_id(value) -> str:
@@ -125,11 +125,9 @@ def _home_player_id() -> Optional[str]:
 
 def find_ghost_profiles(
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
-    discovered_via: Optional[str] = None,
 ) -> list:
     """Vindt alle profielen die aan ALLE criteria in de moduledocstring
-    voldoen. Returns een lijst van dicts met diagnose-info (player_id, naam,
-    reden waarom veilig, discovered_at)."""
+    voldoen. Returns een lijst van dicts met diagnose-info."""
     now = datetime.now(timezone.utc)
     home_id = _home_player_id()
     profiles = _all_profiles()
@@ -141,7 +139,9 @@ def find_ghost_profiles(
             continue
         if home_id and player_id == home_id:
             continue
-        if profile.get("added_by") != "auto_opponent_discovery":
+        # PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17: uitgebreid van enkel
+        # "auto_opponent_discovery" naar BEIDE automatische markers.
+        if profile.get("added_by") not in AUTO_DISCOVERED_MARKERS:
             continue
         if (profile.get("poule_reeks_url_manual") or "").strip():
             continue
@@ -175,6 +175,7 @@ def find_ghost_profiles(
             "player_id": player_id,
             "naam": profile.get("display_name") or "(geen naam)",
             "club": profile.get("club") or "",
+            "added_by": profile.get("added_by"),
             "discovered_at": discovered_at_raw or "onbekend (van vóór deze fix)",
         })
 
@@ -196,11 +197,9 @@ def delete_ghost_profiles(kandidaten: list) -> dict:
         try:
             fb.db.collection(fb.PLAYERS_COLLECTION).document(pid).delete()
         except Exception as e:  # noqa: BLE001
-            # Het players-document bestaat mogelijk niet (nooit gescraped) -
-            # dat is geen fout, enkel het profiel verwijderen was al genoeg.
             logger.debug(f"[{pid}] Geen players-document om te verwijderen ({e}).")
         samenvatting["verwijderd"] += 1
-        logger.info(f"[{pid}] Verwijderd: {k['naam']}")
+        logger.info(f"[{pid}] Verwijderd: {k['naam']} (added_by={k['added_by']})")
     return samenvatting
 
 
@@ -228,7 +227,7 @@ if __name__ == "__main__":
 
     print(f"\n{len(kandidaten)} spookprofiel(en) gevonden:\n")
     for k in sorted(kandidaten, key=lambda x: x["naam"]):
-        print(f"  {k['player_id']:<12} {k['naam']:<30} club={k['club'] or '-':<20} discovered_at={k['discovered_at']}")
+        print(f"  {k['player_id']:<12} {k['naam']:<30} club={k['club'] or '-':<20} added_by={k['added_by']:<22} discovered_at={k['discovered_at']}")
 
     if not args.execute:
         print(

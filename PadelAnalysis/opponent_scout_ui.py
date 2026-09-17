@@ -30,42 +30,36 @@ BUG/ONTBREKENDE STAP (opgelost): na het toevoegen van een tegenstander-ploeg
 verschillende speelsters onvolledig: geen padelstat playing strength, soms
 NUL matchhistoriek, bij sommigen ook geen huidig klassement. "Verversen"
 loste dit niet op. Drie samenvallende oorzaken:
-
   1. _run_scout_and_scrape() riep NERGENS de padelstats.be-scraper aan.
-     Dat gebeurde tot nu enkel in de aparte GitHub Actions-workflow
-     (ci_scrape_all.py -> enrich_opponents.py), niet in deze lokale
-     "Tegenstander analyseren"-knop. Er was dus geen enkele lokale manier
-     om padelstat op te halen voor een tegenstander-ploeg.
-
   2. scrape_new_opponent_players() (opponent_scout.py) scrapet UITSLUITEND
-     spelers zonder bestaand profiel:
-         existing = fb.get_player_profile(p["user_id"])
-         if not existing: to_scrape.append(p)
-     Zodra een speelster ÉÉN KEER (ook onvolledig) gescrapet is, heeft ze
-     een profiel en wordt ze bij elke volgende "Tegenstander analyseren"
-     of "verversen" STIL OVERGESLAGEN -- ook als haar matchhistoriek leeg
-     bleef of haar klassement nooit opgehaald werd. Dit verklaart waarom
-     verversen niet hielp: de speelsters die het probleem hadden, waren
-     precies degene die de refresh-logica als "al gekend, niets te doen"
-     beschouwde.
-
-  3. lookback_periods stond hardcoded op 1 (enkel de huidige periode). Als
-     de relevante interclubmatch van een speelster niet in de ALLEREERST
-     gevonden periode zat, bleef haar matchhistoriek voor deze poule leeg.
-
+     spelers zonder bestaand profiel.
+  3. lookback_periods stond hardcoded op 1 (enkel de huidige periode).
 Fix: een nieuwe, expliciete "Ververs alles voor deze ploeg"-knop
 (render_team_refresh_button) die voor ALLE spelers in de tegenstander-
-roster (niet enkel de 'onbekende'):
-  - matchdata scrapet met een RUIMERE lookback (standaard 3 periodes,
-    force_full_refresh optioneel), ongeacht of er al een profiel bestaat;
-  - de padelstats.be playing strength ophaalt/vernieuwt;
-  - de klassementshistoriek ophaalt/vernieuwt.
-Dit is een APARTE knop naast "Tegenstander analyseren" (die blijft
-ongewijzigd voor het snelle standaardpad): "Ververs alles" is trager omdat
-ze bewust NIETS overslaat, en is bedoeld voor precies dit scenario -- een
-ploeg die de eerste keer onvolledig binnenkwam.
-"""
+roster matchdata/padelstat/klassement herhaalt, ongeacht een bestaand
+profiel.
 
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17 (op verzoek van Kim,
+"we draaien in rondjes")
+--------------------------------------------------------------------------
+BUG (opgelost, kritiek): _run_full_team_refresh() riep voorheen aan:
+    fb.save_player_profile(pid, display_name=naam)
+Zoals uitgebreid toegelicht in de moduledocstring van opponent_scout.py:
+firebase_service.save_player_profile() zet "club" altijd expliciet in de
+payload (als None bij ontbreken), en merge=True beschermt enkel velden die
+NIET in de payload staan — dus een reeds bekende club werd bij ELKE klik op
+"🔄 Ververs alles voor deze ploeg" stilzwijgend overschreven naar leeg.
+Bovendien kreeg een via deze weg aangemaakt/aangeraakt profiel nooit een
+"added_by"-marker, waardoor cleanup_ghost_profiles.py deze spelers niet kon
+onderscheiden van bewust, handmatig toegevoegde spelers.
+
+Fix: _run_full_team_refresh() gebruikt nu dezelfde
+osc._ensure_profile_safe()-helper als opponent_scout.py
+(scrape_new_opponent_players()), zodat club behouden blijft en added_by
+consistent gezet wordt — één bron van waarheid voor deze logica i.p.v. ze
+hier te dupliceren.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -144,7 +138,6 @@ def _unknown_players(bundle: dict) -> list[dict]:
 
 def _has_incomplete_data(player_id: str) -> tuple[bool, list[str]]:
     """PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16.
-
     Beoordeelt of deze speler nog ONTBREKENDE data heeft, ONGEACHT of hij/zij
     al een profiel heeft (dat is precies wat de oude _is_known()-check niet
     deed). Returns (incompleet, redenen)."""
@@ -156,13 +149,11 @@ def _has_incomplete_data(player_id: str) -> tuple[bool, list[str]]:
         profile = fb.get_player_profile(player_id) or {}
     except Exception:
         profile = {}
-
     redenen = []
     if not doc.get("matches"):
         redenen.append("geen matchhistoriek")
     if not (doc.get("klassement_history") or profile.get("klassement_history")):
         redenen.append("geen klassementshistoriek")
-
     heeft_padelstat = False
     try:
         cached = fb.get_padelstat_rating(player_id)
@@ -171,7 +162,6 @@ def _has_incomplete_data(player_id: str) -> tuple[bool, list[str]]:
         heeft_padelstat = False
     if not heeft_padelstat:
         redenen.append("geen padelstat playing strength")
-
     return bool(redenen), redenen
 
 
@@ -229,13 +219,11 @@ def _ensure_padelstat(
     force: bool = False,
 ) -> dict:
     """PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16.
-
     Haalt de padelstats.be playing strength op voor elke speler in `players`
     ({"user_id":..., "name":...}). Slaat spelers met een gecachete rating
     over, tenzij force=True. Gebruikt hun club uit het Firestore-profiel
     (indien gekend) om gelijknamige spelers te disambigueren -- zelfde
     mechanisme als padelstats_scraper.search_and_fetch_padelstat_rating().
-
     Enkel lokaal beschikbaar (Playwright vereist)."""
     result = {"opgehaald": 0, "cache": 0, "niet_gevonden": 0, "fout": 0}
     if not is_scraping_available() or pss is None:
@@ -244,7 +232,6 @@ def _ensure_padelstat(
             "(vereist een lokale browser)."
         )
         return result
-
     te_doen = []
     for p in players:
         pid = str(p["user_id"])
@@ -257,34 +244,28 @@ def _ensure_padelstat(
                 result["cache"] += 1
                 continue
         te_doen.append(p)
-
     if not te_doen:
         return result
-
     progress = st.progress(0.0, text=f"{progress_label}: starten...")
     for i, p in enumerate(te_doen, start=1):
         pid = str(p["user_id"])
         naam = p.get("name") or pid
         progress.progress(i / len(te_doen), text=f"{progress_label}: {naam} ({i}/{len(te_doen)})...")
-
         try:
             profiel = fb.get_player_profile(pid) or {}
         except Exception:
             profiel = {}
         club = profiel.get("club") or ""
-
         try:
             gevonden = pss.search_and_fetch_padelstat_rating(naam, club=club or None)
         except Exception as exc:
             st.write(f"Padelstat ophalen mislukt voor {naam}: {exc}")
             result["fout"] += 1
             continue
-
         if not gevonden or gevonden.get("rating") is None:
             st.write(f"Geen padelstat gevonden voor {naam}.")
             result["niet_gevonden"] += 1
             continue
-
         try:
             fb.save_padelstat_rating(
                 pid,
@@ -299,7 +280,6 @@ def _ensure_padelstat(
         except Exception as exc:
             st.write(f"Padelstat opslaan mislukt voor {naam}: {exc}")
             result["fout"] += 1
-
     progress.progress(1.0, text=f"{progress_label}: klaar.")
     return result
 
@@ -314,7 +294,6 @@ def _run_scout_and_scrape(
 ) -> dict:
     """Zoekt de opstelling op, scrapet meteen de onbekende spelers en haalt
     optioneel ook de klassementshistoriek op.
-
     Dit blijft het SNELLE standaardpad (enkel nieuwe/onbekende spelers,
     1 periode terug). Voor een ploeg die de eerste keer onvolledig
     binnenkwam, gebruik i.p.v. dit de aparte "Ververs alles"-knop
@@ -378,19 +357,22 @@ def _run_full_team_refresh(
     force: bool = False,
 ) -> dict:
     """PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16.
-
     Voor ELKE speler in unique_players (ongeacht een reeds bestaand profiel):
       1. matchdata (her)scrapen met `lookback_periods` periodes;
       2. padelstat playing strength ophalen/vernieuwen;
       3. klassementshistoriek ophalen/vernieuwen.
-
     Dit is de "trage maar volledige" tegenhanger van
     osc.scrape_new_opponent_players(), specifiek om spelers te herstellen die
     al een (onvolledig) profiel hebben -- exact het scenario dat de gewone
     'Tegenstander analyseren'-knop stil overslaat.
+
+    PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17: gebruikt nu
+    osc._ensure_profile_safe() i.p.v. een kale fb.save_player_profile()-
+    aanroep, zodat een bestaande club nooit meer stilzwijgend gewist wordt
+    en elk aangeraakt profiel een added_by-marker krijgt indien nog afwezig.
+    Zie de uitgebreide toelichting in opponent_scout.py's moduledocstring.
     """
     from scrape_player import scrape_player  # lazy: Playwright, zie osc.py
-
     result = {
         "totaal": len(unique_players),
         "matchdata_ok": 0,
@@ -398,7 +380,6 @@ def _run_full_team_refresh(
         "padelstat": {},
         "klassement_gestart": False,
     }
-
     st.write(f"Matchdata verversen voor {len(unique_players)} speler(s) (tot {lookback_periods} periode(s) terug)...")
     progress = st.progress(0.0, text="Starten...")
     for i, p in enumerate(unique_players, start=1):
@@ -412,20 +393,17 @@ def _run_full_team_refresh(
                 force_full_refresh=force,
                 save_to_firebase=True,
             )
-            fb.save_player_profile(pid, display_name=naam)
+            osc._ensure_profile_safe(pid, naam)
             result["matchdata_ok"] += 1
         except Exception as exc:
             result["matchdata_fout"].append({"name": naam, "error": str(exc)})
     progress.progress(1.0, text="Matchdata: klaar.")
-
     st.write("Padelstat playing strength ophalen/vernieuwen...")
     result["padelstat"] = _ensure_padelstat(unique_players, progress_label="Padelstat", force=force)
-
     st.write("Klassementshistoriek ophalen/vernieuwen...")
     all_ids = [p["user_id"] for p in unique_players]
     _ensure_klassement(all_ids, progress_label="Klassement")
     result["klassement_gestart"] = True
-
     return result
 
 
@@ -438,11 +416,9 @@ def render_scout_header(
     """PADEL_ANALYSIS_SPLIT_HEADER_FROM_DETAILS_2026-09-14: toont enkel de
     'volgende match'-titel, de klassement-checkbox en de 'Tegenstander
     analyseren'-knop; voert desgevallend scout+scrape+klassement-ophaal uit.
-
     PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16: toont daarnaast, zodra een
     bundle beschikbaar is, de aparte "🔄 Ververs alles voor deze ploeg"-knop
     (enkel lokaal, want scrapen vereist een browser).
-
     Geeft (bundle, opp) terug zodra een bundle beschikbaar is, anders None."""
     team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
     next_match = ss.get_next_match(team_fixtures)

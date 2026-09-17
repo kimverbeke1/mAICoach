@@ -27,6 +27,45 @@ bovenaan.
 scraper_v2.scrape_uitslagenblad blijft wél bovenaan geïmporteerd: die module
 gebruikt enkel requests + BeautifulSoup, geen Playwright, en is dus altijd
 veilig om te importeren, ook op cloud.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17 (op verzoek van Kim,
+"we draaien in rondjes")
+--------------------------------------------------------------------------
+BUG (opgelost, kritiek): scrape_new_opponent_players() riep voorheen aan:
+    fb.save_player_profile(p["user_id"], display_name=p["name"])
+firebase_service.save_player_profile() schrijft met merge=True, MAAR zet
+"club" en "club_normalized" altijd EXPLICIET in de payload (als None wanneer
+niet meegegeven). Firestore's merge=True beschermt enkel velden die NIET in
+de payload staan — een veld dat WEL aanwezig is (ook al is de waarde None)
+wordt gewoon overschreven. Elke keer een tegenstander via "🔍 Tegenstander
+analyseren" gescout werd, werd hun eventueel bekende club dus STILZWIJGEND
+gewist, ongeacht of die club ooit correct was ingevuld (bv. via een eerdere
+backfill of handmatige toevoeging). Concreet bevestigd: 4 gemelde spelers
+(De Pourcq Hilde, Breda Hilde, Mondy Severine, Vanlerberghe Vivianne) tonen
+allemaal club "(geen club)", ondanks dat het diagnosescript bevestigde dat ze
+WEL degelijk op padelstats.be met een club geregistreerd staan
+(T.C. WAREGEM GAVER voor de laatste twee).
+
+Daarnaast ontbrak een consistente "added_by"-marker: page_add_player.py
+(handmatige toevoeging) en opponent_scout.py (automatische ontdekking via
+scouting) zetten BEIDE geen marker, in tegenstelling tot
+enrich_opponents.ensure_profiles() (zet "auto_opponent_discovery"). Daardoor
+kon cleanup_ghost_profiles.py deze via-scouting-ontdekte spelers niet
+onderscheiden van bewust, handmatig toegevoegde spelers — de Spelers-lijst
+kon dus nooit betrouwbaar opgeruimd worden voor DEZE categorie profielen.
+
+Fix, in _ensure_profile_safe() hieronder:
+  1. Vóór het schrijven wordt het BESTAANDE profiel opgehaald. Is er al een
+     club gekend, dan wordt die club expliciet doorgegeven aan
+     save_player_profile() (i.p.v. impliciet None), zodat een bestaande club
+     nooit meer verloren gaat bij een volgende scout/ververs-actie.
+  2. added_by wordt gezet op "opponent_scout", maar ENKEL als het profiel nog
+     GEEN added_by-veld heeft — een reeds bestaande marker (bv.
+     "auto_opponent_discovery" of "manual") wordt nooit overschreven. Dit
+     laat cleanup_ghost_profiles.py toe om via-scouting-ontdekte spelers mee
+     op te nemen in de opruiming, zonder ooit een bewust, handmatig
+     toegevoegde speler te raken.
 """
 import re
 import sys
@@ -46,6 +85,36 @@ import schedule_scraper as ss  # noqa: E402
 
 def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _ensure_profile_safe(player_id: str, display_name: str, marker: str = "opponent_scout") -> None:
+    """PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17.
+
+    Veilige vervanging voor een kale `fb.save_player_profile(id, display_name=...)`-
+    aanroep: behoudt een reeds bekende club (i.p.v. die impliciet naar None te
+    overschrijven) en zet `added_by` enkel als dat veld nog niet bestaat, zodat
+    een bestaande, specifiekere marker (bv. "manual") nooit verloren gaat.
+    """
+    try:
+        existing = fb.get_player_profile(player_id) or {}
+    except Exception:  # noqa: BLE001
+        existing = {}
+
+    existing_club = existing.get("club") or None
+
+    fb.save_player_profile(
+        player_id,
+        display_name=display_name,
+        club=existing_club,
+    )
+
+    if not existing.get("added_by"):
+        try:
+            fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
+                {"added_by": marker}, merge=True
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def get_opponent_previous_fixtures(
@@ -78,6 +147,17 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     Aanname (niet live geverifieerd): de volgorde van gevonden spelerslinks
     per rij volgt de tabelkolomvolgorde (eerst thuis-koppel, dan
     bezoekend-koppel) — consistent met de rest van de site.
+
+    LET OP voor consumenten van "boards": scrape_uitslagenblad() zet een
+    "round_text"-veld per bord, maar dat regex-patroon herkent enkel
+    tornooi-achtige ronde-labels ("poule"/"finale"/"1/4" e.d.) — GEEN
+    "Dubbel 1"/"Wedstrijd 1"-stijl bordnummering voor interclub-uitslagen-
+    bladen. Voor interclub is round_text hier dus zo goed als altijd None;
+    de POSITIE van een bord in de "boards"-lijst (index) is de enige
+    beschikbare, benaderende indicator van bordvolgorde (aanname: de tabel
+    toont de dubbels in dezelfde volgorde als op de fysieke pagina, top naar
+    onder). Zie page_lineup_lab.py voor waar dit als "vermoedelijke
+    bordvolgorde" gebruikt en expliciet zo gelabeld wordt.
     """
     import requests
     session = session or requests.Session()
@@ -98,7 +178,7 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
         opp_n = _normalize(opponent_name)
         is_opponent_home = bool(opp_n) and opp_n in home_n
     seen_ids = set()
-    for board in data.get("matches", []):
+    for board_index, board in enumerate(data.get("matches", [])):
         players = board.get("players", [])
         rankings = board.get("rankings", [])
         if len(players) < 4:
@@ -113,6 +193,7 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
             "opponent_pair": opp_pair,
             "score": board.get("score"),
             "won": board.get("won"),  # vanuit perspectief van de partij die als eerste vermeld staat — niet noodzakelijk de tegenstander
+            "board_position": board_index + 1,  # 1-based, vermoedelijke bordvolgorde (zie docstring hierboven)
         })
         for p in opp_pair:
             if p.get("user_id") and p["user_id"] not in seen_ids:
@@ -178,6 +259,11 @@ def scrape_new_opponent_players(
 
     Geen parallellisatie — bewust, om niet als één plotse vlaag van requests
     op te vallen (zie gesprek over discretie vs. snelheid).
+
+    PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17: gebruikt nu
+    _ensure_profile_safe() i.p.v. een kale fb.save_player_profile()-aanroep,
+    zodat een bestaande club nooit meer stilzwijgend gewist wordt en elk
+    nieuw profiel een added_by-marker krijgt (zie moduledocstring).
     """
     # LAZY IMPORT (fix): scrape_player.py importeert bovenaan
     # fetch_period_playwright.py, wat Playwright vereist. Op Streamlit Cloud
@@ -186,7 +272,6 @@ def scrape_new_opponent_players(
     # effectief scrapen van nieuwe tegenstander-spelers vereist een lokale
     # omgeving (waar is_scraping_available() dit al afschermt in dashboard.py).
     from scrape_player import scrape_player
-
     to_scrape = []
     for p in players:
         existing = fb.get_player_profile(p["user_id"])
@@ -204,7 +289,7 @@ def scrape_new_opponent_players(
                 force_full_refresh=False,
                 save_to_firebase=True,
             )
-            fb.save_player_profile(p["user_id"], display_name=p["name"])
+            _ensure_profile_safe(p["user_id"], p["name"])
             done.append(p)
         except Exception as e:
             failed.append({**p, "error": str(e)})

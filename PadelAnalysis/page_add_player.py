@@ -1,10 +1,23 @@
 """
 page_add_player.py — "➕ Speler toevoegen"-pagina.
+
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14: losgemaakt uit dashboard.py,
 ongewijzigde logica. Zie dashboard_common.py voor de gedeelde helpers/imports.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG (opgelost, kritiek): profielen aangemaakt via deze pagina (bewuste,
+handmatige toevoeging door Kim) kregen GEEN "added_by"-marker, in
+tegenstelling tot enrich_opponents.ensure_profiles() ("auto_opponent_
+discovery"). Daardoor kon cleanup_ghost_profiles.py niet betrouwbaar
+onderscheiden welke profielen bewust/handmatig zijn toegevoegd (die NOOIT
+automatisch opgeruimd mogen worden) versus welke automatisch ontdekt zijn
+via scouting/enrichment (die WEL in aanmerking komen voor opruiming als ze
+nooit verrijkt raken). Fix: de "➕ Toevoegen"-knop zet nu expliciet
+added_by="manual" op het profiel.
 """
 import streamlit as st
-
 import dashboard_common as dc
 from dashboard_common import (
     fb, is_scraping_available, render_cloud_scrape_trigger,
@@ -74,6 +87,13 @@ def page_add_player():
                         club=club_str or None,
                         dashboard_url=url or None,
                         aliases=[name],
+                    )
+                    # PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17: markeer
+                    # als bewust/handmatig toegevoegd, zodat cleanup_ghost_
+                    # profiles.py deze speler NOOIT als opruimbaar beschouwt,
+                    # ongeacht of er later matchdata/padelstat gevonden wordt.
+                    fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
+                        {"added_by": "manual"}, merge=True
                     )
                     if do_scrape:
                         bar, cb = _scrape_progress_widget(label_prefix=f"{name}: ")
