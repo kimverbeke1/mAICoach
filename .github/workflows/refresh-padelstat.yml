@@ -38,7 +38,7 @@ on:
       max:
         description: "Max aantal spelers deze run"
         required: false
-        default: "40"
+        default: "55"
       force_all:
         description: "Iedereen opnieuw controleren, ongeacht versie-marker (true/false)"
         required: false
