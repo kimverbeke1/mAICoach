@@ -1,0 +1,116 @@
+# .github/workflows/refresh-klassement.yml
+#
+# Dagelijkse, VOLLEDIG GEÏSOLEERDE controle/herstel van de TVL-
+# klassementshistoriek voor alle spelers (eigen team + tegenstanders).
+#
+# Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata)
+# EN van refresh-padelstat.yml (playing strength):
+#   - Klassement scrapen kost een VOLLEDIGE Playwright-sessie met meerdere
+#     periode-selecties (~30-90s per speler) - trager dan padelstat
+#     (~10-30s), dus een lagere batch-limiet is nodig.
+#   - Tot nu gebeurde klassement voor tegenstanders UITSLUITEND lokaal, via
+#     een checkbox in de Streamlit-UI die stopt zodra is_scraping_
+#     available() False is (altijd het geval op Streamlit Cloud, waar Kim
+#     uitsluitend test). Deze workflow is het ontbrekende, server-side
+#     equivalent.
+#
+# Verwerkt STANDAARD max 15 spelers per run (zie KLASSEMENT_MAX hieronder).
+# Wie deze run niet aan bod komt, wordt de VOLGENDE dagelijkse run
+# opgepikt. Bevat ook een ZELFHERSTEL-mechanisme (zie refresh_klassement_
+# only.py: _is_klassement_usable()) voor spelers die eerder een vrijwel
+# lege klassementshistoriek kregen door een cookie-banner-bug in
+# scrape_klassement.py (PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_
+# 2026-09-17, inmiddels opgelost) - die spelers worden AUTOMATISCH herkend
+# en opnieuw geprobeerd, zonder dat Kim ze zelf hoeft aan te wijzen.
+#
+# Vereiste repo secret (Settings -> Secrets and variables -> Actions):
+#   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
+#                                   scrape-padel.yml/refresh-padelstat.yml)
+#
+# Handmatig testen/forceren: Actions -> Refresh klassement -> Run workflow,
+# met desgewenst een aangepaste 'max' of 'force_all' input.
+name: Refresh klassement (TVL)
+
+on:
+  schedule:
+    # Dagelijks om 04:27 UTC - bewust een ANDER tijdstip dan scrape-padel.yml
+    # (workflow_dispatch-only sinds de Cloud Scheduler-migratie) en
+    # refresh-padelstat.yml (04:07 UTC), en bewust NIET op het volle uur.
+    - cron: "27 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Max aantal spelers deze run"
+        required: false
+        default: "15"
+      max_periods:
+        description: "Max aantal periodes per speler om te scrapen"
+        required: false
+        default: "10"
+      force_all:
+        description: "Iedereen opnieuw controleren, ongeacht bestaande data (true/false)"
+        required: false
+        default: "false"
+      player:
+        description: "Enkel dit ene player_id controleren (optioneel, laat leeg voor normale werking)"
+        required: false
+        default: ""
+
+concurrency:
+  group: refresh-klassement
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Ruim onder de 25 min die refresh-padelstat.yml als veilig bevestigde:
+    # bij KLASSEMENT_MAX=15 en ~30-90s per speler (trager dan padelstat)
+    # blijft dit ruim binnen de tijdslimiet.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: PadelAnalysis/scraper/requirements-scraper.txt
+
+      - name: Installeer dependencies
+        working-directory: PadelAnalysis
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r scraper/requirements-scraper.txt
+
+      - name: Installeer Playwright Chromium
+        working-directory: PadelAnalysis
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Klassement-controle uitvoeren
+        working-directory: PadelAnalysis/scraper
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          KLASSEMENT_MAX: ${{ github.event.inputs.max || '15' }}
+        run: |
+          ARGS="--max ${KLASSEMENT_MAX} --max-periods ${{ github.event.inputs.max_periods || '10' }}"
+          if [ "${{ github.event.inputs.force_all }}" = "true" ]; then
+            ARGS="$ARGS --force-all"
+          fi
+          if [ -n "${{ github.event.inputs.player }}" ]; then
+            ARGS="$ARGS --player ${{ github.event.inputs.player }}"
+          fi
+          echo "Uitvoeren: python refresh_klassement_only.py $ARGS"
+          python refresh_klassement_only.py $ARGS
+
+      - name: Debug-HTML uploaden bij een 'Huidige pagina'-fallback (indien aanwezig)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: klassement-debug-html
+          path: PadelAnalysis/scraper/klassement_debug.html
+          if-no-files-found: ignore
+          retention-days: 7
