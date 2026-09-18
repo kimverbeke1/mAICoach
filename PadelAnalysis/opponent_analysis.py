@@ -1,5 +1,5 @@
 """
-opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v10).
+opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v12).
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De overzichtstabel toont per speler ZOWEL de huidige poule als de historiek
@@ -31,51 +31,49 @@ aanroepers die de vroegere volgorde verwachten - dashboard.py gebruikt sinds
 deze versie de losse functies rechtstreeks, in de NIEUWE volgorde.
 
 PADEL_ANALYSIS_REMOVE_JUMP_BUTTON_2026-09-14:
-De "👁️ Volledige spelerpagina"-knop bij Detail-per-speler is verwijderd (op
-Kim's verzoek, consistent met het eerder al verwijderen van de vergelijkbare
-"👁️ Bekijk"-knop bij de Opstelling-scenario's in dashboard.py - beide
-voegden weinig toe binnen deze analyseschermen en maakten de UI drukker).
+De "👁️ Volledige spelerpagina"-knop bij Detail-per-speler is verwijderd.
 
-Verder in v9:
-- "board" hernoemd naar "dubbel";
-- bordpositie-heuristiek volledig verwijderd.
+Verder in v9: "board" hernoemd naar "dubbel"; bordpositie-heuristiek
+volledig verwijderd.
+
+PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17 (v10):
+_underlying_data_is_fresher() zorgt dat het team-rapport automatisch
+herbouwt zodra padelstat/klassement van een speler ondertussen ververst is.
+
+PADEL_ANALYSIS_SPARK_QUOTA_CACHE_2026-09-17 (v11):
+_underlying_data_is_fresher() gebruikt freshness_cache.py (sessie-lokale
+TTL-cache) i.p.v. rechtstreekse Firestore-reads, om de Spark-plan-daglimiet
+(50.000 reads) niet nodeloos te belasten.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17 (v10, kritieke bugfix,
-gemeld door Kim: "Brede Hilde kreeg een padelstat-score in de log, maar op
-mijn Team-analyse zie ik geen score en ook geen huidig klassement")
+PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 (v12, op verzoek van Kim: "bij de
+AI functie kan je zaken intypen in een prompt en dat werkt maar je kan niet
+verder doorvragen in nieuwe prompt")
 --------------------------------------------------------------------------
-BUG (opgelost): het team-scoutingrapport wordt volledig gecachet, zowel in
-st.session_state ALS persistent in Firestore (team_scouting_reports), en
-_needs_rebuild() herbouwde het UITSLUITEND wanneer:
-  1. het rapport nog niet bestond, OF
-  2. het schema_version-veld gewijzigd was, OF
-  3. de spelgroep_id (poule) gewijzigd was, OF
-  4. er een NIEUWE speler in de ploeg opdook die nog niet in het rapport zat.
-Er zat GEEN enkele check op of de ONDERLIGGENDE data van een reeds gekende
-speler ondertussen was bijgewerkt. Concreet: Brede Hilde's padelstat-rating
-werd via de dagelijkse achtergrondjob (refresh_padelstat_only.py) opgehaald
-NADAT haar team-rapport voor het eerst berekend en gecachet was. Omdat geen
-van de 4 bovenstaande voorwaarden veranderde, bleef het rapport voor altijd
-het oude, "playing strength nog niet opgehaald"-resultaat tonen - ook al
-stond de correcte waarde allang in Firestore. Exact dezelfde blinde vlek
-gold voor klassement_history als die pas ná de eerste weergave gescrapet
-werd (via de "📈 Klassementshistoriek ophalen"-checkbox in
-opponent_scout_ui.py).
+ROOT CAUSE (bevestigd in team_ai_advisor.py): elke "Vraag AI"-klik startte
+een volledig nieuwe, contextloze OpenAI-conversatie - er werd nergens een
+gespreksgeschiedenis bijgehouden of meegestuurd, dus een vervolgvraag werd
+behandeld alsof het de EERSTE vraag was.
 
-Fix: een nieuwe, expliciete versheidscontrole _underlying_data_is_fresher()
-vergelijkt, voor elke speler in de bundle, of diens padelstat-rating
-('fetched_at') of klassement_history ('scraped_at') RECENTER is dan het
-tijdstip waarop het huidige rapport berekend werd ('updated_at'). Is dat
-voor ook maar 1 speler het geval, dan wordt het rapport ALSNOG herbouwd -
-zonder dat Kim daarvoor zelf op "Verversen" moet klikken of dat er een
-nieuwe speler bij moet komen. Dit is een aanvullende 5e voorwaarde in
-_needs_rebuild(), de bestaande 4 voorwaarden blijven ongewijzigd.
-
-Kost: 1-2 extra Firestore-reads per speler per paginaweergave (om de
-freshness te checken), ongeacht of er uiteindelijk herbouwd wordt. Voor een
-team van 10-15 spelers is dat verwaarloosbaar; de eerlijkheid van de
-getoonde data weegt ruimschoots op tegen die kleine, vaste kost.
+FIX: render_ai_section() is herschreven tot een ECHTE chat:
+  - st.session_state houdt nu een `{key_prefix}_chat_history_v12_{ploeg_id}`-
+    lijst bij van {"role": "user"/"assistant", "content": str}-dicts, in
+    chronologische volgorde.
+  - Bij elke nieuwe vraag wordt taa.ask_followup(question, report, history)
+    aangeroepen MET de volledige, tot dan opgebouwde geschiedenis (zie
+    team_ai_advisor.py, PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18) - het
+    taalmodel "onthoudt" dus wat er eerder in dit gesprek gezegd is.
+  - De VOLLEDIGE geschiedenis wordt getoond (met st.chat_message, zodat het
+    er ook visueel als een doorlopend gesprek uitziet), niet enkel het
+    laatste antwoord.
+  - "💡 Genereer inzichten" blijft het GESPREK STARTEN (of herstarten) - het
+    automatische inzicht wordt als eerste "assistant"-bericht toegevoegd aan
+    een verse geschiedenis, zodat een vervolgvraag daar ook op kan
+    voortbouwen.
+  - Nieuwe knop "🗑️ Nieuw gesprek" wist de geschiedenis expliciet, voor als
+    Kim bewust opnieuw wil beginnen (bv. na een sterk gewijzigde tegenstander-
+    analyse) i.p.v. impliciet door te blijven bouwen op een inmiddels
+    irrelevant gesprek.
 """
 from __future__ import annotations
 
@@ -88,6 +86,7 @@ import streamlit as st
 
 import firebase_service as fb
 import opponent_dossier as od
+import freshness_cache as fcache
 
 try:
     import team_ai_advisor as taa
@@ -95,7 +94,7 @@ except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel t.o.v. v8; enkel rendering/cache-logica aangepast in v9/v10
+REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v12
 
 
 def _now_iso() -> str:
@@ -114,11 +113,7 @@ def _format_ts(value) -> str:
 
 def _parse_iso(value) -> Optional[datetime]:
     """PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17: robuuste
-    ISO-timestamp-parser (met 'Z'-suffix-ondersteuning en een tijdzone-
-    fallback), gebruikt om 'updated_at'/'fetched_at'/'scraped_at' onderling
-    te kunnen vergelijken. Geeft None terug bij een leeg of onparseerbaar
-    veld, zodat de aanroeper dat conservatief kan behandelen (nooit crashen
-    op een onverwacht formaat)."""
+    ISO-timestamp-parser."""
     if not value:
         return None
     try:
@@ -193,52 +188,22 @@ def _load_report(ploeg_id: str) -> Optional[dict]:
 
 
 def _underlying_data_is_fresher(report: dict, bundle: dict) -> bool:
-    """PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17.
-
-    Bepaalt of de ONDERLIGGENDE data (padelstat-rating of
-    klassementshistoriek) van een van de tegenstander-spelers ondertussen is
-    bijgewerkt SINDS dit team-rapport berekend werd (report['updated_at']).
-
-    Zonder deze check bleef een eenmaal gecachet rapport (Firestore
-    team_scouting_reports + st.session_state) onbeperkt geldig totdat een
-    NIEUWE speler in de ploeg verscheen of iemand handmatig op "Verversen"
-    klikte - ook al was een reeds gekende speler ondertussen via de
-    dagelijkse padelstat-workflow of een klassement-scrape wel degelijk
-    bijgewerkt. Zie moduledocstring voor het volledige, gemelde scenario.
-
-    Stopt bij de EERSTE speler waarvoor iets recenter blijkt (geen noodzaak
-    om alle spelers na te kijken zodra er al herbouwd gaat worden)."""
+    """PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17, aangepast in
+    PADEL_ANALYSIS_SPARK_QUOTA_CACHE_2026-09-17. Zie module-docstring."""
     report_updated = _parse_iso(report.get("updated_at"))
     if report_updated is None:
-        # Geen (parseerbaar) tijdstip om tegen te vergelijken -> conservatief
-        # aannemen dat het rapport mogelijk verouderd is, i.p.v. blind te
-        # vertrouwen op een cache waarvan we de leeftijd niet kennen.
         return True
-
     for player in bundle.get("unique_players", []) or []:
         pid = str(player.get("user_id") or "")
         if not pid:
             continue
-
-        try:
-            cached_padelstat = fb.get_padelstat_rating(pid)
-        except Exception:
-            cached_padelstat = None
-        if cached_padelstat:
-            fetched_at = _parse_iso(cached_padelstat.get("fetched_at"))
-            if fetched_at and fetched_at > report_updated:
-                return True
-
-        try:
-            player_doc = fb.get_player(pid) or {}
-        except Exception:
-            player_doc = {}
-        klassement = player_doc.get("klassement_history")
-        if isinstance(klassement, dict):
-            scraped_at = _parse_iso(klassement.get("scraped_at"))
-            if scraped_at and scraped_at > report_updated:
-                return True
-
+        freshness = fcache.get_freshness(pid)
+        fetched_at = _parse_iso(freshness.get("padelstat_fetched_at"))
+        if fetched_at and fetched_at > report_updated:
+            return True
+        scraped_at = _parse_iso(freshness.get("klassement_scraped_at"))
+        if scraped_at and scraped_at > report_updated:
+            return True
     return False
 
 
@@ -257,10 +222,6 @@ def _needs_rebuild(
     bundle_ids = {str(p["user_id"]) for p in bundle.get("unique_players", []) or []}
     if not bundle_ids.issubset(known_ids):
         return True
-    # PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17: nieuwe, 5e
-    # voorwaarde - herbouw ook als een speler se padelstat/klassement
-    # ondertussen ververst is, zonder dat er verder iets aan de bundle/poule
-    # veranderd hoefde te zijn.
     if _underlying_data_is_fresher(report, bundle):
         return True
     return False
@@ -275,17 +236,8 @@ def get_team_report(
     global_docs: Optional[dict] = None,
     key_prefix: str = "team_analysis",
 ) -> dict:
-    """PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14: bouwt/cachet (via
-    st.session_state, net als voorheen binnen render_team_analysis) het
-    volledige team-scoutingrapport, ZONDER er iets van te tonen. Aparte
-    functie zodat dashboard.py het rapport kan opvragen (bv. als AI-context
-    voor de Opstelling-scenario's) VOORDAT de overzichtstabel/detail-per-
-    speler getoond wordt.
-
-    PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17: _needs_rebuild()
-    controleert sinds deze versie ook of onderliggende spelersdata
-    (padelstat/klassement) ondertussen ververst is - zie die functie voor
-    het volledige, gemelde scenario."""
+    """Bouwt/cachet het volledige team-scoutingrapport, ZONDER er iets van
+    te tonen."""
     ploeg_id = opp.get("ploeg_id")
     state_key = f"{key_prefix}_report_v8_{ploeg_id}"
     if state_key not in st.session_state:
@@ -309,12 +261,7 @@ def render_team_header(
     key_prefix: str = "team_analysis",
 ) -> dict:
     """Titel + 'Verversen'-knop. Geeft het (evt. na verversen NIEUWE) rapport
-    terug, zodat de aanroeper daarmee verder kan (bv. voor AI-context).
-
-    De handmatige 'Verversen'-knop blijft bestaan als expliciet, onmiddellijk
-    alternatief - PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17 maakt
-    hem alleen niet langer de ENIGE manier waarop verse padelstat/klassement-
-    data ooit zichtbaar wordt."""
+    terug."""
     ploeg_id = opp.get("ploeg_id")
     state_key = f"{key_prefix}_report_v8_{ploeg_id}"
     header_col, refresh_col = st.columns([4, 1])
@@ -326,6 +273,7 @@ def render_team_header(
         )
     with refresh_col:
         if st.button("🔄 Verversen", key=f"{key_prefix}_refresh_v8_{ploeg_id}", use_container_width=True):
+            fcache.invalidate_all()
             report = _build_report(bundle, opp, all_docs, current_reeks_url, current_spelgroep_id, global_docs)
             _save_report(report)
             st.session_state[state_key] = report
@@ -375,14 +323,7 @@ def render_overview_and_detail(
     go_to_player_fn: Optional[Callable[[str], None]] = None,
     key_prefix: str = "team_analysis",
 ) -> None:
-    """Overzichtstabel + Detail-per-speler.
-    PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14: losgemaakt van render_team_analysis
-    zodat dashboard.py dit NA de Opstelling-scenario's/AI-secties kan tonen.
-    PADEL_ANALYSIS_REMOVE_JUMP_BUTTON_2026-09-14: de "👁️ Volledige
-    spelerpagina"-knop is hier verwijderd (zie moduledocstring). go_to_player_fn
-    wordt niet langer gebruikt binnen deze functie, maar blijft als
-    (ongebruikte) parameter voor achterwaartse compatibiliteit met bestaande
-    aanroepen."""
+    """Overzichtstabel + Detail-per-speler."""
     ploeg_id = report.get("opponent_ploeg_id")
     players = report.get("players", []) or []
     if not players:
@@ -433,9 +374,8 @@ def _get_own_profiles() -> list[dict]:
 
 
 def get_own_player_rating(player_id: str) -> tuple[float, str]:
-    """PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13: geeft (sterkte, bron) terug
-    voor één van ONZE spelers. Volgorde: 1. padelstats.be, 2. officieel TVL-
-    klassement, 3. neutrale default 200."""
+    """Geeft (sterkte, bron) terug voor één van ONZE spelers. Volgorde:
+    1. padelstats.be, 2. officieel TVL-klassement, 3. neutrale default 200."""
     try:
         cached = fb.get_padelstat_rating(player_id)
     except Exception:
@@ -458,43 +398,84 @@ def get_own_player_rating(player_id: str) -> tuple[float, str]:
 
 
 # ─────────────────────────────────────────────
-# AI-sectie (vrije vragen + automatische inzichten over de TEGENPLOEG)
+# PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18
+# AI-sectie: nu een ECHTE, doorlopende chat i.p.v. losse, contextloze vragen.
 # ─────────────────────────────────────────────
 def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analysis") -> None:
     """PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14: was _render_ai_section, nu
-    PUBLIEK (geen underscore-prefix meer) zodat dashboard.py dit apart en
-    HOGER op de pagina kan tonen, vóór de overzichtstabel/detail-per-speler."""
+    PUBLIEK zodat dashboard.py dit apart en HOGER op de pagina kan tonen.
+
+    PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 (op verzoek van Kim: "zorg
+    dat ik kan doorvragen"): houdt nu een chatgeschiedenis bij in
+    st.session_state en stuurt die BIJ ELKE nieuwe vraag volledig mee naar
+    team_ai_advisor.ask_followup(), zodat het taalmodel een samenhangend
+    gesprek kan voeren i.p.v. elke vraag als geheel nieuw te behandelen.
+    De volledige geschiedenis wordt ook zichtbaar getoond (st.chat_message),
+    niet enkel het laatste antwoord."""
     st.markdown("#### 🤖 AI-inzichten over de tegenploeg")
     if taa is None:
         st.caption("AI-module niet beschikbaar (team_ai_advisor kon niet geladen worden).")
         return
-    answer_key = f"{key_prefix}_answer_v8_{ploeg_id}"
-    if st.button(
-        "💡 Genereer inzichten", key=f"{key_prefix}_insights_v8_{ploeg_id}",
-        type="primary",
-    ):
-        with st.spinner("AI analyseert de tegenploeg..."):
-            try:
-                st.session_state[answer_key] = taa.generate_insights(report)
-            except Exception as exc:
-                st.session_state[answer_key] = f"⚠️ Mislukt: {exc}"
-    st.caption("Of stel een eigen vraag over de tegenploeg:")
+
+    history_key = f"{key_prefix}_chat_history_v12_{ploeg_id}"
+    if history_key not in st.session_state:
+        st.session_state[history_key] = []
+    history: list = st.session_state[history_key]
+
+    col_start, col_clear = st.columns([3, 1])
+    with col_start:
+        start_label = "💡 Genereer inzichten" if not history else "💡 Genereer inzichten (nieuw gesprek)"
+        if st.button(start_label, key=f"{key_prefix}_insights_v12_{ploeg_id}", type="primary"):
+            with st.spinner("AI analyseert de tegenploeg..."):
+                try:
+                    antwoord = taa.generate_insights(report)
+                except Exception as exc:
+                    antwoord = f"⚠️ Mislukt: {exc}"
+            # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: dit automatische
+            # inzicht wordt het EERSTE bericht van een verse geschiedenis,
+            # zodat een vervolgvraag daarop kan voortbouwen.
+            st.session_state[history_key] = [{"role": "assistant", "content": antwoord}]
+            st.rerun()
+    with col_clear:
+        if history and st.button("🗑️ Nieuw gesprek", key=f"{key_prefix}_clear_chat_v12_{ploeg_id}"):
+            st.session_state[history_key] = []
+            st.rerun()
+
+    # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: toon het VOLLEDIGE gesprek,
+    # niet enkel het laatste antwoord - zo is meteen duidelijk waarop een
+    # doorvraag verder bouwt.
+    if history:
+        st.caption("Gesprek tot nu toe:")
+        for msg in history:
+            role_label = "🙋 Jij" if msg["role"] == "user" else "🤖 AI"
+            with st.container(border=True):
+                st.markdown(f"**{role_label}**")
+                st.markdown(msg["content"])
+
+    st.caption("Stel een vraag of vraag door op het antwoord hierboven:")
     question = st.text_area(
-        "Jouw vraag", key=f"{key_prefix}_question_v8_{ploeg_id}", height=70,
-        label_visibility="collapsed", placeholder="Bv. Wie is hun sterkste dubbel?",
+        "Jouw vraag", key=f"{key_prefix}_question_v12_{ploeg_id}", height=70,
+        label_visibility="collapsed",
+        placeholder="Bv. Wie is hun sterkste dubbel? (of, na een eerder antwoord: 'en wat als die geblesseerd is?')",
     )
-    if st.button("💬 Vraag AI", key=f"{key_prefix}_ask_v8_{ploeg_id}"):
+    if st.button("💬 Vraag AI", key=f"{key_prefix}_ask_v12_{ploeg_id}"):
         if not question.strip():
             st.warning("Typ eerst een vraag.")
         else:
             with st.spinner("AI denkt na..."):
                 try:
-                    st.session_state[answer_key] = taa.ask_about_team(question.strip(), report)
+                    antwoord = taa.ask_followup(question.strip(), report, history)
                 except Exception as exc:
-                    st.session_state[answer_key] = f"⚠️ AI-vraag mislukt: {exc}"
-    if st.session_state.get(answer_key):
-        st.markdown("##### Antwoord")
-        st.markdown(st.session_state[answer_key])
+                    antwoord = f"⚠️ AI-vraag mislukt: {exc}"
+            # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: BEIDE berichten
+            # (de vraag zelf, en het antwoord) worden toegevoegd aan de
+            # geschiedenis, zodat de VOLGENDE doorvraag hier weer op kan
+            # voortbouwen - anders zou de geschiedenis nooit groeien.
+            st.session_state[history_key] = history + [
+                {"role": "user", "content": question.strip()},
+                {"role": "assistant", "content": antwoord},
+            ]
+            st.rerun()
 
 
 # Alias voor achterwaartse compatibiliteit (was de interne naam vóór v9).
@@ -516,16 +497,7 @@ def render_team_analysis(
     key_prefix: str = "team_analysis",
 ) -> dict:
     """Toont het volledige teamanalysescherm in de OUDE volgorde (header,
-    overzicht+detail, AI) en geeft het gebruikte rapport terug.
-    PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14: dashboard.py roept sinds deze
-    versie de losse bouwstenen (get_team_report/render_team_header/
-    render_ai_section/render_overview_and_detail) rechtstreeks aan, in een
-    ANDERE volgorde (AI-secties eerst, details onderaan). Deze functie blijft
-    behouden voor eventuele andere/toekomstige aanroepers die de oorspronkelijke
-    volgorde verwachten.
-    home_player_id wordt niet meer gebruikt (de eigen-opstelling-editor is
-    verwijderd in v8) - blijft in de signatuur voor achterwaartse
-    compatibiliteit."""
+    overzicht+detail, AI) en geeft het gebruikte rapport terug."""
     report = get_team_report(
         bundle, opp, all_docs,
         current_reeks_url=current_reeks_url,

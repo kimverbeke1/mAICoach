@@ -2,7 +2,7 @@
 team_ai_advisor.py - AI-vragen, automatische inzichten over een
 tegenploeg-analyse, en pro/contra-commentaar op berekende opstelling-opties.
 
-Ongewijzigd t.o.v. v7 wat betreft generate_insights/ask_about_team.
+Ongewijzigd t.o.v. v7 wat betreft de kernlogica van generate_insights.
 
 PADEL_ANALYSIS_LINEUP_OPTIONS_AI_2026-09-13 (nieuw):
 Nieuwe functie analyze_lineup_options(): geeft AI-commentaar (pro's en
@@ -17,6 +17,44 @@ matchup-edge, playing strength) en wordt gevraagd die te DUIDEN - sterke en
 zwakke punten per optie, in mensentaal, zonder zelf spelers of cijfers te
 verzinnen. suggest_lineup() blijft bestaan voor eventueel ander gebruik,
 maar wordt niet langer aangeroepen vanuit opponent_analysis.py.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 (op verzoek van Kim: "bij de AI
+functie kan je zaken intypen in een prompt en dat werkt maar je kan niet
+verder doorvragen in nieuwe prompt" / "zorg dat ik kan doorvragen")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd): elke AI-aanroep (generate_insights, ask_about_team,
+analyze_lineup_options) startte een VOLLEDIG NIEUWE OpenAI-conversatie
+(1 system-bericht + 1 user-bericht), zonder ooit de vorige vraag/antwoord
+mee te sturen. Er werd nergens conversatiegeschiedenis bijgehouden of
+doorgegeven - elke nieuwe "Vraag AI"-klik was voor het taalmodel een
+compleet losstaand gesprek, zonder enige herinnering aan wat er eerder
+gevraagd/geantwoord was. Dat is de reden waarom "doorvragen" niet werkte:
+een vervolgvraag zoals "en wat als Kim niet kan spelen?" werd behandeld als
+een geheel nieuwe, contextloze vraag.
+
+FIX: nieuwe, generieke kernfunctie _chat_completion(system_prompt,
+first_user_message, history) die een messages-lijst opbouwt als
+    [system] + history + [nieuwste user-bericht]
+i.p.v. steeds [system, user] met NIETS ertussen. `history` is een simpele
+lijst van {"role": "user"/"assistant", "content": str}-dicts, die de
+AANROEPER (opponent_analysis.py / page_lineup_lab.py) bijhoudt in
+st.session_state en bij ELKE nieuwe vraag volledig meestuurt - zo bouwt het
+taalmodel een steeds groeiend, samenhangend gesprek op, net als een gewone
+chatbot.
+
+Alle 3 bestaande, door de UI aangeroepen functies (generate_insights,
+ask_about_team, analyze_lineup_options) hebben nu een OPTIONELE
+`history`-parameter (standaard None = lege lijst) - bestaande aanroepen
+zonder dit argument blijven dus exact zoals voorheen werken (geen
+doorvraag-geschiedenis), en zijn dus volledig achterwaarts compatibel.
+Geen enkele bestaande aanroep-plek MOET aangepast worden om te blijven
+werken; enkel de plekken die Kim vroeg (de "Vraag AI"-sectie) geven nu wel
+hun opgebouwde geschiedenis mee.
+
+Een 4e, nieuwe functie ask_followup(question, report, history) is een
+dunne, expliciet zo genoemde wrapper rond ask_about_team() met
+geschiedenis - puur voor leesbaarheid in de aanroepende UI-code.
 """
 from __future__ import annotations
 
@@ -69,7 +107,6 @@ def _report_to_context(report: dict) -> str:
         "SPELER (bv. P450 is sterker dan P200).",
         "",
     ]
-
     for player in report.get("players", []) or []:
         current = player.get("current_rank")
         best = player.get("best_rank")
@@ -79,7 +116,6 @@ def _report_to_context(report: dict) -> str:
             f"beste ooit {'P' + str(best) if best is not None else 'onbekend'} "
             f"({player.get('best_rank_when') or 'datum onbekend'})"
         )
-
         n_now = player.get("matches_relevant", 0)
         if n_now:
             lines.append(
@@ -103,7 +139,6 @@ def _report_to_context(report: dict) -> str:
                 lines.append(f"    Resultaten deze poule: {recent}")
         else:
             lines.append("  DEZE POULE: nog geen gespeelde matchen gekend.")
-
         n_hist = player.get("matches_history", 0)
         if n_hist:
             lines.append(
@@ -128,7 +163,6 @@ def _report_to_context(report: dict) -> str:
                 lines.append(f"    Per periode: {summary}")
         else:
             lines.append("  HISTORIEK: geen eerdere interclubmatches gekend.")
-
     return "\n".join(lines)
 
 
@@ -141,51 +175,68 @@ _BASE_RULES = (
 )
 
 
+def _chat_completion(system_prompt: str, user_message: str, history: Optional[list[dict]] = None) -> str:
+    """PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: generieke kernfunctie die
+    ALTIJD de opgebouwde `history` (eerdere user/assistant-berichten van
+    ditzelfde gesprek) meestuurt vóór het nieuwste user-bericht, i.p.v. bij
+    elke aanroep een volledig nieuw, contextloos gesprek te starten.
+
+    history: lijst van {"role": "user"|"assistant", "content": str}-dicts,
+    in chronologische volgorde (oudste eerst). Wordt NIET aangepast door
+    deze functie - de aanroeper is verantwoordelijk voor het bijhouden en
+    uitbreiden van de geschiedenis (typisch in st.session_state)."""
+    client = _client()
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history or [])
+    messages.append({"role": "user", "content": user_message})
+    response = client.chat.completions.create(model=MODEL, messages=messages)
+    return response.choices[0].message.content.strip()
+
+
 def generate_insights(report: dict) -> str:
-    """Genereert automatisch scoutinginzichten over de tegenploeg."""
+    """Genereert automatisch scoutinginzichten over de tegenploeg. Dit is
+    altijd het STARTPUNT van een gesprek (geen voorgeschiedenis mogelijk/
+    zinvol), dus zonder history-parameter."""
     context = _report_to_context(report)
-    client = _client()
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Je bent een padel-scoutingassistent. Geef een kort, scanbaar overzicht "
-                    "met de belangrijkste inzichten over deze tegenploeg: wie is het sterkst, "
-                    "welk dubbel komt het vaakst terug, wie gaat vooruit of achteruit qua "
-                    "klassement, en welk patroon valt op in hun resultaten. Als de huidige "
-                    "poule nog weinig data bevat, baseer je inschatting dan op de historiek "
-                    "en zeg dat er expliciet bij. " + _BASE_RULES
-                ),
-            },
-            {"role": "user", "content": f"Data over de tegenploeg:\n{context}"},
-        ],
+    system_prompt = (
+        "Je bent een padel-scoutingassistent. Geef een kort, scanbaar overzicht "
+        "met de belangrijkste inzichten over deze tegenploeg: wie is het sterkst, "
+        "welk dubbel komt het vaakst terug, wie gaat vooruit of achteruit qua "
+        "klassement, en welk patroon valt op in hun resultaten. Als de huidige "
+        "poule nog weinig data bevat, baseer je inschatting dan op de historiek "
+        "en zeg dat er expliciet bij. " + _BASE_RULES
     )
-    return response.choices[0].message.content.strip()
+    return _chat_completion(system_prompt, f"Data over de tegenploeg:\n{context}")
 
 
-def ask_about_team(question: str, report: dict) -> str:
-    """Beantwoordt een vrije vraag over de tegenploeg op basis van het rapport."""
+def ask_about_team(question: str, report: dict, history: Optional[list[dict]] = None) -> str:
+    """Beantwoordt een vrije vraag over de tegenploeg op basis van het
+    rapport.
+
+    PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: heeft nu een OPTIONELE
+    `history`-parameter. Wordt die meegegeven, dan bouwt het antwoord VERDER
+    op het eerdere gesprek (echt doorvragen mogelijk) i.p.v. elke vraag als
+    volledig nieuw, contextloos gesprek te behandelen. Achterwaarts
+    compatibel: bestaande aanroepen zonder `history` werken exact als
+    voorheen."""
     context = _report_to_context(report)
-    client = _client()
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Je bent een padel-scoutingassistent. Antwoord kort en concreet. "
-                    + _BASE_RULES
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Data over de tegenploeg:\n{context}\n\nVraag: {question}",
-            },
-        ],
+    system_prompt = (
+        "Je bent een padel-scoutingassistent. Antwoord kort en concreet. "
+        "Als dit een VERVOLGVRAAG is op een eerder antwoord in dit gesprek, "
+        "bouw dan expliciet verder op wat je eerder al zei - herhaal niet "
+        "onnodig dezelfde uitleg, maar verwijs ernaar of vul ze aan. "
+        + _BASE_RULES
     )
-    return response.choices[0].message.content.strip()
+    user_message = f"Data over de tegenploeg:\n{context}\n\nVraag: {question}"
+    return _chat_completion(system_prompt, user_message, history=history)
+
+
+def ask_followup(question: str, report: dict, history: list[dict]) -> str:
+    """PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: dunne, expliciet zo
+    genoemde wrapper rond ask_about_team() MET geschiedenis - puur voor
+    leesbaarheid in de aanroepende UI-code (maakt op de aanroep-plek
+    meteen duidelijk dat dit een doorvraag is, geen eerste vraag)."""
+    return ask_about_team(question, report, history=history)
 
 
 def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
@@ -198,8 +249,6 @@ def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
     analyze_lineup_options() hieronder, die op REEDS BEREKENDE opties werkt
     i.p.v. de AI zelf een opstelling te laten verzinnen."""
     context = _report_to_context(report)
-    client = _client()
-
     if own_team_context and own_team_context.strip():
         own_part = f"\n\nOnze voorlopig aangeduide opstelling:\n{own_team_context.strip()}"
     else:
@@ -208,25 +257,15 @@ def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
             "vermeld expliciet dat een concreet voorstel preciezer wordt met onze eigen "
             "beschikbare spelers.)"
         )
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Je bent een padel-coach die opstellingsadvies geeft voor een "
-                    "interclubontmoeting. Spreek over 'dubbel 1', 'dubbel 2', enzovoort - "
-                    "nooit over 'board'. Als er een voorlopige eigen opstelling is "
-                    "meegegeven, beoordeel die expliciet per dubbel (wie tegen wie, en of "
-                    "die matchup gunstig lijkt) en stel eventueel een wijziging voor met "
-                    "motivatie. Verzin geen spelers of resultaten. " + _BASE_RULES
-                ),
-            },
-            {"role": "user", "content": f"Data over de tegenploeg:\n{context}{own_part}"},
-        ],
+    system_prompt = (
+        "Je bent een padel-coach die opstellingsadvies geeft voor een "
+        "interclubontmoeting. Spreek over 'dubbel 1', 'dubbel 2', enzovoort - "
+        "nooit over 'board'. Als er een voorlopige eigen opstelling is "
+        "meegegeven, beoordeel die expliciet per dubbel (wie tegen wie, en of "
+        "die matchup gunstig lijkt) en stel eventueel een wijziging voor met "
+        "motivatie. Verzin geen spelers of resultaten. " + _BASE_RULES
     )
-    return response.choices[0].message.content.strip()
+    return _chat_completion(system_prompt, f"Data over de tegenploeg:\n{context}{own_part}")
 
 
 def _lineup_options_to_context(options: list[dict], name_lookup: dict) -> str:
@@ -237,7 +276,13 @@ def _lineup_options_to_context(options: list[dict], name_lookup: dict) -> str:
     of te verzinnen."""
     lines = []
     for i, option in enumerate(options, start=1):
-        lines.append(f"Optie {i} (totaalscore {option.get('total_score')}):")
+        header = f"Optie {i}"
+        ebw = option.get("expected_boards_won")
+        if ebw is not None:
+            header += f" (verwacht {ebw:.2f} matchen gewonnen)"
+        else:
+            header += f" (totaalscore {option.get('total_score')})"
+        lines.append(header + ":")
         for a in option.get("assignment", []):
             p1, p2 = a["our_pair"]
             n1 = name_lookup.get(p1, p1)
@@ -245,9 +290,11 @@ def _lineup_options_to_context(options: list[dict], name_lookup: dict) -> str:
             opp_names = " / ".join(
                 p.get("name", "?") for p in a["opponent_board"].get("opponent_pair", [])
             )
+            wp = a.get("win_probability")
+            wp_txt = f", winkans {int(round(wp*100))}%" if wp is not None else ""
             lines.append(
                 f"  Dubbel: {n1} / {n2} (synergie {a['synergy']}) "
-                f"tegen {opp_names or 'onbekende tegenstanders'} (matchup-edge {a['edge']:+.2f})"
+                f"tegen {opp_names or 'onbekende tegenstanders'} (matchup-edge {a['edge']:+.2f}{wp_txt})"
             )
         lines.append("")
     return "\n".join(lines)
@@ -257,8 +304,13 @@ def analyze_lineup_options(
     report: dict,
     options: list[dict],
     name_lookup: dict,
+    history: Optional[list[dict]] = None,
 ) -> str:
-    """PADEL_ANALYSIS_LINEUP_OPTIONS_AI_2026-09-13:
+    """PADEL_ANALYSIS_LINEUP_OPTIONS_AI_2026-09-13, uitgebreid in
+    PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 met een optionele
+    `history`-parameter (zelfde achterwaarts-compatibele patroon als
+    ask_about_team hierboven).
+
     Geeft AI-commentaar (pro's en contra's per optie, in het Nederlands) op
     de top-N REEDS BEREKENDE opstelling-opties uit
     lineup_lab.optimize_lineup_vs_scenario(). De AI verzint GEEN cijfers of
@@ -269,44 +321,33 @@ def analyze_lineup_options(
                  context over de tegenploeg.
     options:     lijst van opstelling-opties zoals teruggegeven door
                  lineup_lab.optimize_lineup_vs_scenario (elk met
-                 "total_score" en "assignment").
+                 "total_score"/"expected_boards_won" en "assignment").
     name_lookup: {player_id: weergavenaam} voor ONZE eigen spelers, om de
                  ID's in de opties leesbaar te maken.
+    history:     optioneel, eerdere {"role":..,"content":..}-berichten van
+                 hetzelfde gesprek (voor doorvragen na het eerste antwoord).
     """
     if not options:
         return "Geen berekende opstelling-opties beschikbaar om te analyseren."
-
     team_context = _report_to_context(report)
     options_context = _lineup_options_to_context(options, name_lookup)
-    client = _client()
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Je bent een padel-coach. Je krijgt een aantal AL BEREKENDE "
-                    "opstelling-opties voor onze eigen ploeg tegen een specifieke "
-                    "tegenstander (elke optie = een volledige verdeling van onze spelers "
-                    "in dubbels, met wie tegen welk tegenstanderskoppel uitkomt). Geef PER "
-                    "OPTIE een kort, concreet commentaar: wat zijn de sterke punten "
-                    "(gunstige matchups, goede synergie) en de risico's (moeilijke "
-                    "matchups, weinig gezamenlijke ervaring)? Sluit af met een korte "
-                    "aanbeveling welke optie je zou kiezen en waarom. Spreek over 'dubbel "
-                    "1', 'dubbel 2', enzovoort - nooit over 'board'. Verzin GEEN spelers, "
-                    "cijfers of resultaten die niet letterlijk gegeven zijn - de "
-                    "synergie-scores en matchup-edges in de data zijn al berekend, jij "
-                    "duidt ze enkel. " + _BASE_RULES
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Data over de tegenploeg:\n{team_context}\n\n"
-                    f"Berekende opstelling-opties:\n{options_context}"
-                ),
-            },
-        ],
+    system_prompt = (
+        "Je bent een padel-coach. Je krijgt een aantal AL BEREKENDE "
+        "opstelling-opties voor onze eigen ploeg tegen een specifieke "
+        "tegenstander (elke optie = een volledige verdeling van onze spelers "
+        "in dubbels, met wie tegen welk tegenstanderskoppel uitkomt). Geef PER "
+        "OPTIE een kort, concreet commentaar: wat zijn de sterke punten "
+        "(gunstige matchups, goede synergie) en de risico's (moeilijke "
+        "matchups, weinig gezamenlijke ervaring)? Sluit af met een korte "
+        "aanbeveling welke optie je zou kiezen en waarom. Spreek over 'dubbel "
+        "1', 'dubbel 2', enzovoort - nooit over 'board'. Verzin GEEN spelers, "
+        "cijfers of resultaten die niet letterlijk gegeven zijn - de "
+        "synergie-scores en matchup-edges in de data zijn al berekend, jij "
+        "duidt ze enkel. Als dit een VERVOLGVRAAG is op een eerder antwoord in "
+        "dit gesprek, bouw daar dan expliciet op voort. " + _BASE_RULES
     )
-    return response.choices[0].message.content.strip()
+    user_message = (
+        f"Data over de tegenploeg:\n{team_context}\n\n"
+        f"Berekende opstelling-opties:\n{options_context}"
+    )
+    return _chat_completion(system_prompt, user_message, history=history)
