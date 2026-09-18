@@ -21,9 +21,11 @@ dat hoort thuis in de code/documentatie, niet in de app zelf).
 Vereiste Streamlit secret (naast de reeds bestaande FIREBASE_SERVICE_ACCOUNT_JSON
 die de GitHub Actions workflow zelf gebruikt — dit is een ANDER secret,
 specifiek voor de Streamlit Cloud-app om de GitHub API aan te spreken):
+
     [github]
     token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     repo  = "kimverbeke1/mAICoach"
+
 Het token is een GitHub Personal Access Token met minstens 'Actions: Read
 and write' rechten op deze repo (fine-grained token) of de klassieke
 'repo' + 'workflow' scopes (classic token).
@@ -94,7 +96,7 @@ na het testen van de knop hierboven: "duurt eerst lang tegen dat je daar
 kan op klikken. na het klikken lijkt er iets te gebeuren maar je heb niet
 echt goeie feedback [...] lijkt eigenlijk niet gelukt. ik zie ook niets
 verschijnen bij actions")
-
+--------------------------------------------------------------------------
 ROOT CAUSE (bevestigd door het echte .github/workflows/refresh-padelstat.yml
 in te zien - het input-schema {"player","max","force_all"} bleek WEL
 correct, dat was dus niet de oorzaak): het meest waarschijnlijke probleem
@@ -137,7 +139,44 @@ FIX:
     check_workflow_registered() voor beide workflows, zodat Kim in 1 oogopslag
     ziet of het probleem 'workflow onbekend bij GitHub' is, nog vóór de
     eigenlijke trigger-poging.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18 (op verzoek van
+Kim: "er verschijnt een knop maar werkt niet" bij bv. een nog niet
+gescrapete partner/tegenstander, en "bij Speler toevoegen staat geen knop
+in de cloud versie")
+--------------------------------------------------------------------------
+BUG (opgelost, kritiek): de PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC-fix
+hierboven (persistente feedback in st.session_state) werd ENKEL toegepast
+in render_full_player_scrape_button(). De generieke, veel vaker gebruikte
+render_cloud_scrape_trigger() — de functie achter "🚀 Nieuwe tegenstanders
+ophalen", "📈 Klassement nu ophalen voor deze ploeg", "🎯 Playing strength
+nu ophalen voor deze ploeg", "🔄 Alle spelers verversen" (Speler
+toevoegen-pagina) en elke andere "Data verversen"-knop in de app — bleef
+het OUDE gedrag hebben: st.success()/st.error() werd enkel getoond binnen
+diezelfde render-cyclus, en verdween zodra er nadien nog een st.rerun()
+gebeurde (bv. door een checkbox of ander widget elders op de pagina). Dat
+verklaart exact "er verschijnt een knop maar werkt niet": de trigger liep
+wel degelijk (of faalde met een duidelijke reden), maar de melding was
+alweer weg tegen dat Kim keek.
+
+Fix: render_cloud_scrape_trigger() bewaart het resultaat nu ook in
+st.session_state (sleutel afgeleid van key_prefix) en toont het bij ELKE
+render opnieuw, exact hetzelfde patroon als render_full_player_scrape_
+button(). Dit lost het probleem op voor ALLE bestaande aanroepers zonder
+dat die zelf iets hoeven aan te passen.
+
+Tweede, apart probleem ("bij Speler toevoegen staat geen knop"): dat was
+GEEN bug maar het correcte, doch onduidelijke gedrag — als er nog geen
+[github]-token in de Streamlit Cloud secrets staat, toont
+render_cloud_scrape_trigger() bewust HELEMAAL NIETS (geen knop, geen
+uitleg). page_add_player.py toont daardoor op cloud geen enkele knop
+zolang dat token ontbreekt, zonder dat duidelijk is WAAROM. Zie
+page_add_player.py voor de expliciete uitleg die nu getoond wordt in dat
+geval (los van deze module, die zelf bewust "stil" blijft zodat andere,
+subtielere aanroepplekken geen ongewenste tekst tonen).
 """
+
 import os
 import sys
 import time
@@ -147,7 +186,6 @@ _CLOUD_PATH_MARKERS = ("/mount/src/", "/home/adminuser/")
 DEFAULT_GITHUB_REPO = "kimverbeke1/mAICoach"
 DEFAULT_WORKFLOW_FILE = "scrape-padel.yml"
 DEFAULT_WORKFLOW_REF = "main"
-
 # PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18: naam van de padelstat-
 # workflow, zoals vermeld in de bestaande module-docstring hierboven. Pas
 # dit aan als het echte bestand in .github/workflows/ een andere naam heeft.
@@ -286,7 +324,7 @@ def trigger_github_actions_scrape(
     nu ALTIJD de verstreken tijd (transparantie: was het traag, of net heel
     snel mislukt?), en onderscheidt een netwerktime-out expliciet van een
     verbindingsfout, i.p.v. beide als generieke "kon GitHub niet bereiken"
-    te meIden.
+    te melden.
     """
     import requests
     start = time.monotonic()
@@ -353,7 +391,8 @@ def render_cloud_scrape_trigger(
     Toont, enkel relevant op cloud, één eenvoudige knop om data te verversen
     (start op de achtergrond de bestaande GitHub Actions-workflow). Als het
     GitHub-token nog niet geconfigureerd is, wordt er niets getoond — geen
-    technische uitleg meer in de hoofd-UI.
+    technische uitleg meer in de hoofd-UI (zie de aanroeper zelf, bv.
+    page_add_player.py, voor een expliciete uitleg in dat geval).
 
     player_ids: leeg = alle spelers; of komma-gescheiden lijst voor specifieke
                 speler(s) (bv. enkel de huidige speler verversen).
@@ -366,19 +405,41 @@ def render_cloud_scrape_trigger(
       met player_ids/mode). Geef ze mee om een ANDERE workflow met een eigen
       input-schema te triggeren (bv. refresh-klassement.yml).
     - help_text: optionele tooltip op de knop (st.button(help=...)).
+
+    PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18 (op verzoek
+    van Kim: "er verschijnt een knop maar werkt niet"): het resultaat van de
+    LAATSTE klik wordt nu bewaard in st.session_state (per key_prefix) en bij
+    ELKE render van de pagina opnieuw getoond — exact hetzelfde patroon als
+    render_full_player_scrape_button(). Voorheen toonde deze functie
+    st.success()/st.error() enkel binnen de render-cyclus van de klik zelf;
+    een latere st.rerun() (bv. door een ander widget elders op de pagina)
+    liet die melding stilzwijgend verdwijnen, wat aanvoelde als "de knop
+    doet niets" terwijl de trigger wel degelijk gelukt of mislukt was.
     """
     import streamlit as st
     if not is_github_trigger_configured():
         return
+    result_key = f"{key_prefix}_cloud_trigger_last_result"
     if st.button(label, key=f"{key_prefix}_gh_trigger", type="primary", help=help_text):
         with st.spinner("Bezig met starten..."):
             ok, msg = trigger_github_actions_scrape(
                 player_ids=player_ids, mode=mode, workflow_file=workflow_file, inputs=inputs,
             )
-        if ok:
-            st.success(msg)
+        st.session_state[result_key] = {
+            "timestamp": time.strftime("%H:%M:%S"),
+            "ok": ok,
+            "msg": msg,
+        }
+    # PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18: altijd
+    # opnieuw tonen, ook buiten de if-branch van de klik zelf, zodat een
+    # latere rerun de feedback niet meer kan laten verdwijnen.
+    last = st.session_state.get(result_key)
+    if last:
+        st.caption(f"Resultaat van de laatste poging, om {last['timestamp']}:")
+        if last["ok"]:
+            st.success(last["msg"])
         else:
-            st.error(msg)
+            st.error(last["msg"])
 
 
 def render_full_player_scrape_button(
@@ -417,7 +478,8 @@ def render_full_player_scrape_button(
     EERST, via check_workflow_registered(), rechtstreeks bij GitHub
     geverifieerd of beide workflows daar effectief herkend worden - dat
     geeft een DEFINITIEF antwoord op de vraag "waarom zie ik niets in
-    Actions?" (workflow onbekend bij GitHub vs. een andere fout)."""
+    Actions?" (workflow onbekend bij GitHub vs. een andere fout).
+    """
     import streamlit as st
     if not is_github_trigger_configured():
         return
