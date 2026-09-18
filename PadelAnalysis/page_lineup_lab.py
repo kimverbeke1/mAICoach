@@ -977,6 +977,22 @@ def _historical_opponent_boards_list(bundle: dict) -> list:
 
 
 def _opponent_lineup_key(boards: list):
+    # PADEL_ANALYSIS_OPPONENT_DEDUP_ORDER_FIX_2026-09-19 (gevonden bij Kim's
+    # verificatie van de pre-analyse-tabel: "zijn die combinaties anders dan
+    # in de huidige code?"): dit was voorheen een frozenset-van-frozensets,
+    # dus IDENTIEK aan de bug die we al fixten voor onze EIGEN kant
+    # (our_pairs_key), maar dan voor de TEGENSTANDER-kant. Twee theoretische
+    # tegenstander-structuren die exact dezelfde 4 koppels gebruiken maar in
+    # OMGEKEERDE rotatie-volgorde (bv. rotatie1={P,Q}/rotatie2={R,S} vs.
+    # rotatie1={R,S}/rotatie2={P,Q}) botsten hierdoor op DEZELFDE sleutel en
+    # werd de 2de stilzwijgend als "duplicaat" weggefilterd - terwijl dit in
+    # werkelijkheid 2 verschillende scenario's zijn (welk tegenstander-koppel
+    # WIJ in rotatie 1 vs rotatie 2 tegenover ons krijgen, beïnvloedt de
+    # winkans per bord). Geverifieerd: bij 5 beschikbare tegenstander-spelers
+    # (2,2,2,1,1-verdeling) gaf dit 12 rotatie-veilige structuren terug, maar
+    # slechts 6 "unieke" opstellingen na de oude dedup - exact de helft ging
+    # stilzwijgend verloren. Een TUPLE (i.p.v. frozenset) behoudt de
+    # rotatie-POSITIE, net als bij de eerdere fix van our_pairs_key.
     pairs = []
     for b in boards:
         uids = frozenset(str(p.get("user_id")) for p in (b.get("opponent_pair") or []) if p.get("user_id"))
@@ -984,7 +1000,7 @@ def _opponent_lineup_key(boards: list):
             pairs.append(uids)
     if not pairs:
         return None
-    return frozenset(pairs)
+    return tuple(pairs)
 
 
 def _collect_unique_opponent_lineups(historical_boards_with_labels: list, theoretical_boards: list) -> dict:
@@ -1317,6 +1333,48 @@ def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
 
 
+# PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19 (op verzoek van Kim:
+# "los ook het probleem op met de rijen die niet breed genoeg zijn om alle
+# tekst gewrapped te tonen want de kolommen zijn anders te breed"):
+#
+# ROOT CAUSE gevonden in de Streamlit-frontend zelf (glide-data-grid): een
+# TextColumn-cel krijgt ENKEL "allowWrapping" (dus effectief tekst-wrap over
+# meerdere regels) als de dataframe's row_height MEER dan 4rem (64px)
+# bedraagt. De vorige fix (PADEL_ANALYSIS_TABLE_READABILITY_FIX_2026-09-19)
+# gebruikte row_height=56 — dat zit ONDER die 64px-drempel, dus wrapping werd
+# in werkelijkheid NOOIT geactiveerd. Om toch iets van de 2de regel zichtbaar
+# te krijgen was toen een kunstmatig brede, VASTE kolombreedte (280/320px)
+# nodig voor ALLE matchkolommen, ongeacht de werkelijke inhoud — vandaar Kim's
+# terechte klacht dat de kolommen nu te breed zijn.
+#
+# FIX: (1) row_height ruim BOVEN de 64px-drempel zetten, zodat wrapping
+# effectief aanspringt; (2) per kolom een DYNAMISCHE breedte berekenen op
+# basis van de langste tekstregel die er werkelijk in staat (i.p.v. 1 vaste
+# brede waarde voor alle kolommen) — zo blijven kolommen met kortere namen
+# smal, en worden enkel kolommen met langere namen breder, met de tekst
+# netjes gewrapt over de 2 (of meer) regels binnen de rijhoogte.
+_TABLE_ROW_HEIGHT = 88  # ruim boven de 64px/4rem-drempel voor tekst-wrap
+_TABLE_CHAR_WIDTH_PX = 6.6  # ruwe schatting breedte per karakter (Source Sans, ~14px)
+_TABLE_COL_MIN_WIDTH = 130
+_TABLE_COL_MAX_WIDTH = 260
+
+
+def _estimate_wrapped_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
+    """Schat een kolombreedte die groot genoeg is voor de LANGSTE individuele
+    tekstregel (dus na een eventuele "\\n"-split) in deze kolom, met een
+    minimum en maximum. Zo wordt elke kolom niet breder dan nodig, terwijl
+    lange namen nog steeds leesbaar over 2 regels wrappen i.p.v. afgekapt te
+    worden."""
+    max_line_len = 0
+    for v in values:
+        if v is None:
+            continue
+        for line in str(v).split("\n"):
+            max_line_len = max(max_line_len, len(line))
+    width = int(max_line_len * _TABLE_CHAR_WIDTH_PX) + 24  # + padding
+    return max(min_width, min(max_width, width))
+
+
 def _own_lineup_group_key(assignment: list) -> frozenset:
     """De ONGEORDENDE verzameling eigen koppels van 1 matchup-rij - dus
     dezelfde 'opstelling' ongeacht bordvolgorde of tegen welke
@@ -1383,12 +1441,27 @@ def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_globa
             "# scenario's": len(rows_for_group),
         })
     summary_rows.sort(key=lambda r: r.pop("_best_sort"), reverse=True)
+    # PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19: ook hier dynamische
+    # kolombreedte i.p.v. vaste 260/220/220, zodat kortere namen geen
+    # onnodig brede kolommen opleveren (deze cellen bevatten geen "\n", dus
+    # 1 tekstregel volstaat - row_height=40 blijft hier dus prima).
+    col_widths = {
+        "Eigen opstelling (koppels)": _estimate_wrapped_column_width(
+            [r.get("Eigen opstelling (koppels)") for r in summary_rows], min_width=160, max_width=300,
+        ),
+        "Best case tegen": _estimate_wrapped_column_width(
+            [r.get("Best case tegen") for r in summary_rows], min_width=140, max_width=260,
+        ),
+        "Worst case tegen": _estimate_wrapped_column_width(
+            [r.get("Worst case tegen") for r in summary_rows], min_width=140, max_width=260,
+        ),
+    }
     st.dataframe(
         summary_rows, use_container_width=True, hide_index=True,
         column_config={
-            "Eigen opstelling (koppels)": st.column_config.TextColumn("Eigen opstelling (koppels)", width=260),
-            "Best case tegen": st.column_config.TextColumn("Best case tegen", width=220),
-            "Worst case tegen": st.column_config.TextColumn("Worst case tegen", width=220),
+            "Eigen opstelling (koppels)": st.column_config.TextColumn("Eigen opstelling (koppels)", width=col_widths["Eigen opstelling (koppels)"]),
+            "Best case tegen": st.column_config.TextColumn("Best case tegen", width=col_widths["Best case tegen"]),
+            "Worst case tegen": st.column_config.TextColumn("Worst case tegen", width=col_widths["Worst case tegen"]),
             "# scenario's": st.column_config.NumberColumn("# scenario's", width="small"),
         },
         row_height=40,
@@ -1609,18 +1682,21 @@ def _render_all_valid_matchups(
         "Verwacht": st.column_config.NumberColumn("Verwacht", format="%.2f", width="small"),
         "Reglementair": st.column_config.TextColumn("Reglementair", width="small"),
     }
+    # PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19: kolombreedte per
+    # matchkolom wordt nu PER KOLOM berekend op basis van de langste
+    # werkelijke tekstregel erin (zie _estimate_wrapped_column_width), i.p.v.
+    # 1 vaste brede waarde voor alle kolommen. Gecombineerd met de rijhoogte
+    # hieronder (> 64px), wrapt lange tekst netjes over 2 regels i.p.v.
+    # afgekapt te worden — en kolommen met kortere namen blijven smal.
     for col_base in board_column_names:
-        # PADEL_ANALYSIS_TABLE_READABILITY_FIX_2026-09-19 (op verzoek van Kim:
-        # "tabel niet leesbaar want de namen passen er niet in" + "er is een
-        # 2de regel in de tabel maar die is niet zichtbaar"): "medium" (~200px)
-        # was te smal voor 2 volledige spelersnamen + "vs" + 2 tegenstander-
-        # namen op 1 regel, en de standaard rijhoogte van st.dataframe toont
-        # enkel de EERSTE tekstregel van een cel. Vaste, ruimere pixelbreedte
-        # + expliciete row_height (zie st.dataframe hieronder) lossen dit
-        # samen op: de 2de regel ("vs ...") wordt nu gewoon zichtbaar.
-        column_config[col_base] = st.column_config.TextColumn(col_base, width=280)
+        col_values = [row.get(col_base) for row in table_rows]
+        width = _estimate_wrapped_column_width(col_values)
+        column_config[col_base] = st.column_config.TextColumn(col_base, width=width)
         column_config[f"{col_base} %"] = st.column_config.NumberColumn(f"{col_base} %", format="%.0f%%", width="small")
-    column_config["Toelichting"] = st.column_config.TextColumn("Toelichting", width=320)
+    toelichting_width = _estimate_wrapped_column_width(
+        [row.get("Toelichting") for row in table_rows], min_width=160, max_width=_TABLE_COL_MAX_WIDTH,
+    )
+    column_config["Toelichting"] = st.column_config.TextColumn("Toelichting", width=toelichting_width)
     column_order = ["#", "Verwacht", "Reglementair"]
     for col_base in board_column_names:
         column_order.append(col_base)
@@ -1630,14 +1706,15 @@ def _render_all_valid_matchups(
     st.dataframe(
         table_rows, use_container_width=True, hide_index=True,
         column_config=column_config, column_order=column_order,
-        row_height=56,  # genoeg ruimte voor de 2 tekstregels per matchkolom
+        row_height=_TABLE_ROW_HEIGHT,  # > 64px/4rem: dit is wat tekst-wrap in st.dataframe daadwerkelijk activeert
     )
     st.caption(
-        "Elke matchkolom toont de koppels op 2 regels (koppel / vs tegenstander); de winkans staat in de "
-        "kolom ernaast als apart, sorteerbaar percentage. 'Reglementair' toont ⚠️ NIET voor een bewust "
-        "omgedraaide, niet-toegelaten variant (enkel zichtbaar als je de checkbox hierboven aanvinkt). "
-        "De kolom 'Toelichting' toont ALTIJD de exacte OFFICIËLE puntensom per duo die de bordvolgorde "
-        "bepaalt (nooit de padelstat-score) — zo kan je die basis meteen zelf controleren."
+        "Elke matchkolom toont de koppels op 2 regels (koppel / vs tegenstander), netjes gewrapt binnen een "
+        "kolombreedte die zich aanpast aan de langste naam in die kolom; de winkans staat in de kolom "
+        "ernaast als apart, sorteerbaar percentage. 'Reglementair' toont ⚠️ NIET voor een bewust omgedraaide, "
+        "niet-toegelaten variant (enkel zichtbaar als je de checkbox hierboven aanvinkt). De kolom "
+        "'Toelichting' toont ALTIJD de exacte OFFICIËLE puntensom per duo die de bordvolgorde bepaalt "
+        "(nooit de padelstat-score) — zo kan je die basis meteen zelf controleren."
     )
     if not show_all and len(all_matchups) > len(display_matchups):
         st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} matchups getoond — vink hierboven aan om alles te zien.")
