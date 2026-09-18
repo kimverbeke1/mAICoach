@@ -1,0 +1,118 @@
+# .github/workflows/search-player.yml
+#
+# Zoekt een NIEUWE, nog onbekende speler op TVL (player_search.py,
+# Playwright) op aanvraag vanaf de Streamlit Cloud-app, en cachet het
+# resultaat in Firestore (player_search_cache) zodat de app het kan
+# ophalen. Website scrapet dus nooit zelf; hij geeft enkel het startsein.
+#
+# PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim: "bouw
+# maar. Padelstat en klassement moeten dan ook gescrapt worden."):
+# Streamlit Community Cloud heeft geen Playwright/browser, dus "Speler
+# toevoegen" (zoeken op naam) werkte tot nu toe ENKEL lokaal — de bestaande
+# scrape-padel.yml kan enkel player_id's verversen, nooit op naam zoeken.
+# Deze workflow is de cloud-tegenhanger van scrape-padel.yml, maar dan voor
+# player_search.search_players() (scraper/search_new_player_ci.py) i.p.v.
+# scrape_player.scrape_player(). De venv-/Playwright-cachestappen zijn
+# bewust identiek aan scrape-padel.yml, zodat een warme run hier even snel
+# start.
+#
+# Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON
+#   Settings -> Secrets and variables -> Actions
+#   (zelfde secret als scrape-padel.yml/refresh-padelstat.yml/
+#   refresh-klassement.yml)
+name: Search New Player
+on:
+  workflow_dispatch:
+    inputs:
+      first_name:
+        description: "Voornaam van de te zoeken speler"
+        required: false
+        default: ""
+      last_name:
+        description: "Achternaam van de te zoeken speler"
+        required: false
+        default: ""
+      club:
+        description: "Club (optioneel, versmalt de zoekresultaten)"
+        required: false
+        default: ""
+# Voorkom dat twee gelijktijdige zoekopdrachten elkaars Firestore-cache-
+# schrijfactie doorkruisen. We annuleren NIET (cancel-in-progress: false),
+# zodat een lopende zoekopdracht netjes mag afronden en de volgende erna
+# start.
+concurrency:
+  group: search-new-player
+  cancel-in-progress: false
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    # Een enkele naamzoekopdracht is veel sneller dan een volledige
+    # matchdata-scrape; 10 minuten is ruim voldoende, ook bij een koude
+    # (cache-miss) venv-installatie.
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            PadelAnalysis/scraper/requirements-scraper.txt
+      # ── Volledige venv-cache (identiek aan scrape-padel.yml) ────────────
+      - name: Cache Python-venv (alle pip-packages + playwright)
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: PadelAnalysis/scraper/.venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('requirements.txt', 'PadelAnalysis/scraper/requirements-scraper.txt') }}
+      - name: Bouw venv + installeer dependencies (alleen bij cache-miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install -r ../../requirements.txt
+          pip install -r requirements-scraper.txt
+      - name: Bevestig venv aanwezig (warme run)
+        if: steps.cache-venv.outputs.cache-hit == 'true'
+        run: |
+          echo "Venv-cache-hit: pip install volledig overgeslagen."
+          . .venv/bin/activate
+          python -c "import playwright, bs4, requests; print('deps OK uit cache')"
+      # ── Playwright-browsercache (identiek aan scrape-padel.yml) ─────────
+      - name: Bepaal Playwright-versie (voor cache-key)
+        id: playwright-version
+        run: |
+          . .venv/bin/activate
+          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright-browserbinaries
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright browsers (Chromium binary + OS-libraries)
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: |
+          . .venv/bin/activate
+          python -m playwright install --with-deps chromium
+      - name: Installeer enkel OS-libraries (bij browser-cache-hit)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: |
+          . .venv/bin/activate
+          python -m playwright install-deps chromium
+      - name: Zoek nieuwe speler op TVL
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          . .venv/bin/activate
+          python search_new_player_ci.py \
+            --first "${{ github.event.inputs.first_name }}" \
+            --last "${{ github.event.inputs.last_name }}" \
+            --club "${{ github.event.inputs.club }}"

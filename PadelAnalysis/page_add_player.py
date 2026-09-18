@@ -1,3 +1,4 @@
+
 """
 page_add_player.py — "➕ Speler toevoegen"-pagina.
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14: losgemaakt uit dashboard.py,
@@ -15,72 +16,49 @@ via scouting/enrichment (die WEL in aanmerking komen voor opruiming als ze
 nooit verrijkt raken). Fix: de "➕ Toevoegen"-knop zet nu expliciet
 added_by="manual" op het profiel.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_ADD_PLAYER_CLOUD_EXPLANATION_2026-09-18 (op verzoek van Kim:
-"ik wil zeker ook speler kunnen toevoegen bij speler toevoegen pagina maar
-daar staat geen knop in de cloud versie")
+PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim: "Nieuwe
+spelers zoeken/toevoegen vereist een browser (Playwright) en werkt daarom
+structureel enkel lokaal (streamlit run streamlit_app.py), nooit op deze
+cloud-omgeving — dat blijft zo, ongeacht configuratie." -> "bouw maar.
+Padelstat en klassement moeten dan ook gescrapt worden.")
 --------------------------------------------------------------------------
-GEEN BUG, maar onduidelijk/stil gedrag (verduidelijkt): op Streamlit
-Community Cloud kon je hier al NOOIT een nieuwe speler zoeken/toevoegen —
-dat vereist search_players()/scrape_player(), en die gebruiken Playwright
-(een echte browser), wat structureel niet beschikbaar is op Cloud. Dat is
-bewust zo (zie cloud_helpers.is_scraping_available()) en blijft zo; nieuwe
-spelers toevoegen kan enkel lokaal (`streamlit run streamlit_app.py`).
-
-Het enige dat op Cloud WEL kon (bestaande spelers verversen via GitHub
-Actions) gebruikte render_cloud_scrape_trigger(), en die functie toont
-BEWUST helemaal niets — geen knop, geen uitleg — zolang er geen
-[github]-token in de Streamlit Cloud secrets staat (zie cloud_helpers.py).
-Zonder dat te weten leek de pagina dus helemaal leeg/kapot op Cloud,
-terwijl in werkelijkheid gewoon het GitHub-token nog ontbrak.
-
-Fix: deze pagina toont nu ALTIJD iets op Cloud — ofwel de ververs-knop
-(als het token er is), ofwel een expliciete waarschuwing die uitlegt dat
-en waarom die knop ontbreekt, met de exacte secret-sectie die nodig is.
+BUG/BEPERKING (opgelost, structureel): op Streamlit Community Cloud toonde
+deze pagina voorheen ONVOORWAARDELIJK enkel "Nieuwe spelers zoeken kan
+enkel lokaal", zonder ooit de bestaande GitHub Actions-trigger te
+overwegen — ongeacht of een GitHub-token geconfigureerd stond. Reden: er
+bestond simpelweg geen workflow die op NAAM kon zoeken (scrape-padel.yml
+kan enkel bestaande player_id's verversen).
+Fix: er is nu een aparte workflow (.github/workflows/search-player.yml +
+scraper/search_new_player_ci.py) die player_search.search_players() op een
+GitHub Actions-runner (met Playwright) uitvoert en het resultaat cachet in
+Firestore. Deze pagina toont op cloud nu cloud_helpers.render_cloud_player
+_search(), die deze workflow triggert, op het resultaat polt, en bij
+"➕ Toevoegen" meteen de volledige scrape (TVL + padelstat + klassement)
+aanbiedt via cloud_helpers.render_full_player_scrape_button() — dezelfde
+functie die overal elders in de app al gebruikt wordt voor "deze speler nu
+verversen".
 """
 import streamlit as st
-
 import dashboard_common as dc
+import cloud_helpers as ch
 from dashboard_common import (
     fb, is_scraping_available, render_cloud_scrape_trigger,
     _clean, _scrape_progress_widget, _display_name, _get_all_profiles,
 )
-# PADEL_ANALYSIS_ADD_PLAYER_CLOUD_EXPLANATION_2026-09-18: rechtstreeks uit
-# cloud_helpers geïmporteerd (dashboard_common exporteert deze naam niet),
-# enkel om te kunnen onderscheiden "geen token geconfigureerd" van "token
-# aanwezig maar iets anders faalt", zodat we op Cloud nooit stilzwijgend
-# niets tonen.
-from cloud_helpers import is_github_trigger_configured
-
-
 def page_add_player():
     st.header("➕ Speler toevoegen")
     st.caption("Zoek een speler op de TVL-website en voeg hem/haar toe aan de database.")
     if not is_scraping_available():
         st.info(
-            "🔒 Nieuwe spelers zoeken/toevoegen vereist een browser (Playwright) en werkt daarom "
-            "structureel enkel lokaal (`streamlit run streamlit_app.py`), nooit op deze "
-            "cloud-omgeving — dat blijft zo, ongeacht configuratie."
+            "Nieuwe spelers zoeken op TVL vereist normaal een browser (Playwright), "
+            "die hier op de cloud niet beschikbaar is. Dat hoeft geen probleem te "
+            "zijn: hieronder kan je dezelfde zoekopdracht via GitHub Actions laten "
+            "uitvoeren (duurt meestal 1-3 minuten)."
         )
-        if is_github_trigger_configured():
-            st.caption("Bestaande spelers verversen kan wel hieronder, via GitHub Actions:")
-            render_cloud_scrape_trigger(key_prefix="add_player_page", mode="missing", label="🔄 Alle spelers verversen")
-        else:
-            # PADEL_ANALYSIS_ADD_PLAYER_CLOUD_EXPLANATION_2026-09-18: voorheen
-            # verscheen hier HELEMAAL NIETS (render_cloud_scrape_trigger geeft
-            # stil niets terug zonder token) — vandaar "geen knop op cloud".
-            st.warning(
-                "⚠️ Er verschijnt hieronder geen knop om bestaande spelers te verversen: er staat "
-                "nog geen GitHub-token geconfigureerd in de Streamlit Cloud secrets.\n\n"
-                "Voeg in **App settings → Secrets** een sectie toe zoals:\n"
-                "```toml\n"
-                "[github]\n"
-                "token = \"ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n"
-                "repo  = \"kimverbeke1/mAICoach\"\n"
-                "```\n"
-                "(fine-grained token met minstens 'Actions: Read and write' op deze repo). "
-                "Zonder dat token kan deze pagina geen enkele actie op afstand starten — "
-                "spelers zoeken/toevoegen blijft daarna nog steeds enkel lokaal mogelijk."
-            )
+        ch.render_cloud_player_search(key_prefix="add_player_page_search")
+        st.divider()
+        st.caption("Alle bestaande spelers verversen (ontbrekende periodes) kan ook rechtstreeks:")
+        render_cloud_scrape_trigger(key_prefix="add_player_page", mode="missing", label="🔄 Alle spelers verversen")
         return
     with st.form("search_form"):
         c1, c2, c3 = st.columns([2, 2, 2])

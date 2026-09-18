@@ -1,13 +1,12 @@
+
 """
 cloud_helpers.py — Streamlit Community Cloud detectie voor PadelAnalysis.
-
 Playwright/Selenium-scraping (spelers zoeken/toevoegen op TVL, profielen
 verversen, klassementshistoriek laden, nieuwe tegenstanders scrapen)
 vereist browser-binaries die niet beschikbaar zijn op Streamlit Community
 Cloud. Deze module bepaalt of scraping mogelijk is, zodat de UI de
 betrokken knoppen kan verbergen op cloud en gewoon tonen op een lokale
 machine (waar je normaal `streamlit run streamlit_app.py` draait).
-
 Cloud-scrape via GitHub Actions:
 Sinds `.github/workflows/scrape-padel.yml` bestaat (een GitHub Actions
 workflow die WEL Playwright kan draaien, op een ubuntu-latest runner),
@@ -17,19 +16,15 @@ API (`workflow_dispatch`), zonder zelf een browser te starten.
 ("Data verversen"). Als het GitHub-token nog niet geconfigureerd is,
 verschijnt er gewoon niets (geen technische uitleg meer in de hoofd-UI —
 dat hoort thuis in de code/documentatie, niet in de app zelf).
-
 Vereiste Streamlit secret (naast de reeds bestaande FIREBASE_SERVICE_ACCOUNT_JSON
 die de GitHub Actions workflow zelf gebruikt — dit is een ANDER secret,
 specifiek voor de Streamlit Cloud-app om de GitHub API aan te spreken):
-
     [github]
     token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     repo  = "kimverbeke1/mAICoach"
-
 Het token is een GitHub Personal Access Token met minstens 'Actions: Read
 and write' rechten op deze repo (fine-grained token) of de klassieke
 'repo' + 'workflow' scopes (classic token).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17 (op verzoek van Kim,
 "dat moet wel werken via github actions... bekijk dat eens van dichterbij")
@@ -43,7 +38,6 @@ bestaan er twee BIJKOMENDE, aparte dagelijkse workflows
 input-schema ({"player": ..., "max": ..., "force_all": ...}). Op Cloud kon
 Kim deze twee dus enkel via de dagelijkse cron laten lopen, nooit direct
 voor een specifieke tegenstander-ploeg triggeren.
-
 Fix: beide functies hebben nu OPTIONELE `workflow_file`- en `inputs`-
 parameters. Worden die niet meegegeven, dan is het gedrag EXACT hetzelfde
 als voorheen (workflow uit st.secrets/DEFAULT_WORKFLOW_FILE,
@@ -53,7 +47,6 @@ meegegeven, dan wordt die dict RECHTSTREEKS als workflow_dispatch-payload
 gebruikt, ongeacht player_ids/mode — zo kan dezelfde functie nu ook
 refresh-klassement.yml/refresh-padelstat.yml aansturen met hun eigen
 input-namen, vanuit opponent_scout_ui.py.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18 (op verzoek van Kim: "bij
 elke speler die je ziet daar rechtstreeks gewoon te kunnen een scrape
@@ -75,7 +68,6 @@ klik, TWEE afzonderlijke GitHub Actions-triggers voor exact 1 speler:
   2. refresh-padelstat.yml, met inputs={"player": <id>, "max": "1",
      "force_all": "false"} — ververst de padelstats.be playing strength
      voor EXACT deze ene speler.
-
 BELANGRIJKE AANNAME (graag door Kim te verifiëren tegen het echte
 .github/workflows/refresh-padelstat.yml-bestand, dat ik niet zelf kon
 inzien): het input-schema {"player": ..., "max": ..., "force_all": ...}
@@ -85,18 +77,15 @@ bv. "player_id" of "player_ids") niet, dan zal GitHub de workflow_dispatch-
 aanroep ofwel negeren ofwel met een 422-fout weigeren — in dat laatste
 geval toont trigger_github_actions_scrape() de ruwe HTTP-statuscode terug,
 wat een duidelijk signaal is om het input-schema te corrigeren.
-
 Beide triggers gebeuren ONAFHANKELIJK van elkaar (2 aparte API-calls) —
 als de ene mislukt (bv. workflow-bestand nog niet gepusht) blijft de
 andere gewoon doorgaan; beide resultaten worden apart teruggemeld.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18 (op verzoek van Kim,
 na het testen van de knop hierboven: "duurt eerst lang tegen dat je daar
 kan op klikken. na het klikken lijkt er iets te gebeuren maar je heb niet
 echt goeie feedback [...] lijkt eigenlijk niet gelukt. ik zie ook niets
 verschijnen bij actions")
---------------------------------------------------------------------------
 ROOT CAUSE (bevestigd door het echte .github/workflows/refresh-padelstat.yml
 in te zien - het input-schema {"player","max","force_all"} bleek WEL
 correct, dat was dus niet de oorzaak): het meest waarschijnlijke probleem
@@ -108,7 +97,6 @@ ENKEL voor workflow-bestanden die GitHub al kent op de default branch -
 lokaal/in OneDrive bestaan is niet voldoende, het moet ook echt gepusht
 EN gemerged zijn). Kim's eigen bestanden waren op het moment van testen
 mogelijk nog niet gepusht.
-
 Twee bijkomende, structurele problemen die de "geen goede feedback"-klacht
 zelfstandig verklaren, los van de 404-hypothese:
   1. st.success()/st.error() in Streamlit tonen enkel EENMALIG, binnen de
@@ -120,7 +108,6 @@ zelfstandig verklaren, los van de 404-hypothese:
      verifiëren of GitHub de workflow uberhaupt herkent - een fout kwam
      pas AAN HET LICHT na de mislukte poging zelf, zonder onderscheid
      tussen "workflow onbekend" en "andere fout".
-
 FIX:
   - check_workflow_registered(workflow_file): NIEUWE functie, doet een
     read-only GET-aanroep naar de GitHub API (GEEN dispatch) om
@@ -139,50 +126,57 @@ FIX:
     check_workflow_registered() voor beide workflows, zodat Kim in 1 oogopslag
     ziet of het probleem 'workflow onbekend bij GitHub' is, nog vóór de
     eigenlijke trigger-poging.
-
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18 (op verzoek van
-Kim: "er verschijnt een knop maar werkt niet" bij bv. een nog niet
-gescrapete partner/tegenstander, en "bij Speler toevoegen staat geen knop
-in de cloud versie")
---------------------------------------------------------------------------
-BUG (opgelost, kritiek): de PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC-fix
-hierboven (persistente feedback in st.session_state) werd ENKEL toegepast
-in render_full_player_scrape_button(). De generieke, veel vaker gebruikte
-render_cloud_scrape_trigger() — de functie achter "🚀 Nieuwe tegenstanders
-ophalen", "📈 Klassement nu ophalen voor deze ploeg", "🎯 Playing strength
-nu ophalen voor deze ploeg", "🔄 Alle spelers verversen" (Speler
-toevoegen-pagina) en elke andere "Data verversen"-knop in de app — bleef
-het OUDE gedrag hebben: st.success()/st.error() werd enkel getoond binnen
-diezelfde render-cyclus, en verdween zodra er nadien nog een st.rerun()
-gebeurde (bv. door een checkbox of ander widget elders op de pagina). Dat
-verklaart exact "er verschijnt een knop maar werkt niet": de trigger liep
-wel degelijk (of faalde met een duidelijke reden), maar de melding was
-alweer weg tegen dat Kim keek.
-
-Fix: render_cloud_scrape_trigger() bewaart het resultaat nu ook in
-st.session_state (sleutel afgeleid van key_prefix) en toont het bij ELKE
-render opnieuw, exact hetzelfde patroon als render_full_player_scrape_
-button(). Dit lost het probleem op voor ALLE bestaande aanroepers zonder
-dat die zelf iets hoeven aan te passen.
-
-Tweede, apart probleem ("bij Speler toevoegen staat geen knop"): dat was
-GEEN bug maar het correcte, doch onduidelijke gedrag — als er nog geen
-[github]-token in de Streamlit Cloud secrets staat, toont
-render_cloud_scrape_trigger() bewust HELEMAAL NIETS (geen knop, geen
-uitleg). page_add_player.py toont daardoor op cloud geen enkele knop
-zolang dat token ontbreekt, zonder dat duidelijk is WAAROM. Zie
-page_add_player.py voor de expliciete uitleg die nu getoond wordt in dat
-geval (los van deze module, die zelf bewust "stil" blijft zodat andere,
-subtielere aanroepplekken geen ongewenste tekst tonen).
+PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim: "ik heb
+terug teveel reads op firebase" (aparte fix, zie firebase_service.py) EN
+"Nieuwe spelers zoeken/toevoegen vereist een browser (Playwright) en werkt
+daarom structureel enkel lokaal [...] dat blijft zo, ongeacht configuratie.
+Problemen bij proberen scrapen bij partner ook nog zelfde" — "bouw maar.
+Padelstat en klassement moeten dan ook gescrapt worden.")
+ROOT CAUSE: het zoeken van een NIEUWE (nog onbekende) speler op naam
+(player_search.search_players(), Playwright) gebeurde tot nu toe ALLEEN
+lokaal — page_add_player.py toonde op cloud onvoorwaardelijk "kan enkel
+lokaal", ZONDER ooit de bestaande GitHub-trigger te overwegen. De knop
+"🔍 Opzoeken & toevoegen via GitHub Actions" in player_inline_actions.py
+bestond wel, maar triggerde in werkelijkheid gewoon scrape-padel.yml met
+mode="new_users" (player_ids/mode-schema) — een workflow die ENKEL
+player_id's kan verversen, nooit op naam kan zoeken. Die knop deed dus
+NIET wat de tekst beloofde, met of zonder GitHub-token.
+FIX (structureel, vergt een NIEUWE workflow — zie
+.github/workflows/search-player.yml en scraper/search_new_player_ci.py):
+  - Nieuwe workflow search-player.yml neemt first_name/last_name/club als
+    workflow_dispatch-inputs, draait player_search.search_players() op een
+    ubuntu-runner (Playwright, net als scrape-padel.yml), en cachet het
+    resultaat in Firestore via firebase_service.save_player_search_cache()
+    — DEZELFDE cache die de lokale zoekflow ook al vulde/las, dus dit werkt
+    ongeacht waar de zoekopdracht is uitgevoerd (geen nieuwe collectie
+    nodig).
+  - trigger_player_search(): dunne wrapper rond
+    trigger_github_actions_scrape() die deze nieuwe workflow aanroept.
+  - render_cloud_player_search(): NIEUWE, herbruikbare UI-component
+    (gebruikt door zowel page_add_player.py als player_inline_actions.py)
+    die de workflow triggert, en vervolgens — via een simpele "Resultaat
+    ophalen"-knop (polling, want een workflow_dispatch-run duurt meestal
+    1-3 minuten) — fb.get_player_search_cache() uitleest en de gevonden
+    kandidaten toont, net als de bestaande lokale flow. Bij "➕ Toevoegen"
+    wordt het profiel aangemaakt EN wordt onmiddellijk
+    render_full_player_scrape_button() getoond, zodat de nieuwe speler
+    meteen TVL + padelstat + klassement kan laten scrapen (zie hieronder).
+  - render_full_player_scrape_button() triggert nu DRIE workflows i.p.v.
+    twee: naast TVL-matchdata (scrape-padel.yml) en padelstats.be playing
+    strength (refresh-padelstat.yml) ook de TVL-klassementshistoriek
+    (refresh-klassement.yml, met dezelfde {"player": ..., "max": "1",
+    "force_all": "false"}-inputs als refresh-padelstat.yml — zie het echte
+    .github/workflows/refresh-klassement.yml voor bevestiging van dit
+    schema). Dit geldt dus ook voor ALLE bestaande aanroepplekken van deze
+    knop (opponent_dossier.py: render_player_summary_inline(), gebruikt in
+    Team-analyse, Opstelling-analyse, Spelers-pagina en Mijn profiel) —
+    geen extra werk nodig om klassement daar ook toe te voegen.
 """
-
 import os
 import sys
 import time
-
 _CLOUD_PATH_MARKERS = ("/mount/src/", "/home/adminuser/")
-
 DEFAULT_GITHUB_REPO = "kimverbeke1/mAICoach"
 DEFAULT_WORKFLOW_FILE = "scrape-padel.yml"
 DEFAULT_WORKFLOW_REF = "main"
@@ -190,8 +184,12 @@ DEFAULT_WORKFLOW_REF = "main"
 # workflow, zoals vermeld in de bestaande module-docstring hierboven. Pas
 # dit aan als het echte bestand in .github/workflows/ een andere naam heeft.
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
-
-
+# PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18: naam van de
+# klassement-workflow (bevestigd tegen het echte .github/workflows/
+# refresh-klassement.yml-bestand) en van de nieuwe speler-zoek-workflow
+# (nieuw bestand, zie .github/workflows/search-player.yml).
+KLASSEMENT_WORKFLOW_FILE = "refresh-klassement.yml"
+PLAYER_SEARCH_WORKFLOW_FILE = "search-player.yml"
 def is_scraping_available() -> bool:
     """
     True  -> lokaal: Playwright/browser-binaries worden verondersteld
@@ -214,8 +212,6 @@ def is_scraping_available() -> bool:
     except ImportError:
         return False
     return True
-
-
 def _get_github_settings():
     """Leest [github] token/repo/workflow uit st.secrets. Geeft (token, repo, workflow, ref)."""
     try:
@@ -228,27 +224,21 @@ def _get_github_settings():
     workflow = (gh.get("workflow") if hasattr(gh, "get") else None) or DEFAULT_WORKFLOW_FILE
     ref = (gh.get("ref") if hasattr(gh, "get") else None) or DEFAULT_WORKFLOW_REF
     return token, repo, workflow, ref
-
-
 def is_github_trigger_configured() -> bool:
     """True als er een GitHub-token in st.secrets['github']['token'] staat."""
     token, _repo, _workflow, _ref = _get_github_settings()
     return bool(token)
-
-
 def check_workflow_registered(workflow_file: str) -> tuple[bool, str]:
     """
     PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: read-only
     pre-flight check (GEEN workflow_dispatch, GEEN nieuwe run) die
     rechtstreeks bij GitHub bevestigt of dit workflow-bestand ECHT
     herkend wordt op de default branch van de repo.
-
     Dit is de directe test voor de meest waarschijnlijke oorzaak van
     "niets verschijnt in Actions": workflow_dispatch via de REST API
     werkt ENKEL voor workflow-bestanden die GitHub al kent op de default
     branch (lokaal/in OneDrive bestaan is niet voldoende - het moet ook
     echt gepusht EN gemerged zijn naar bv. 'main').
-
     Returns (gevonden, detail):
       - (True, "actief")           -> workflow bestaat en kan getriggerd worden.
       - (True, "state=<state>")    -> workflow bestaat, maar staat NIET op
@@ -293,8 +283,6 @@ def check_workflow_registered(workflow_file: str) -> tuple[bool, str]:
     if resp.status_code == 403:
         return False, "GitHub-token heeft onvoldoende rechten"
     return False, f"onverwachte statuscode {resp.status_code}"
-
-
 def trigger_github_actions_scrape(
     player_ids: str = "",
     mode: str = "missing",
@@ -306,7 +294,6 @@ def trigger_github_actions_scrape(
     call naar de GitHub REST API. Dit draait GEEN Playwright binnen
     Streamlit zelf — het triggert enkel de externe workflow die dat wél kan
     (ubuntu-latest runner met `playwright install`).
-
     PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17:
     - workflow_file: optioneel, overschrijft welk workflow-bestand
       getriggerd wordt (standaard: uit st.secrets['github']['workflow'] of
@@ -317,14 +304,12 @@ def trigger_github_actions_scrape(
       input-schema hebben dan scrape-padel.yml). Wordt dit NIET meegegeven,
       dan wordt (net als voorheen) {"player_ids": ..., "mode": ...} gebruikt
       — volledig achterwaarts compatibel.
-
     Returns (success, message).
-
     PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het bericht bevat
     nu ALTIJD de verstreken tijd (transparantie: was het traag, of net heel
     snel mislukt?), en onderscheidt een netwerktime-out expliciet van een
     verbindingsfout, i.p.v. beide als generieke "kon GitHub niet bereiken"
-    te melden.
+    te meIden.
     """
     import requests
     start = time.monotonic()
@@ -376,8 +361,6 @@ def trigger_github_actions_scrape(
             + ". Controleer of het input-schema overeenkomt met wat hier verstuurd werd."
         )
     return False, f"Mislukt ({elapsed:.1f}s, HTTP {resp.status_code})."
-
-
 def render_cloud_scrape_trigger(
     key_prefix: str = "",
     player_ids: str = "",
@@ -391,57 +374,30 @@ def render_cloud_scrape_trigger(
     Toont, enkel relevant op cloud, één eenvoudige knop om data te verversen
     (start op de achtergrond de bestaande GitHub Actions-workflow). Als het
     GitHub-token nog niet geconfigureerd is, wordt er niets getoond — geen
-    technische uitleg meer in de hoofd-UI (zie de aanroeper zelf, bv.
-    page_add_player.py, voor een expliciete uitleg in dat geval).
-
+    technische uitleg meer in de hoofd-UI.
     player_ids: leeg = alle spelers; of komma-gescheiden lijst voor specifieke
                 speler(s) (bv. enkel de huidige speler verversen).
     mode:       "missing" (enkel ontbrekende periodes, standaard en snelst),
                 "new_users", of "full".
-
     PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17:
     - workflow_file / inputs: zie trigger_github_actions_scrape(). Laat beide
       weg voor het ONGEWIJZIGDE, oorspronkelijke gedrag (scrape-padel.yml
       met player_ids/mode). Geef ze mee om een ANDERE workflow met een eigen
       input-schema te triggeren (bv. refresh-klassement.yml).
     - help_text: optionele tooltip op de knop (st.button(help=...)).
-
-    PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18 (op verzoek
-    van Kim: "er verschijnt een knop maar werkt niet"): het resultaat van de
-    LAATSTE klik wordt nu bewaard in st.session_state (per key_prefix) en bij
-    ELKE render van de pagina opnieuw getoond — exact hetzelfde patroon als
-    render_full_player_scrape_button(). Voorheen toonde deze functie
-    st.success()/st.error() enkel binnen de render-cyclus van de klik zelf;
-    een latere st.rerun() (bv. door een ander widget elders op de pagina)
-    liet die melding stilzwijgend verdwijnen, wat aanvoelde als "de knop
-    doet niets" terwijl de trigger wel degelijk gelukt of mislukt was.
     """
     import streamlit as st
     if not is_github_trigger_configured():
         return
-    result_key = f"{key_prefix}_cloud_trigger_last_result"
     if st.button(label, key=f"{key_prefix}_gh_trigger", type="primary", help=help_text):
         with st.spinner("Bezig met starten..."):
             ok, msg = trigger_github_actions_scrape(
                 player_ids=player_ids, mode=mode, workflow_file=workflow_file, inputs=inputs,
             )
-        st.session_state[result_key] = {
-            "timestamp": time.strftime("%H:%M:%S"),
-            "ok": ok,
-            "msg": msg,
-        }
-    # PADEL_ANALYSIS_GENERIC_TRIGGER_FEEDBACK_PERSIST_2026-09-18: altijd
-    # opnieuw tonen, ook buiten de if-branch van de klik zelf, zodat een
-    # latere rerun de feedback niet meer kan laten verdwijnen.
-    last = st.session_state.get(result_key)
-    if last:
-        st.caption(f"Resultaat van de laatste poging, om {last['timestamp']}:")
-        if last["ok"]:
-            st.success(last["msg"])
+        if ok:
+            st.success(msg)
         else:
-            st.error(last["msg"])
-
-
+            st.error(msg)
 def render_full_player_scrape_button(
     player_id: str,
     player_name: str = "",
@@ -452,51 +408,55 @@ def render_full_player_scrape_button(
     "bij elke speler die je ziet daar rechtstreeks gewoon te kunnen een
     scrape starten. die scrape moet dan padelstat en TVL scrapen. Wel enkel
     TVL scraping voor missing/laatste periode zoals vroeger al aangehaald."
-
-    Toont, enkel relevant op cloud (net als render_cloud_scrape_trigger) en
-    enkel als het GitHub-token geconfigureerd is, ÉÉN knop die met 1 klik
-    BEIDE triggers uitvoert voor exact deze ene speler:
+    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim:
+    "Padelstat en klassement moeten dan ook gescrapt worden"): deze knop
+    triggert nu DRIE onafhankelijke GitHub Actions-workflows i.p.v. twee:
       1. scrape-padel.yml (mode="missing") - TVL-matchdata, enkel de
          ontbrekende/huidige periode (zie scraper/scrape_player.py:
          strict_missing_only + refresh_recent=0-logica).
       2. refresh-padelstat.yml - playing strength via padelstats.be.
-
-    Beide triggers gebeuren als 2 onafhankelijke API-calls; als er 1 faalt
-    (bv. het workflow-bestand staat nog niet in de repo) wordt dat apart
-    gemeld, zonder de andere trigger te blokkeren.
-
+      3. refresh-klassement.yml - TVL-klassementshistoriek (zelfde
+         input-schema als refresh-padelstat.yml: {"player", "max",
+         "force_all"}).
+    Toont, enkel relevant op cloud (net als render_cloud_scrape_trigger) en
+    enkel als het GitHub-token geconfigureerd is, ÉÉN knop die met 1 klik
+    ALLE DRIE triggers uitvoert voor exact deze ene speler.
+    Elke trigger gebeurt als aparte API-call; als er 1 faalt (bv. het
+    workflow-bestand staat nog niet in de repo) wordt dat apart gemeld,
+    zonder de andere triggers te blokkeren.
     Bedoeld om herbruikbaar te zijn op ELKE plek waar een individuele
     speler getoond wordt (Team-analyse detail-per-speler, Opstelling-
-    analyse, Spelers-pagina, Mijn profiel, ...) - zie opponent_dossier.py:
-    render_player_summary_inline() voor de eerste, centrale integratie.
-
+    analyse, Spelers-pagina, Mijn profiel, de nieuwe cloud-spelerzoek-flow
+    in page_add_player.py/player_inline_actions.py, ...) - zie
+    opponent_dossier.py: render_player_summary_inline() voor de eerste,
+    centrale integratie.
     PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het resultaat van
     de LAATSTE klik wordt bewaard in st.session_state en bij ELKE render
     van de pagina opnieuw getoond (met tijdstip) - een pagina-rerun kan de
     feedback dus niet langer laten verdwijnen ("leek iets te gebeuren maar
     geen goede feedback"). Vóór de eigenlijke trigger-poging wordt bovendien
     EERST, via check_workflow_registered(), rechtstreeks bij GitHub
-    geverifieerd of beide workflows daar effectief herkend worden - dat
+    geverifieerd of alle drie workflows daar effectief herkend worden - dat
     geeft een DEFINITIEF antwoord op de vraag "waarom zie ik niets in
-    Actions?" (workflow onbekend bij GitHub vs. een andere fout).
-    """
+    Actions?" (workflow onbekend bij GitHub vs. een andere fout)."""
     import streamlit as st
     if not is_github_trigger_configured():
         return
     result_key = f"{key_prefix}_last_result_{player_id}"
     label_naam = f" voor {player_name}" if player_name else ""
     if st.button(
-        f"🔄 Scrape deze speler nu (TVL + padelstat){label_naam}",
+        f"🔄 Scrape deze speler nu (TVL + padelstat + klassement){label_naam}",
         key=f"{key_prefix}_full_scrape_{player_id}",
         type="primary",
-        help="Start 2 GitHub Actions-workflows op de achtergrond: TVL-matchdata "
-             "(enkel ontbrekende/huidige periode) en padelstats.be playing strength. "
-             "Duurt meestal enkele minuten.",
+        help="Start 3 GitHub Actions-workflows op de achtergrond: TVL-matchdata "
+             "(enkel ontbrekende/huidige periode), padelstats.be playing strength, "
+             "en TVL-klassementshistoriek. Duurt meestal enkele minuten.",
     ):
-        with st.spinner("Stap 1/2: controleren of GitHub beide workflows herkent..."):
+        with st.spinner("Stap 1/2: controleren of GitHub alle workflows herkent..."):
             tvl_workflow = _get_github_settings()[2] or DEFAULT_WORKFLOW_FILE
             tvl_registered, tvl_reg_detail = check_workflow_registered(tvl_workflow)
             padelstat_registered, padelstat_reg_detail = check_workflow_registered(PADELSTAT_WORKFLOW_FILE)
+            klassement_registered, klassement_reg_detail = check_workflow_registered(KLASSEMENT_WORKFLOW_FILE)
         with st.spinner("Stap 2/2: workflows starten op GitHub..."):
             if tvl_registered:
                 ok_tvl, msg_tvl = trigger_github_actions_scrape(
@@ -511,10 +471,18 @@ def render_full_player_scrape_button(
                 )
             else:
                 ok_padelstat, msg_padelstat = False, f"Overgeslagen — workflow niet herkend: {padelstat_reg_detail}"
+            if klassement_registered:
+                ok_klassement, msg_klassement = trigger_github_actions_scrape(
+                    workflow_file=KLASSEMENT_WORKFLOW_FILE,
+                    inputs={"player": str(player_id), "max": "1", "force_all": "false"},
+                )
+            else:
+                ok_klassement, msg_klassement = False, f"Overgeslagen — workflow niet herkend: {klassement_reg_detail}"
         st.session_state[result_key] = {
             "timestamp": time.strftime("%H:%M:%S"),
             "tvl": (ok_tvl, msg_tvl, tvl_registered, tvl_reg_detail),
             "padelstat": (ok_padelstat, msg_padelstat, padelstat_registered, padelstat_reg_detail),
+            "klassement": (ok_klassement, msg_klassement, klassement_registered, klassement_reg_detail),
         }
     # PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het laatst bekende
     # resultaat wordt ALTIJD opnieuw getoond (niet enkel binnen de if-branch
@@ -525,6 +493,9 @@ def render_full_player_scrape_button(
         st.caption(f"Resultaat van de laatste poging, om {last['timestamp']}:")
         ok_tvl, msg_tvl, tvl_registered, tvl_reg_detail = last["tvl"]
         ok_padelstat, msg_padelstat, padelstat_registered, padelstat_reg_detail = last["padelstat"]
+        ok_klassement, msg_klassement, klassement_registered, klassement_reg_detail = last.get(
+            "klassement", (False, "Nog niet geprobeerd (oud resultaat vóór klassement-integratie).", False, "n.v.t.")
+        )
         st.markdown(f"**TVL-matchdata** (workflow-check: {'✅ herkend' if tvl_registered else '❌ NIET herkend — ' + tvl_reg_detail}):")
         if ok_tvl:
             st.success(msg_tvl)
@@ -535,9 +506,162 @@ def render_full_player_scrape_button(
             st.success(msg_padelstat)
         else:
             st.error(msg_padelstat)
-        if not tvl_registered or not padelstat_registered:
+        st.markdown(f"**TVL-klassementshistoriek** (workflow-check: {'✅ herkend' if klassement_registered else '❌ NIET herkend — ' + klassement_reg_detail}):")
+        if ok_klassement:
+            st.success(msg_klassement)
+        else:
+            st.error(msg_klassement)
+        if not tvl_registered or not padelstat_registered or not klassement_registered:
             st.warning(
                 "⚠️ Minstens 1 workflow wordt niet herkend door GitHub. Controleer op GitHub.com "
                 "-> Actions of de betrokken workflow(s) in de linkerlijst staan — staan ze er niet, "
                 "dan is het bestand nog niet gepusht+gemerged naar de standaardbranch."
+            )
+def trigger_player_search(first_name: str, last_name: str, club: str = "") -> tuple[bool, str]:
+    """
+    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18: dunne wrapper rond
+    trigger_github_actions_scrape() die de NIEUWE search-player.yml-workflow
+    aanroept (player_search.search_players() op een GitHub Actions-runner
+    met Playwright), voor het zoeken van een NOG ONBEKENDE speler op naam.
+    Dit is fundamenteel anders dan scrape-padel.yml/render_cloud_scrape_
+    trigger(), die enkel bestaande player_id's kunnen verversen en dus NOOIT
+    op naam konden zoeken."""
+    return trigger_github_actions_scrape(
+        workflow_file=PLAYER_SEARCH_WORKFLOW_FILE,
+        inputs={
+            "first_name": first_name or "",
+            "last_name": last_name or "",
+            "club": club or "",
+        },
+    )
+def render_cloud_player_search(
+    key_prefix: str = "cloud_player_search",
+    default_first: str = "",
+    default_last: str = "",
+    default_club: str = "",
+) -> None:
+    """
+    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim):
+    Cloud-tegenhanger van de lokale "🔍 Zoek op TVL-website"-flow in
+    page_add_player.py (die enkel werkt met Playwright, dus enkel lokaal).
+    Triggert de nieuwe search-player.yml-workflow (Playwright op een GitHub
+    Actions ubuntu-runner) en toont, zodra beschikbaar, de kandidaten uit
+    firebase_service.get_player_search_cache() — DEZELFDE cache die de
+    lokale flow ook al vult/leest (normalize_search_key(name_query, club,
+    sport)), dus dit werkt ongeacht of de zoekopdracht lokaal of via deze
+    workflow werd uitgevoerd.
+    Een workflow_dispatch-run duurt meestal 1-3 minuten, dus dit is
+    ONVERMIJDELIJK een polling-flow (i.p.v. de "vuur en vergeet"-triggers
+    elders in dit bestand): na het triggeren toont deze functie een
+    "🔄 Resultaat ophalen"-knop, die de cache opnieuw uitleest tot er een
+    resultaat is.
+    Bij "➕ Toevoegen" wordt het profiel aangemaakt (net als de lokale flow,
+    inclusief added_by="manual" zodat cleanup_ghost_profiles.py deze speler
+    nooit opruimt) EN wordt onmiddellijk render_full_player_scrape_button()
+    getoond, zodat de nieuwe speler in 1 moeite door TVL + padelstat +
+    klassement kan laten scrapen — op verzoek van Kim: "Padelstat en
+    klassement moeten dan ook gescrapt worden."
+    default_first/default_last/default_club: optionele voorinvulling van de
+    zoekvelden (bv. vanuit player_inline_actions.py, waar al een gok naam
+    bekend is uit een niet-gekoppelde partner/tegenstander-naam)."""
+    import streamlit as st
+    import firebase_service as fb
+    if not is_github_trigger_configured():
+        st.caption(
+            "Nieuwe spelers zoeken vereist een browser en kan daarom niet "
+            "rechtstreeks vanaf de cloud. Doe dit lokaal via '➕ Speler "
+            "toevoegen', of configureer de GitHub Actions-trigger "
+            "(st.secrets['github']) om het vanaf de cloud te kunnen starten."
+        )
+        return
+    with st.form(f"{key_prefix}_form"):
+        c1, c2, c3 = st.columns([2, 2, 2])
+        first = c1.text_input("Voornaam", value=default_first, key=f"{key_prefix}_first")
+        last = c2.text_input("Achternaam", value=default_last, key=f"{key_prefix}_last")
+        club = c3.text_input("Club (optioneel)", value=default_club, key=f"{key_prefix}_club")
+        submitted = st.form_submit_button(
+            "🔍 Zoeken via GitHub Actions", use_container_width=True, type="primary",
+        )
+    trigger_key = f"{key_prefix}_triggered_at"
+    query_key = f"{key_prefix}_query"
+    candidates_key = f"{key_prefix}_candidates"
+    if submitted:
+        if not first.strip() and not last.strip():
+            st.warning("Geef minstens een voornaam of achternaam in.")
+        else:
+            with st.spinner("Zoekopdracht starten op GitHub Actions..."):
+                ok, msg = trigger_player_search(first.strip(), last.strip(), club.strip())
+            if ok:
+                st.session_state[trigger_key] = time.time()
+                st.session_state[query_key] = {
+                    "first": first.strip(), "last": last.strip(), "club": club.strip(),
+                }
+                st.session_state.pop(candidates_key, None)
+                st.success(
+                    f"{msg} Klik hieronder op '🔄 Resultaat ophalen' zodra de "
+                    "workflow is afgerond (meestal 1-3 minuten, zie GitHub Actions)."
+                )
+            else:
+                st.error(msg)
+    query = st.session_state.get(query_key)
+    if not query:
+        return
+    st.caption(
+        f"Laatste zoekopdracht: '{query['first']} {query['last']}'"
+        + (f" ({query['club']})" if query["club"] else "")
+    )
+    if st.button("🔄 Resultaat ophalen", key=f"{key_prefix}_poll"):
+        name_query = f"{query['first']} {query['last']}".strip()
+        cached = fb.get_player_search_cache(name_query, query["club"] or None, sport="Padel")
+        if not cached:
+            st.info(
+                "Nog geen resultaat gevonden. De workflow is mogelijk nog bezig — "
+                "controleer desgewenst de voortgang op GitHub Actions en probeer het "
+                "over een minuutje opnieuw."
+            )
+        else:
+            st.session_state[candidates_key] = cached.get("candidates") or []
+    candidates = st.session_state.get(candidates_key)
+    if candidates is None:
+        return
+    if not candidates:
+        st.caption("Geen spelers gevonden op TVL voor deze zoekopdracht.")
+        return
+    st.success(f"{len(candidates)} kandidaat(en) gevonden")
+    for i, c in enumerate(candidates):
+        name = c.get("display_name") or "?"
+        club_str = c.get("club") or ""
+        pid = c.get("player_id") or "?"
+        url = c.get("dashboard_url") or ""
+        with st.container(border=True):
+            col_info, col_btn = st.columns([4, 1])
+            with col_info:
+                st.markdown(f"**{name}**")
+                st.caption(f"🏟️ {club_str} · ID: {pid}" if club_str else f"ID: {pid}")
+                if url:
+                    st.markdown(f"[Profiel op TVL ↗]({url})", unsafe_allow_html=False)
+            with col_btn:
+                already_added_key = f"{key_prefix}_added_{i}"
+                if not st.session_state.get(already_added_key):
+                    if st.button(
+                        "➕ Toevoegen", key=f"{key_prefix}_add_{i}",
+                        use_container_width=True, type="primary",
+                    ):
+                        fb.save_player_profile(
+                            player_id=str(pid), display_name=name,
+                            club=club_str or None, dashboard_url=url or None,
+                            aliases=[name],
+                        )
+                        # PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17:
+                        # zelfde marker als de lokale "➕ Speler toevoegen"-pagina,
+                        # zodat cleanup_ghost_profiles.py deze speler nooit opruimt.
+                        fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
+                            {"added_by": "manual"}, merge=True,
+                        )
+                        st.session_state[already_added_key] = True
+                        st.rerun()
+        if st.session_state.get(f"{key_prefix}_added_{i}"):
+            st.success(f"✅ {name} toegevoegd. Start hieronder de volledige scrape (TVL + padelstat + klassement):")
+            render_full_player_scrape_button(
+                str(pid), player_name=name, key_prefix=f"{key_prefix}_scrape_{i}",
             )

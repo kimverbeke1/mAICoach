@@ -200,14 +200,19 @@ def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None
     # maar misleidend: het lijkt alsof je niets kunt doen, terwijl de app
     # WEL een externe GitHub Actions-workflow kan triggeren die dat op een
     # ubuntu-runner mét browser doet (zie cloud_helpers.py /
-    # scrape-padel.yml). Vandaar dat "opzoeken vroeger al eens lukte".
+    # search-player.yml). Vandaar dat "opzoeken vroeger al eens lukte".
     #
-    # Fix: als scrapen lokaal niet kan (cloud) maar de GitHub-trigger wél
-    # geconfigureerd is, tonen we nu een knop die de bestaande workflow start
-    # in "new_users"-modus (spelers zoeken/toevoegen op TVL). Zo verdwijnt de
-    # misleidende melding en kan het opzoeken/toevoegen ook vanaf de cloud.
-    # We gebruiken ENKEL de reeds ondersteunde workflow-inputs (player_ids +
-    # mode), zodat er niets aan de workflow-definitie hoeft te wijzigen.
+    # PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim):
+    # BUG (opgelost): de cloud-knop hierbeneden riep vroeger
+    # cloud_helpers.render_cloud_scrape_trigger() aan met
+    # mode="new_users" op scrape-padel.yml — een workflow die ENKEL
+    # bestaande player_id's kan verversen, en dus NOOIT op naam kon zoeken.
+    # De knop deed dus niet wat de tekst beloofde. Fix: gebruikt nu de
+    # nieuwe cloud_helpers.render_cloud_player_search(), die de aparte
+    # search-player.yml-workflow triggert (player_search.search_players()
+    # op een GitHub Actions-runner) en nadien de gevonden kandidaten toont,
+    # met een "➕ Toevoegen"-knop die meteen ook de volledige scrape
+    # (TVL + padelstat + klassement) aanbiedt.
     try:
         from cloud_helpers import is_scraping_available
     except Exception:
@@ -255,31 +260,40 @@ def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None
             st.rerun()
 def _render_cloud_search_trigger(display_name: str, key_prefix: str) -> None:
     """Cloud-variant van de opzoek-fallback: geen lokale browser, maar wel de
-    bestaande GitHub Actions-workflow triggeren (indien geconfigureerd)."""
+    nieuwe search-player.yml GitHub Actions-workflow triggeren (indien
+    geconfigureerd).
+    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18: gebruikt nu
+    cloud_helpers.render_cloud_player_search() (dezelfde herbruikbare
+    component als page_add_player.py's cloud-fallback), i.p.v. de oude
+    mode="new_users"-trigger op scrape-padel.yml die geen naam kon
+    meegeven en dus nooit echt kon zoeken. De reeds gekende (onvolledige)
+    naam wordt als beste-gok voorinvulling meegegeven."""
     try:
-        from cloud_helpers import is_github_trigger_configured, render_cloud_scrape_trigger
+        import cloud_helpers as ch
     except Exception:
-        is_github_trigger_configured = lambda: False  # noqa: E731
-        render_cloud_scrape_trigger = None
-    if not (render_cloud_scrape_trigger and is_github_trigger_configured()):
-        # Geen GitHub-trigger geconfigureerd -> eerlijk blijven over de
-        # cloud-beperking, maar met een duidelijk alternatief.
         st.caption(
             "Nieuwe spelers opzoeken vereist een browser en kan daarom niet "
             "rechtstreeks vanaf de cloud. Doe dit lokaal via '➕ Speler "
-            "toevoegen', of configureer de GitHub Actions-trigger om het "
-            "vanaf de cloud te kunnen starten."
+            "toevoegen'."
         )
         return
+    if not ch.is_github_trigger_configured():
+        st.caption(
+            "Nieuwe spelers opzoeken vereist een browser en kan daarom niet "
+            "rechtstreeks vanaf de cloud. Doe dit lokaal via '➕ Speler "
+            "toevoegen', of configureer de GitHub Actions-trigger "
+            "(st.secrets['github']) om het vanaf de cloud te kunnen starten."
+        )
+        return
+    guess_first, guess_last = _split_name_guess(display_name)
     st.caption(
         f"'{_clean(display_name)}' is nog niet gekend. Op de cloud gebeurt het "
         "opzoeken/toevoegen via GitHub Actions (ubuntu-runner met browser)."
     )
-    # "new_users"-modus laat de workflow nieuwe spelers zoeken/toevoegen op TVL.
-    render_cloud_scrape_trigger(
+    ch.render_cloud_player_search(
         key_prefix=f"{key_prefix}_cloud_search",
-        mode="new_users",
-        label="🔍 Opzoeken & toevoegen via GitHub Actions",
+        default_first=guess_first,
+        default_last=guess_last,
     )
 # -----------------------------------------------------------------------------
 # Render components
