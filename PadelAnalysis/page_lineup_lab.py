@@ -959,24 +959,31 @@ def _render_all_valid_matchups(
     )
     unique_players = bundle.get("unique_players", []) or []
     theoretical_boards: list = []
+    chosen_opp_labels_final: list = []
     if not unique_players:
         st.info("Nog geen tegenstander-spelers gekend om theoretische opstellingen voor te berekenen.")
     else:
         opp_labels = [p.get("name", "?") for p in unique_players]
         opp_label_to_id = {p.get("name", "?"): str(p.get("user_id")) for p in unique_players}
-        default_ids = _most_recent_opponent_player_ids(bundle)
-        if default_ids:
-            default_opp_labels = [lbl for lbl, pid in opp_label_to_id.items() if pid in default_ids]
-            st.caption(
-                f"Standaard geselecteerd: de {len(default_opp_labels)} speler(s) uit hun meest recente "
-                "gekende ontmoeting. Verklein/verruim deze lijst om verder te verfijnen."
-            )
-        else:
-            default_opp_labels = opp_labels[: min(2 * total_boards, len(opp_labels))]
+        # PADEL_ANALYSIS_ALL_VALID_MATCHUPS_FLAT_LIST_FIX_2026-09-18 (op
+        # verzoek van Kim, ROOT CAUSE van "ik zie maar 3 matchups met 9
+        # spelers"): de standaardselectie was voorheen beperkt tot enkel de
+        # spelers uit de MEEST RECENTE ontmoeting (vaak minder dan de volledige
+        # bekende roster). Is de tegenstander bv. met 5 spelers gekend maar
+        # speelde de laatste ontmoeting er maar 4, dan werden de theoretische
+        # scenario's NOOIT met alle 5 berekend tenzij Kim dat zelf handmatig
+        # uitbreidde. Nu: standaard de VOLLEDIGE bekende roster.
+        default_opp_labels = opp_labels
+        st.caption(
+            f"Standaard staan alle {len(opp_labels)} bekende tegenstander-spelers geselecteerd, zodat ALLE "
+            "mogelijke opstellingen automatisch worden meegenomen. Verklein de lijst enkel als je zeker weet "
+            "dat bepaalde spelers niet zullen meespelen."
+        )
         chosen_opp_labels = st.multiselect(
             "Beschikbare tegenstander-spelers", opp_labels, default=default_opp_labels,
             key=f"theoretical_opp_players_{opp['ploeg_id']}",
         )
+        chosen_opp_labels_final = chosen_opp_labels
         chosen_opp_ids = [opp_label_to_id[lbl] for lbl in chosen_opp_labels]
         needed = 2 * total_boards
         if len(chosen_opp_ids) < needed:
@@ -990,7 +997,7 @@ def _render_all_valid_matchups(
             opponent_official_ranks = _opponent_official_ranks(chosen_opp_ids)
             missing_opp_official = [pid for pid in chosen_opp_ids if pid not in opponent_official_ranks]
             if missing_opp_official:
-                opp_names = [p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) in missing_opp_official]
+                opp_names = [p.get("name", str(p.get("user_id"))) for p in chosen_opp_players if str(p.get("user_id")) in missing_opp_official]
                 st.caption(
                     f"ℹ️ Geen officieel klassement gekend voor: {', '.join(opp_names)} — behandeld als "
                     "'onbekende sterkte' bij het genereren van theoretische opstellingen."
@@ -1008,20 +1015,18 @@ def _render_all_valid_matchups(
                 st.caption(f"🔢 **{meta['total_theoretical']}** theoretische opstellingen mogelijk.")
             if meta["truncated"]:
                 st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
-            if lineups:
-                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
-                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
-                signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
-                needs_compute = st.session_state.get(sig_key) != signature
-                recompute_clicked = st.button(
-                    "🔄 Theoretische scenario's (her)berekenen", key=f"theoretical_recompute_{opp['ploeg_id']}", type="primary",
-                )
-                if needs_compute and compute_key in st.session_state:
-                    st.info("De selectie is gewijzigd — klik hierboven om opnieuw te berekenen.")
-                if recompute_clicked:
-                    st.session_state[compute_key] = lineups
-                    st.session_state[sig_key] = signature
-                theoretical_boards = st.session_state.get(compute_key) or []
+            # PADEL_ANALYSIS_ALL_VALID_MATCHUPS_FLAT_LIST_FIX_2026-09-18:
+            # AUTOMATISCH berekend zodra de selectie verandert — GEEN
+            # handmatige "(her)bereken"-knop meer nodig (die stap was
+            # precies waarom de theoretische opstellingen bij Kim nooit
+            # meegenomen werden: hij had niet expliciet geklikt).
+            compute_key = f"theoretical_boards_{opp['ploeg_id']}"
+            sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
+            signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
+            if st.session_state.get(sig_key) != signature:
+                st.session_state[compute_key] = lineups
+                st.session_state[sig_key] = signature
+            theoretical_boards = st.session_state.get(compute_key) or []
 
     # ── Samenvoegen tot unieke tegenstander-opstellingen ──
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
@@ -1038,7 +1043,25 @@ def _render_all_valid_matchups(
         )
 
     st.divider()
-    n_excluded = total_seen - len(all_matchups) if not truncated else None
+    # PADEL_ANALYSIS_ALL_VALID_MATCHUPS_FLAT_LIST_FIX_2026-09-18: expliciete
+    # diagnostische telling door de VOLLEDIGE pijplijn, zodat Kim zelf kan
+    # verifiëren dat de volledige combinatoriek ook echt wordt meegenomen
+    # (i.p.v. blind te moeten vertrouwen dat het achter de schermen klopt).
+    n_hist = len(historical_boards_with_labels)
+    n_theo = len(theoretical_boards)
+    own_combos = _count_perfect_matchings(len(available_ids))
+    with st.expander("🔍 Diagnostiek: hoeveel combinaties werden er precies doorgerekend?", expanded=False):
+        st.write(f"- Eigen koppelverdelingen (bij {len(available_ids)} spelers): **{own_combos}**")
+        st.write(f"- Historische tegenstander-opstellingen (al gespeeld dit seizoen): **{n_hist}**")
+        st.write(f"- Theoretische tegenstander-opstellingen (uit de gekozen roster hierboven): **{n_theo}**")
+        st.write(f"- Unieke tegenstander-opstellingen na samenvoegen (dubbels verwijderd): **{len(unique_opponent_lineups)}**")
+        st.write(f"- Totaal doorgerekende matchup-kandidaten (vóór ontdubbeling/puntengrens-filter): **{total_seen}**")
+        st.write(f"- Uiteindelijk getoonde, reglementair geldige matchups: **{len(all_matchups)}**")
+        if n_theo == 0 and unique_players:
+            st.warning(
+                "⚠️ Er werden 0 theoretische tegenstander-opstellingen meegenomen — controleer of hierboven "
+                "voldoende tegenstander-spelers geselecteerd staan (minstens 2× het aantal wedstrijden)."
+            )
     if truncated:
         st.warning(
             f"⚠️ Er zijn meer dan {_MAX_TOTAL_MATCHUPS} geldige matchups gevonden — enkel de eerste "
