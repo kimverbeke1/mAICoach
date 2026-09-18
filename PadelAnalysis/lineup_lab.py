@@ -95,6 +95,26 @@ de win_probability over alle borden) — een veel interpreteerbaarder getal dan
 de vorige, abstracte 'total_score'. 'total_score' (synergie+edge-som) blijft
 bestaan voor de interne rangschikking/sortering van kandidaten, maar wordt in
 de UI niet langer als hoofdgetal getoond (zie page_lineup_lab.py).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG/ONTBREKENDE INFO (opgelost): bij "Geen enkele eigen koppelverdeling
+voldoet aan de reglementaire puntengrens" (zowel bij de Opstelling-
+scenario's als de Rotatieplanner) kreeg Kim GEEN enkel cijfer te zien om te
+begrijpen WAAROM — bv. of de verkeerde afdeling geselecteerd stond, of hoe
+ver de berekende punten van de toegelaten grens afzaten. Fix:
+optimize_lineup_vs_scenario() geeft nu een DERDE returnwaarde terug:
+`diagnostics` — een dict met {"candidates_total", "candidates_excluded_
+by_rules", "rotation_points_seen"} (de effectief berekende punten-per-
+rotatie-sommen, over ALLE doorgerekende kandidaten heen, ook de
+UITGESLOTEN kandidaten). page_lineup_lab.py gebruikt dit om, bij 0
+resultaten, de daadwerkelijk berekende punten-spreiding te tonen naast de
+toegelaten grens van de gekozen afdeling — zodat Kim zelf kan zien of dit
+een verkeerd ingestelde afdeling is of een echte reglementaire
+onmogelijkheid. Dit is een BACKWARD-INCOMPATIBLE wijziging van de
+return-signatuur (was Tuple[List[dict], bool], wordt Tuple[List[dict], bool,
+dict]) — alle aanroepers in page_lineup_lab.py zijn hierop aangepast.
 """
 import heapq
 import itertools
@@ -699,7 +719,7 @@ def optimize_lineup_vs_scenario(
     candidate_pool: int = 30,
     tournament_rules_dict: Optional[dict] = None,
     win_probability_scale: float = 300.0,
-) -> Tuple[List[dict], bool]:
+) -> Tuple[List[dict], bool, dict]:
     """
     Zoekt, voor een SPECIFIEK tegenstander-scenario, de beste koppelvorming
     aan ONZE kant.
@@ -709,33 +729,34 @@ def optimize_lineup_vs_scenario(
       - REGLEMENT (bordvolgorde + puntengrens): uitsluitend
         `player_official_ranks` (ONZE spelers) en het 'ranking'-tekstveld op
         elk tegenstander-bord (HUN officiële klassement). GEEN padelstat.
-        `player_official_ranks` moet een STRIKT officieel-klassement-dict
-        zijn (geen padelstat-fallback) — gebruik has_missing_official_rank()
-        in de aanroeper om ontbrekende waarden te signaleren.
-      - SIMULATIE (win_probability/edge): per speler, padelstat
-        (`player_ratings` voor ons, `opponent_ratings` voor hen) bij
+      - SIMULATIE (win_probability/edge): per speler, padelstat bij
         voorkeur, met een terugval naar het officiële klassement PER SPELER
-        (niet meer per bord/paar) via effective_simulation_rating().
+        via effective_simulation_rating().
 
-    player_official_ranks: VERPLICHT voor correcte werking indien
-      tournament_rules_dict is meegegeven of indien de bordvolgorde
-      betrouwbaar moet zijn. Ontbreekt dit (None), dan wordt player_ratings
-      NOODGEDWONGEN ook voor de reglement-ordening gebruikt (achterwaartse
-      compatibiliteit voor aanroepers die nog geen apart officieel-
-      klassement-dict opbouwen) — de aanroeper krijgt dan GEEN garantie dat
-      dit reglementair correct is; gebruik has_missing_official_rank() om
-      dat expliciet te checken/melden.
+    PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18: geeft nu een DERDE
+    returnwaarde terug, `diagnostics`:
+        {
+          "candidates_total": int,               # aantal doorgerekende koppelverdelingen
+          "candidates_excluded_by_rules": int,    # daarvan buiten de puntengrens
+          "rotation_points_seen": List[float],    # ALLE berekende punten-per-
+                                                   # rotatie-sommen, ook van
+                                                   # UITGESLOTEN kandidaten
+        }
+    Bedoeld zodat de UI, bij 0 resultaten, kan tonen HOE ver de berekende
+    punten van de toegelaten grens afzaten (i.p.v. enkel "0 combinaties
+    voldoen"). Dit is een backward-incompatible wijziging van de
+    return-signatuur t.o.v. de vorige versie (was Tuple[List[dict], bool]).
 
-    Returns: (resultaten, truncated) — resultaten = lijst van
-      {"total_score", "expected_boards_won", "assignment": [...],
-       "rotations": [...], "all_valid": bool}
-      'assignment'-items bevatten nu ook "win_probability", "risk_note",
-      "our_effective_rating", "their_effective_rating" naast de bestaande
-      "synergy"/"edge"/"edge_scale"/"opponent_board"/"our_pair".
+    Returns: (resultaten, truncated, diagnostics).
     """
     candidates, truncated = optimize_lineup(players, required, own_synergy_fn, top_n=candidate_pool)
+    diagnostics = {
+        "candidates_total": len(candidates),
+        "candidates_excluded_by_rules": 0,
+        "rotation_points_seen": [],
+    }
     if not candidates:
-        return [], truncated
+        return [], truncated, diagnostics
 
     sorted_boards = _sort_boards_by_opponent_official_rank(opponent_boards)
     n_boards = len(sorted_boards)
@@ -751,7 +772,11 @@ def optimize_lineup_vs_scenario(
         rotation_eval = filter_and_order_lineup_by_rotations(
             pair_list, regulation_ranks, rules=tournament_rules_dict,
         )
+        for rot in rotation_eval["rotations"]:
+            if rot.get("total_points") is not None:
+                diagnostics["rotation_points_seen"].append(rot["total_points"])
         if tournament_rules_dict is not None and not rotation_eval["all_valid"]:
+            diagnostics["candidates_excluded_by_rules"] += 1
             continue  # buiten de puntengrens -> uitsluiten, niet tonen.
 
         ordered_our_pairs = rotation_eval["ordered_pairs"]
@@ -823,4 +848,4 @@ def optimize_lineup_vs_scenario(
         if key not in seen:
             seen.add(key)
             deduped.append(r)
-    return deduped[:top_n], truncated
+    return deduped[:top_n], truncated, diagnostics

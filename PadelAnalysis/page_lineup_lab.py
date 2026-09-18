@@ -11,48 +11,52 @@ referentiesecties, theoretische scenario's, reglement-selector).
 PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17 (op verzoek
 van Kim, na het testen van de vorige versie — 4 samenhangende problemen)
 --------------------------------------------------------------------------
-Kim's kernpunten:
-  1. "je toont de eigenlijke ploeg altijd in dezelfde opstelling" — ROOT
-     CAUSE (bevestigd): official_ranks werd hier voorheen opgebouwd als
-     `_official_current_rank(pid) or player_ratings.get(pid, 0)` — een
-     ONBEKEND officieel klassement viel STILZWIJGEND terug op de padelstat-
-     rating. Dat vermengde de REGLEMENT-schaal (die nooit mag afhangen van
-     padelstat) met de SIMULATIE-schaal, en kon de reglementaire
-     puntengrens-check + bordordening laten instorten tot telkens dezelfde
-     ene combinatie, ONGEACHT het tegenstander-scenario (want reglement-
-     ordening hangt sowieso niet af van de tegenstander — enkel de
-     SIMULATIE hoort dat te doen). Fix hieronder: `official_ranks` bevat nu
-     UITSLUITEND echte officiële klassementen (geen fallback), met een
-     expliciete waarschuwing (ll.has_missing_official_rank()) voor spelers
-     zonder gekend officieel klassement, in plaats van een stille
-     substitutie.
-  2. "voor de ploegopstelling het officieel klassement, voor de simulatie de
-     padelstat score" — nu strikt zo geïmplementeerd: `official_ranks`
-     (reglement: bordvolgorde + puntengrens) vs `player_ratings`
-     (simulatie: winkans-schatting) zijn en blijven twee VOLLEDIG
-     GESCHEIDEN dicts, nooit met elkaar vermengd (zie lineup_lab.py:
-     effective_simulation_rating(), dat PER SPELER padelstat verkiest en
-     ENKEL bij ontbreken terugvalt op officieel — dat is de SIMULATIE-kant,
-     losstaand van de REGLEMENT-kant hierboven).
-  3. "matchup edge lijkt nu gewoon berekend op basis van klassement" — de
-     oude aanpak (PADEL_ANALYSIS_MATCHUP_SCALE_CONSISTENCY_2026-09-15) eiste
-     dat BEIDE spelers op een bord padelstat hadden, anders viel het HELE
-     bord terug op klassement — bij vaak ontbrekende tegenstander-padelstat
-     (heel gebruikelijk) verviel de edge daardoor STRUCTUREEL vaak naar
-     klassement. Fix (in lineup_lab.py): per-speler fallback i.p.v.
-     alles-of-niets per bord.
-  4. "het verwacht eindresultaat vermelden met de risico's [...] bewust een
-     speler opofferen" — nieuwe weergave: per bord een geschatte WINKANS +
-     risico-omschrijving (ll.estimate_win_probability() /
-     ll.risk_note_for_probability()), en een VERWACHT AANTAL GEWONNEN
-     BORDEN per opstelling (ll.optimize_lineup_vs_scenario()'s nieuwe
-     'expected_boards_won'-veld) — dit vervangt het abstracte 'score'-getal
-     als hoofdmaatstaf in de UI (score blijft intern bestaan voor
-     tie-breaking bij gelijke verwachte winst, zie de aparte call-out
-     hieronder bij de aggregatie-tabellen). ALLE weergaves van deze
-     schatting krijgen een uitdrukkelijke, zichtbare disclaimer dat dit een
-     RUWE HEURISTIEK is (logistische functie op het ratingverschil), GEEN
-     gevalideerd, empirisch getoetst voorspellingsmodel.
+Zie lineup_lab.py voor de volledige toelichting (root cause: official_ranks
+viel stilzwijgend terug op padelstat, nu strikt gescheiden; matchup-edge nu
+per-speler-fallback i.p.v. alles-of-niets per bord; nieuwe winkans/verwacht-
+aantal-gewonnen-borden-weergave).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18 (op verzoek van Kim)
+--------------------------------------------------------------------------
+Kim testte zijn eigen ploeg bij Opstelling-scenario's en kreeg zowel daar
+als bij de Rotatieplanner enkel "Geen enkele eigen koppelverdeling voldoet
+aan de reglementaire puntengrens" te zien, zonder enig cijfer om te
+begrijpen waarom (bv. staat de afdeling wel juist ingesteld? hoe ver zaten
+de berekende punten van de toegelaten grens verwijderd?).
+
+Fix: lineup_lab.optimize_lineup_vs_scenario() geeft nu een DERDE
+returnwaarde terug (`diagnostics`, zie dat bestand) met de daadwerkelijk
+BEREKENDE punten-per-rotatie-sommen over alle doorgerekende kandidaten
+(ook de uitgesloten). Dit bestand toont die diagnostiek nu op ALLE DRIE de
+plekken waar voorheen enkel "0 combinaties" te zien was:
+  1. Rotatieplanner (_render_rotation_planner, via _generate_rotation_
+     candidates(), die nu ook in de "else"-tak — géén tegenstander-scenario
+     gekozen — zelf diagnostiek opbouwt via ll.filter_and_order_lineup_by_
+     rotations()).
+  2. Historische Opstelling-scenario's (_render_opstelling_scenario).
+  3. Alle theoretische tegenstander-opstellingen (_render_theoretical_
+     opponent_scenarios).
+Nieuwe helper: _format_points_bounds_diagnostic(). GEEN wijziging aan de
+reglementslogica zelf, geen nieuwe afdelingen, geen vereenvoudiging — enkel
+een concrete, cijfermatige toelichting toegevoegd bij een bestaande
+foutmelding.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MATCH_FREQUENCY_REGROUP_2026-09-18 (op verzoek van Kim)
+--------------------------------------------------------------------------
+"tabel met bordpositiefrequentie mag je hernemen. Beter woord dan bord is
+match. en ik ben enkel geinteresseerd in verdeling match 1 en 2 van elke
+rotatie. Dus speler in match 1 en match 3 samentellen en frequentie match 2
+en match 4. Is om te zien wie meestal de 1ste match speelt van de rotatie."
+
+_render_match1_frequency_opponent() toonde voorheen 1 kolom PER LOS BORD
+(Bord 1, Bord 2, Bord 3, Bord 4, ...). Nu hergegroepeerd volgens de
+rotatie-indeling (reglement art. 8.7.1: 2 rotaties van telkens 2
+gelijktijdige wedstrijden): ONEVEN board_position (1, 3, 5, ...) = de
+EERSTE match van een rotatie ("Match 1"), EVEN board_position (2, 4, 6,
+...) = de TWEEDE match van een rotatie ("Match 2") — dus nog maar 2
+kolommen, ongeacht hoeveel borden er in totaal gespeeld werden.
 """
 
 import streamlit as st
@@ -315,10 +319,10 @@ def _build_own_official_ranks_strict(available_ids: list) -> dict:
     """PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17:
     bouwt het REGLEMENT-dict voor ONZE spelers, UITSLUITEND op basis van het
     echte officiële klassement — GEEN fallback naar padelstat meer (dat was
-    de root cause van 'altijd dezelfde opstelling', zie moduledocstring).
-    Spelers zonder gekend officieel klassement komen simpelweg niet in de
-    dict voor; de aanroeper toont een expliciete waarschuwing via
-    ll.has_missing_official_rank()."""
+    de root cause van 'altijd dezelfde opstelling', zie lineup_lab.py se
+    moduledocstring). Spelers zonder gekend officieel klassement komen
+    simpelweg niet in de dict voor; de aanroeper toont een expliciete
+    waarschuwing via ll.has_missing_official_rank()."""
     out = {}
     for pid in available_ids:
         try:
@@ -345,6 +349,31 @@ def _render_official_rank_warning(available_ids: list, official_ranks_strict: di
             "meegeteld, wat de uitkomst kan vertekenen. Ververs het klassement van deze speler(s) "
             "voor een betrouwbaar resultaat."
         )
+
+
+def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
+    """PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18 (op verzoek van
+    Kim): geeft, indien beschikbaar, de daadwerkelijk BEREKENDE punten-per-
+    rotatie terug (min en max over alle doorgerekende kandidaten), naast de
+    toegelaten grens van de gekozen afdeling — zodat je zelf kan beoordelen
+    of dit een verkeerd ingestelde afdeling is, of een echte reglementaire
+    onmogelijkheid. Retourneert een lege string als er niets zinvols te
+    tonen valt (bv. geen reglement actief, of geen enkele rotatie kon
+    berekend worden)."""
+    if rules is None or not diagnostics:
+        return ""
+    seen = diagnostics.get("rotation_points_seen") or []
+    if not seen:
+        return ""
+    lo, hi = rules["punten_min"], rules["punten_max"]
+    pmin, pmax = min(seen), max(seen)
+    excluded = diagnostics.get("candidates_excluded_by_rules", 0)
+    total = diagnostics.get("candidates_total", 0)
+    return (
+        f"Van de {total} doorgerekende koppelverdeling(en) vielen er {excluded} buiten de toegelaten "
+        f"puntengrens per rotatie (**{lo}–{hi}**). De berekende punten per rotatie voor deze "
+        f"spelers/dit scenario lagen tussen **{pmin:.0f}** en **{pmax:.0f}**."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -420,6 +449,27 @@ def _render_previous_opponent_lineup(bundle: dict) -> None:
 
 
 def _render_match1_frequency_opponent(bundle: dict) -> None:
+    """PADEL_ANALYSIS_MATCH_FREQUENCY_REGROUP_2026-09-18 (op verzoek van
+    Kim): "tabel met bordpositiefrequentie mag je hernemen. Beter woord dan
+    bord is match. en ik ben enkel geinteresseerd in verdeling match 1 en 2
+    van elke rotatie. Dus speler in match 1 en match 3 samentellen en
+    frequentie match 2 en match 4. Is om te zien wie meestal de 1ste match
+    speelt van de rotatie."
+
+    Was voorheen een tabel met 1 kolom PER LOS BORD (Bord 1, Bord 2, Bord 3,
+    Bord 4, ...). Nu hergegroepeerd volgens de rotatie-indeling uit het
+    reglement (art. 8.7.1: 2 rotaties van telkens 2 gelijktijdige
+    wedstrijden -> Match 1+2 = rotatie 1, Match 3+4 = rotatie 2, ...):
+    ONEVEN board_position (1, 3, 5, ...) = de EERSTE match van een rotatie,
+    EVEN board_position (2, 4, 6, ...) = de TWEEDE match van een rotatie.
+    Nog maar 2 kolommen i.p.v. 1 kolom per los bord.
+
+    LET OP (bestaande, ongewijzigde beperking): board_position komt uit
+    opponent_scout.extract_opponent_lineup() en is de VOLGORDE waarin de
+    dubbels op het uitslagenblad staan — geen letterlijk bevestigd 'Match
+    N'-label uit de brondata. De indeling oneven=eerste/even=tweede is dus
+    een aanname, maar wel dezelfde aanname die de rest van de app (reglement,
+    rotatie-logica) al hanteert voor board_position."""
     previous_fixtures = bundle.get("previous_fixtures") or []
     boards_met_positie = [
         b for fx in previous_fixtures for b in (fx.get("boards") or [])
@@ -430,30 +480,39 @@ def _render_match1_frequency_opponent(bundle: dict) -> None:
     tellingen, namen = {}, {}
     for b in boards_met_positie:
         pos = b["board_position"]
+        is_eerste_match_van_rotatie = (pos % 2 == 1)  # oneven = Match 1/3/5/... van een rotatie
         for p in b["opponent_pair"]:
             uid = p.get("user_id")
             if not uid:
                 continue
             namen[uid] = p.get("name", uid)
-            tellingen.setdefault(uid, {})
-            tellingen[uid][pos] = tellingen[uid].get(pos, 0) + 1
-    with st.expander(f"📊 Tegenstander — bordpositie-frequentie (over {len(previous_fixtures)} eerdere ontmoeting(en))", expanded=False):
+            tellingen.setdefault(uid, {"match1": 0, "match2": 0})
+            if is_eerste_match_van_rotatie:
+                tellingen[uid]["match1"] += 1
+            else:
+                tellingen[uid]["match2"] += 1
+    with st.expander(
+        f"📊 Tegenstander — match 1 / match 2-frequentie per rotatie (over {len(previous_fixtures)} eerdere ontmoeting(en))",
+        expanded=False,
+    ):
         st.caption(
-            "Hoe vaak elke tegenstander-speler op elk bord stond in hun eerdere, gekende wedstrijden "
-            "dit seizoen. Puur beschrijvend — geen voorspelling."
+            "Hoe vaak elke tegenstander-speler de EERSTE match van een rotatie speelde (Match 1, "
+            "Match 3, ...) versus de TWEEDE match van een rotatie (Match 2, Match 4, ...), in hun "
+            "eerdere, gekende wedstrijden dit seizoen. Puur beschrijvend — geen voorspelling. Bedoeld "
+            "om te zien wie doorgaans de 1ste match van de rotatie speelt."
         )
         if len(previous_fixtures) <= 1:
             st.caption("⚠️ Slechts 1 eerdere ontmoeting gekend — gebaseerd op één enkel datapunt.")
-        alle_posities = sorted({pos for counts in tellingen.values() for pos in counts})
         rows = []
-        for uid, counts in sorted(tellingen.items(), key=lambda kv: -(kv[1].get(1, 0))):
-            totaal = sum(counts.values())
-            row = {"Speler": namen.get(uid, uid)}
-            for pos in alle_posities:
-                aantal = counts.get(pos, 0)
-                pct = round(100 * aantal / totaal, 0) if totaal else 0
-                row[f"Bord {pos}"] = f"{aantal}x ({int(pct)}%)"
-            rows.append(row)
+        for uid, counts in sorted(tellingen.items(), key=lambda kv: -kv[1]["match1"]):
+            totaal = counts["match1"] + counts["match2"]
+            pct1 = round(100 * counts["match1"] / totaal, 0) if totaal else 0
+            pct2 = round(100 * counts["match2"] / totaal, 0) if totaal else 0
+            rows.append({
+                "Speler": namen.get(uid, uid),
+                "Match 1 (of 3, 5, ...)": f"{counts['match1']}x ({int(pct1)}%)",
+                "Match 2 (of 4, 6, ...)": f"{counts['match2']}x ({int(pct2)}%)",
+            })
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
@@ -494,15 +553,22 @@ def _generate_rotation_candidates(
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
     max_results=10, tournament_rules_dict=None,
 ):
+    """PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18: geeft nu een DERDE
+    returnwaarde terug (`diagnostics`, kan None zijn bij n<2), zodat
+    _render_rotation_planner() bij 0 kandidaten kan tonen WAT er berekend
+    werd (zowel in de tak MET een tegenstander-scenario als in de tak
+    ZONDER, die nu zelf ook diagnostiek opbouwt via ll.filter_and_order_
+    lineup_by_rotations())."""
     n = len(available_ids)
     if n < 2 or n % 2 != 0:
-        return [], 0
+        return [], 0, None
     total_possible = _count_perfect_matchings(n)
     top_n = min(max(total_possible, 1), _ROTATION_EXHAUSTIVE_LIMIT)
     required = {pid: 1 for pid in available_ids}
     results = []
+    diagnostics = None
     if opponent_boards and player_ratings is not None:
-        raw, truncated = ll.optimize_lineup_vs_scenario(
+        raw, truncated, diagnostics = ll.optimize_lineup_vs_scenario(
             available_ids, required, synergy_fn, opponent_boards, player_ratings,
             player_official_ranks=official_ranks_strict, opponent_ratings=opponent_ratings,
             top_n=top_n, candidate_pool=_ROTATION_EXHAUSTIVE_LIMIT,
@@ -521,20 +587,31 @@ def _generate_rotation_candidates(
             })
     else:
         raw, truncated = ll.optimize_lineup(available_ids, required, synergy_fn, top_n=top_n)
+        rotation_points_seen = []
+        excluded_by_rules = 0
         for score, pairs in raw:
             pairs_fs = [frozenset(p) for p in pairs]
             if any(p in excluded_pairs for p in pairs_fs):
                 continue
             rotation_eval = ll.filter_and_order_lineup_by_rotations(pairs_fs, official_ranks_strict, rules=tournament_rules_dict)
+            for rot in rotation_eval["rotations"]:
+                if rot.get("total_points") is not None:
+                    rotation_points_seen.append(rot["total_points"])
             if tournament_rules_dict is not None and not rotation_eval["all_valid"]:
+                excluded_by_rules += 1
                 continue
             results.append({
                 "expected_boards_won": None, "score": score,
                 "ordered_pairs": rotation_eval["ordered_pairs"], "assignment": None,
                 "rotations": rotation_eval["rotations"],
             })
+        diagnostics = {
+            "candidates_total": len(raw),
+            "candidates_excluded_by_rules": excluded_by_rules,
+            "rotation_points_seen": rotation_points_seen,
+        }
     results.sort(key=lambda r: (-(r["expected_boards_won"] if r["expected_boards_won"] is not None else -1), -r["score"]))
-    return results[:max_results], total_possible
+    return results[:max_results], total_possible, diagnostics
 
 
 def _lineup_options_for_ai(candidates: list, name_lookup: dict) -> list:
@@ -573,9 +650,6 @@ _WIN_PROB_DISCLAIMER = (
 
 
 def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) -> None:
-    """PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17: toont
-    per bord de winkans + risico-omschrijving, i.p.v. enkel de abstracte
-    synergie/edge-getallen."""
     for a in assignment:
         p1, p2 = a["our_pair"]
         opp_pair = a["opponent_board"]["opponent_pair"]
@@ -633,7 +707,7 @@ def _render_rotation_planner(
         st.markdown("---")
     excluded_pairs = {p for rot in locked_rotations for p in rot}
     next_rotation_num = len(locked_rotations) + 1
-    candidates, total_possible = _generate_rotation_candidates(
+    candidates, total_possible, rotation_diagnostics = _generate_rotation_candidates(
         available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
         opponent_boards=opponent_boards, player_ratings=player_ratings,
         opponent_ratings=opponent_ratings, max_results=15,
@@ -648,6 +722,9 @@ def _render_rotation_planner(
                 "toegelaten puntengrens per rotatie voor de gekozen afdeling — of alle zijn al "
                 "gebruikt. Overweeg een andere afdeling of spelersselectie."
             )
+            diag_msg = _format_points_bounds_diagnostic(tournament_rules_dict, rotation_diagnostics)
+            if diag_msg:
+                st.caption(diag_msg)
         else:
             st.warning(f"Alle {total_possible} mogelijke koppelverdelingen zijn al gebruikt in eerdere rotaties.")
         return
@@ -701,9 +778,6 @@ _THEORETICAL_DISPLAY_DEFAULT_N = 10
 
 
 def _aggregate_scenario_scores(scenarios: list) -> list:
-    """Aggregeert nu op 'expected_boards_won' i.p.v. het abstracte
-    total_score, zodat de aggregaattabel dezelfde, interpreteerbare
-    maatstaf gebruikt als de rest van de UI."""
     scores_by_combo: dict = {}
     for entry in scenarios:
         for option in (entry.get("results") or []):
@@ -811,7 +885,7 @@ def _render_theoretical_opponent_scenarios(
         uitgesloten = 0
         with st.spinner(f"{len(lineups)} theoretische scenario's doorrekenen..."):
             for idx, boards in enumerate(lineups, start=1):
-                results, _truncated = ll.optimize_lineup_vs_scenario(
+                results, _truncated, diagnostics = ll.optimize_lineup_vs_scenario(
                     available_ids, max_per_player, synergy_fn, boards, player_ratings,
                     player_official_ranks=official_ranks_strict, opponent_ratings=opponent_ratings,
                     top_n=_SCENARIO_SAVE_TOP_N, candidate_pool=_SCENARIO_CANDIDATE_POOL,
@@ -819,7 +893,7 @@ def _render_theoretical_opponent_scenarios(
                 )
                 if not results:
                     uitgesloten += 1
-                computed.append({"idx": idx, "boards": boards, "results": results})
+                computed.append({"idx": idx, "boards": boards, "results": results, "diagnostics": diagnostics})
         st.session_state[compute_key] = computed
         st.session_state[sig_key] = signature
         if tournament_rules_dict is not None and uitgesloten:
@@ -845,6 +919,10 @@ def _render_theoretical_opponent_scenarios(
                     if tournament_rules_dict is not None else
                     "Geen geldige opstelling gevonden voor dit scenario."
                 )
+                if tournament_rules_dict is not None:
+                    diag_msg = _format_points_bounds_diagnostic(tournament_rules_dict, entry.get("diagnostics"))
+                    if diag_msg:
+                        st.caption(diag_msg)
                 continue
             best = entry["results"][0]
             ebw = best.get("expected_boards_won")
@@ -902,7 +980,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "- **Officiële regel (art. 6.6)**: binnen elke ROTATIE speelt het duo met de HOOGSTE SOM "
             "van de 2 OFFICIËLE klassementen (nooit padelstat!) op het laagst genummerde bord.\n"
             "- **Puntengrens per rotatie**: de SOM van de officiële klassementen van alle 4 spelers "
-            "in 1 rotatie moet binnen de grenzen van de gekozen afdeling liggen — anders uitgesloten.\n\n"
+            "in 1 rotatie moet binnen de grenzen van de gekozen afdeling liggen — anders uitgesloten. "
+            "Bij 0 geldige combinaties tonen we voortaan ook de daadwerkelijk berekende punten, zodat "
+            "je kan zien of dit aan de afdeling-keuze ligt.\n\n"
             + _WIN_PROB_DISCLAIMER
         )
 
@@ -985,9 +1065,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                 for s_idx, fx_bundle in enumerate(bundle["previous_fixtures"], start=1):
                     boards = fx_bundle.get("boards", [])
                     fx = fx_bundle.get("fixture", {})
-                    entry = {"s_idx": s_idx, "fixture": fx, "boards_count": len(boards), "error": fx_bundle.get("error"), "results": None, "truncated": False}
+                    entry = {"s_idx": s_idx, "fixture": fx, "boards_count": len(boards), "error": fx_bundle.get("error"), "results": None, "truncated": False, "diagnostics": None}
                     if not entry["error"] and boards:
-                        results, truncated = ll.optimize_lineup_vs_scenario(
+                        results, truncated, diagnostics = ll.optimize_lineup_vs_scenario(
                             available_ids, max_per_player, synergy_fn, boards, player_ratings,
                             player_official_ranks=official_ranks_strict, opponent_ratings=opponent_ratings,
                             top_n=_SCENARIO_SAVE_TOP_N, candidate_pool=_SCENARIO_CANDIDATE_POOL,
@@ -995,6 +1075,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                         )
                         entry["results"] = results
                         entry["truncated"] = truncated
+                        entry["diagnostics"] = diagnostics
                     computed.append(entry)
             st.session_state[compute_key] = {
                 "opponent_name": opp.get("name"), "opponent_ploeg_id": opp.get("ploeg_id"),
@@ -1020,6 +1101,10 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                             if tournament_rules_dict is not None and boards_count else
                             ("Geen bord-detail beschikbaar." if boards_count == 0 else "Geen geldige opstelling gevonden.")
                         )
+                        if tournament_rules_dict is not None and boards_count:
+                            diag_msg = _format_points_bounds_diagnostic(tournament_rules_dict, entry.get("diagnostics"))
+                            if diag_msg:
+                                st.caption(diag_msg)
                         continue
                     if entry["truncated"]:
                         st.caption(f"⚠️ Meer dan {_SCENARIO_CANDIDATE_POOL} combinaties — top kandidaten getoond.")
