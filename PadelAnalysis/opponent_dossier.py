@@ -1,5 +1,6 @@
 """
-opponent_dossier.py - scoutingdossier voor een tegenstander (v7).
+opponent_dossier.py - scoutingdossier voor een tegenstander (v8).
+
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De strikte poulefilter uit v2 was correct maar leverde in de praktijk bijna
 niets op: de huidige competitieperiode is pas gestart, dus tegenstanders
@@ -8,14 +9,17 @@ expliciet in TWEE lagen:
   1. HUIDIGE POULE  - strikt op spelgroep_id. Feitelijk, maar vaak dun.
   2. HISTORIEK      - alle overige interclubmatches, per periode gegroepeerd,
                       duidelijk gelabeld als context uit een andere poule.
+
 PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-10 (v4):
 In dit klassementsysteem geldt HOE HOGER HET GETAL, HOE BETER. "Beste ooit" =
 het HOOGSTE getal, niet het laagste. De tijdlijngrafiek gebruikt een normale
 (niet-omgekeerde) as.
+
 PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10 (v5):
 De ruwe periode-omschrijving die TVL gebruikt (bv. "Startklassement" of
 "Zomerklassement") wordt nu verkort tot "Start <jaar>" / "Zomer <jaar>" op de
 grafiek-as en in de "beste klassement bereikt op"-tekst.
+
 PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13 (v7, BELANGRIJKE WIJZIGING):
 De eerder in v6 toegevoegde EIGEN Elo-berekening (elo_rating.compute_player_
 elo) is VERWIJDERD uit dit bestand. Op uitdrukkelijk verzoek van Kim, na een
@@ -27,26 +31,58 @@ nu UITSLUITEND gehaald uit de gecachete padelstats.be-waarde
 padelstats_scraper.py / bulk_fetch_padelstat_ratings.py. Is die nog niet
 opgehaald voor een speler, dan wordt dat EXPLICIET getoond ("nog niet
 opgehaald") in plaats van een minder betrouwbaar eigen cijfer te tonen.
+
 reeks_url is in de praktijk None in alle opgeslagen matchrecords; de filter
 steunt daarom op spelgroep_id, met reeks_url enkel als optionele extra.
+
 Bordpositie-heuristiek is verwijderd (was een telling van round_text en gaf
 geen betrouwbare bordnummering).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18 (v8, op verzoek van Kim:
+"bij elke speler die je ziet daar rechtstreeks gewoon te kunnen een scrape
+starten. die scrape moet dan padelstat en TVL scrapen. Wel enkel TVL
+scraping voor missing/laatste periode zoals vroeger al aangehaald")
+--------------------------------------------------------------------------
+render_player_summary_inline() is de EEN, centrale plek die "Detail per
+speler" toont - hergebruikt door o.a. opponent_analysis.render_overview_
+and_detail() (Team-analyse-detail), page_players.py en page_my_profile.py
+(via player_dashboard_shared.py) en de Opstelling-analyse. Door de nieuwe
+knop HIER toe te voegen (i.p.v. op elke aanroepplek apart), verschijnt
+"bij elke speler die je ziet" in 1 keer, zonder elke pagina apart aan te
+passen.
+
+Nieuwe functie _render_scrape_button(): dunne wrapper rond
+cloud_helpers.render_full_player_scrape_button() (1 knop, triggert BEIDE
+GitHub Actions-workflows: TVL-matchdata met mode="missing" EN
+padelstats.be playing strength, voor exact deze ene speler). Enkel
+zichtbaar als een GitHub-token geconfigureerd staat (dus vooral relevant
+op Streamlit Community Cloud, waar lokaal scrapen sowieso niet kan) - een
+importfout van cloud_helpers blokkeert de rest van deze functie nooit
+(lazy, defensieve import).
 """
 from __future__ import annotations
+
 import re
 from collections import Counter
 from datetime import datetime
 from typing import Optional
+
 import pandas as pd
 import streamlit as st
+
 import firebase_service as fb
+
 _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11,
     "december": 12,
 }
+
 # Minimum aantal matchen voor een statistisch zinvolle winrate.
 MIN_MATCHES_FOR_WINRATE = 3
+
+
 # ─────────────────────────────────────────────
 # Parsers / normalisatie
 # ─────────────────────────────────────────────
@@ -64,9 +100,13 @@ def _parse_match_date(text) -> Optional[tuple]:
     if match and match.group(2) in _DUTCH_MONTHS:
         return int(match.group(3)), _DUTCH_MONTHS[match.group(2)], int(match.group(1))
     return None
+
+
 def _parse_rank(value) -> Optional[int]:
     match = re.search(r"(\d+)", str(value or ""))
     return int(match.group(1)) if match else None
+
+
 def _normalize_id(value) -> str:
     """Maakt spelgroep-ID's vergelijkbaar ongeacht of ze als int, float of
     string werden opgeslagen ('702074', 702074, 702074.0)."""
@@ -74,6 +114,8 @@ def _normalize_id(value) -> str:
     if re.fullmatch(r"\d+\.0+", text):
         text = text.split(".", 1)[0]
     return text
+
+
 def _period_sort_key(label) -> tuple:
     """Sorteert period_labels zoals 'Resultaten van week 27/2026 tot en met
     week 48/2026' chronologisch. Valt terug op alfabetisch bij onbekend
@@ -88,6 +130,8 @@ def _period_sort_key(label) -> tuple:
     if years:
         return 1, int(years[-1]), 0, text
     return 0, 0, 0, text
+
+
 def _short_klassement_label(periode: str) -> str:
     """PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10.
     Verkort ruwe periode-omschrijvingen zoals 'Startklassement' of
@@ -110,12 +154,18 @@ def _short_klassement_label(periode: str) -> str:
     else:
         return text if len(text) <= 18 else text[:15] + "..."
     return f"{season} {year}".strip()
+
+
 def _is_interclub(match: dict) -> bool:
     value = str(match.get("match_type") or match.get("type") or "").strip().lower()
     return value == "interclub" or "interclub" in value
+
+
 def _winrate_str(wins: int, losses: int) -> str:
     known = wins + losses
     return f"{round(wins / known * 100, 1)}%" if known else "-"
+
+
 def _winrate_display(wins: int, losses: int) -> str:
     """Toont de winrate, maar markeert expliciet wanneer ze op te weinig
     matchen gebaseerd is om betekenis te hebben."""
@@ -126,6 +176,8 @@ def _winrate_display(wins: int, losses: int) -> str:
     if known < MIN_MATCHES_FOR_WINRATE:
         return f"{text} ({known}x)"
     return text
+
+
 def _format_fetched_at(value) -> str:
     """Kort, leesbaar formaat voor een ISO-timestamp (bv. padelstat
     fetched_at). Geeft de ruwe waarde terug als parsing faalt, zodat er
@@ -137,6 +189,8 @@ def _format_fetched_at(value) -> str:
         return datetime.fromisoformat(cleaned).strftime("%d/%m/%Y")
     except Exception:
         return str(value)
+
+
 # ─────────────────────────────────────────────
 # Klassementshistoriek
 # LET OP: hoe HOGER het klassementsgetal, hoe BETER de speler.
@@ -164,6 +218,7 @@ def _history_rows(doc: dict) -> list[dict]:
             "periode_kort": _short_klassement_label(periode_raw),
             "rank": rank,
         })
+
     def sort_key(row):
         parsed = _parse_match_date(row.get("datum"))
         if parsed:
@@ -173,7 +228,10 @@ def _history_rows(doc: dict) -> list[dict]:
             return (1, period[1], period[2], 0, 0)
         # Onbekend formaat: bewaar de oorspronkelijke volgorde.
         return (0, 0, 0, 0, -row["index"])
+
     return sorted(rows, key=sort_key, reverse=True)
+
+
 def _history_summary(doc: dict):
     """Geeft (huidig, beste, wanneer_beste, alle_rijen) terug.
     'beste' = HOOGSTE klassementsgetal (hoger = sterker)."""
@@ -184,9 +242,13 @@ def _history_summary(doc: dict):
     best = max(rows, key=lambda row: row["rank"])
     best_when = best.get("datum") or best.get("periode_kort") or best.get("periode")
     return current["rank"], best["rank"], best_when, rows
+
+
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
     """Behouden voor compatibiliteit met bestaande aanroepen. Hoogste getal."""
     return max((row["rank"] for row in _history_rows(doc)), default=None)
+
+
 def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]:
     """Leidt een klassement af uit matchrecords van ANDERE spelers waarin deze
     persoon als tegenstander voorkwam. Hoogste gevonden waarde = beste."""
@@ -203,6 +265,8 @@ def _best_rank_opportunistic(player_id: str, search_docs: dict) -> Optional[int]
             if rank is not None:
                 values.append(rank)
     return max(values) if values else None
+
+
 def _current_rank_fallback(player_id: str, matches: list[dict], search_docs: dict) -> Optional[int]:
     """Meest recente bekende klassement (chronologisch, niet op hoogte)."""
     dated = []
@@ -224,6 +288,8 @@ def _current_rank_fallback(player_id: str, matches: list[dict], search_docs: dic
         if rank is not None:
             return rank
     return None
+
+
 def _render_ranking_timeline(rows: list[dict]) -> None:
     if not rows:
         st.info("Nog geen klassementshistoriek opgeslagen voor deze speler.")
@@ -247,6 +313,8 @@ def _render_ranking_timeline(rows: list[dict]) -> None:
         st.altair_chart(visual, use_container_width=True)
     except Exception:
         st.line_chart(chart, height=240)
+
+
 # ─────────────────────────────────────────────
 # Tweelaagse poulefilter
 # ─────────────────────────────────────────────
@@ -256,8 +324,10 @@ def split_matches(
     current_reeks_url: Optional[str] = None,
 ) -> tuple[list[dict], list[dict], dict]:
     """Splitst interclubmatches in (huidige poule, historiek, meta).
+
     Laag 1 (huidige poule): strikt op spelgroep_id. Als er geen spelgroep_id
     meegegeven is, is deze laag leeg - er wordt NOOIT geraden.
+
     Laag 2 (historiek): alle overige interclubmatches. Dit is bewust GEEN
     fallback: beide lijsten worden apart teruggegeven zodat de UI ze apart en
     correct gelabeld kan tonen.
@@ -292,6 +362,8 @@ def split_matches(
         "interclub_total": len(interclub),
     }
     return current, history, meta
+
+
 def _period_breakdown(matches: list[dict]) -> list[dict]:
     """Groepeert historiek per period_label + spelgroep_id, recentste eerst."""
     buckets: dict[tuple, dict] = {}
@@ -314,6 +386,8 @@ def _period_breakdown(matches: list[dict]) -> list[dict]:
     for row in rows:
         row["Winrate"] = _winrate_display(row["W"], row["V"])
     return sorted(rows, key=lambda row: _period_sort_key(row["Periode"]), reverse=True)
+
+
 def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     buckets: dict[str, dict] = {}
     for match in matches:
@@ -330,6 +404,8 @@ def _partner_rows(matches: list[dict], limit: int = 5) -> list[dict]:
     for row in rows:
         row["Winrate"] = _winrate_display(row["W"], row["V"])
     return sorted(rows, key=lambda row: (row["Matches"], row["W"]), reverse=True)[:limit]
+
+
 def _result_rows(matches: list[dict], limit: Optional[int] = None) -> list[dict]:
     ordered = sorted(
         matches,
@@ -349,6 +425,8 @@ def _result_rows(matches: list[dict], limit: Optional[int] = None) -> list[dict]
             "W/V": match.get("result") or ("W" if match.get("won") is True else ("V" if match.get("won") is False else "-")),
         })
     return rows
+
+
 def _form_string(matches: list[dict], limit: int = 8) -> str:
     """Recente vorm als leesbare reeks, recentste links (bv. 'W W V W')."""
     ordered = sorted(
@@ -365,6 +443,8 @@ def _form_string(matches: list[dict], limit: int = 8) -> str:
         else:
             marks.append("-")
     return " ".join(marks) if marks else "-"
+
+
 # ─────────────────────────────────────────────
 # Spelerssamenvatting (plat, opslagbaar in Firestore)
 # ─────────────────────────────────────────────
@@ -377,6 +457,7 @@ def build_player_summary(
     global_docs: Optional[dict] = None,
 ) -> dict:
     """Berekent alle scoutinggegevens voor een speler in twee lagen.
+
     all_docs:    matchdocumenten van de tegenstander-roster (smal).
     global_docs: optioneel, alle gekende spelers - breder, gebruikt voor de
                  opportunistische ranking-fallback.
@@ -454,12 +535,43 @@ def build_player_summary(
         # Totaal
         "matches_total": len(matches),
     }
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18: scrape-knop
+# ─────────────────────────────────────────────
+def _render_scrape_button(player_id: str, player_name: str, key_prefix: str) -> None:
+    """Dunne, defensieve wrapper rond cloud_helpers.render_full_player_
+    scrape_button(). Faalt de import (bv. cloud_helpers.py nog niet
+    aanwezig), dan wordt dit stil overgeslagen - de rest van het dossier
+    blijft gewoon werken, exact zoals de bestaande render_cloud_scrape_
+    trigger()-aanroepen elders in het project dit al doen."""
+    try:
+        import cloud_helpers as ch
+    except Exception:  # noqa: BLE001  pragma: no cover
+        return
+    ch.render_full_player_scrape_button(
+        player_id, player_name=player_name, key_prefix=f"{key_prefix}_scrape",
+    )
+
+
 # ─────────────────────────────────────────────
 # Inline renderer
 # ─────────────────────────────────────────────
 def render_player_summary_inline(summary: dict) -> None:
     """Toont build_player_summary()-resultaat meteen, in twee duidelijk
-    gescheiden lagen."""
+    gescheiden lagen.
+
+    PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18 (op verzoek van Kim):
+    toont bovenaan nu ook de "🔄 Scrape deze speler nu (TVL + padelstat)"-
+    knop - deze functie is de centrale, hergebruikte plek voor "Detail per
+    speler" over de hele app heen (Team-analyse, Opstelling-analyse,
+    Spelers-pagina, Mijn profiel), dus deze ene toevoeging volstaat om de
+    knop overal te laten verschijnen."""
+    player_id = summary.get("player_id")
+    player_name = summary.get("name") or ""
+    if player_id:
+        _render_scrape_button(str(player_id), player_name, key_prefix=f"dossier_{player_id}")
     c1, c2, c3, c4 = st.columns(4)
     current = summary.get("current_rank")
     best = summary.get("best_rank")
@@ -545,6 +657,8 @@ def render_player_summary_inline(summary: dict) -> None:
         with st.expander(f"Alle gekende resultaten uit vorige periodes ({len(history_results)} getoond)", expanded=False):
             st.dataframe(pd.DataFrame(history_results), use_container_width=True, hide_index=True,
                          height=min(420, 40 + 36 * len(history_results)))
+
+
 # ─────────────────────────────────────────────
 # Oudere knop-variant (compatibiliteit)
 # ─────────────────────────────────────────────
@@ -563,6 +677,7 @@ def render_opponent_dossier(
         profile_doc = {}
     if not doc and not profile_doc:
         st.caption(f"Nog geen data gekend voor {name}. Scrape deze speler eerst.")
+        _render_scrape_button(str(player_id), name, key_prefix=f"{key_prefix}_{player_id}_empty")
         return
     summary = build_player_summary(
         player_id, name, all_docs,
@@ -570,6 +685,8 @@ def render_opponent_dossier(
         current_spelgroep_id=current_spelgroep_id,
     )
     render_player_summary_inline(summary)
+
+
 def render_opponent_dossier_button(
     player_id: str,
     name: str,
