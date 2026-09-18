@@ -983,16 +983,12 @@ def _opponent_lineup_key(boards: list):
     # dus IDENTIEK aan de bug die we al fixten voor onze EIGEN kant
     # (our_pairs_key), maar dan voor de TEGENSTANDER-kant. Twee theoretische
     # tegenstander-structuren die exact dezelfde 4 koppels gebruiken maar in
-    # OMGEKEERDE rotatie-volgorde (bv. rotatie1={P,Q}/rotatie2={R,S} vs.
-    # rotatie1={R,S}/rotatie2={P,Q}) botsten hierdoor op DEZELFDE sleutel en
-    # werd de 2de stilzwijgend als "duplicaat" weggefilterd - terwijl dit in
-    # werkelijkheid 2 verschillende scenario's zijn (welk tegenstander-koppel
-    # WIJ in rotatie 1 vs rotatie 2 tegenover ons krijgen, beïnvloedt de
-    # winkans per bord). Geverifieerd: bij 5 beschikbare tegenstander-spelers
-    # (2,2,2,1,1-verdeling) gaf dit 12 rotatie-veilige structuren terug, maar
-    # slechts 6 "unieke" opstellingen na de oude dedup - exact de helft ging
-    # stilzwijgend verloren. Een TUPLE (i.p.v. frozenset) behoudt de
-    # rotatie-POSITIE, net als bij de eerdere fix van our_pairs_key.
+    # OMGEKEERDE rotatie-volgorde botsten hierdoor op DEZELFDE sleutel en
+    # werd de 2de stilzwijgend als "duplicaat" weggefilterd. Geverifieerd:
+    # bij 5 beschikbare tegenstander-spelers (2,2,2,1,1-verdeling) gaf dit 12
+    # rotatie-veilige structuren terug, maar slechts 6 "unieke" opstellingen
+    # na de oude dedup - exact de helft ging stilzwijgend verloren. Een
+    # TUPLE (i.p.v. frozenset) behoudt de rotatie-POSITIE.
     pairs = []
     for b in boards:
         uids = frozenset(str(p.get("user_id")) for p in (b.get("opponent_pair") or []) if p.get("user_id"))
@@ -1080,7 +1076,11 @@ def _rotation_order_variants(
     # volgorde bepaalt, zodat dit nooit een black box is en meteen
     # controleerbaar is welk cijfer de beslissing stuurt (officieel
     # klassement, NIET padelstat - padelstat wordt uitsluitend als
-    # tie-breaker gebruikt bij een EXACT gelijke officiële som).
+    # tie-breaker gebruikt bij een EXACT gelijke officiële som). BELANGRIJK,
+    # bevestigd via het officiële Padel Vlaanderen interclub-reglement: een
+    # HOGER klassementscijfer (P-nummer) betekent een STERKERE speler/
+    # afdeling (P100 = "Beginnende competitie", P1000 = "Topcompetitie") -
+    # dus "hoogste som eerst" is de correcte, reglementaire interpretatie.
     sum_first = _pair_official_sum(compliant_first, official_ranks)
     sum_second = _pair_official_sum(compliant_second, official_ranks)
     punten_txt = f"officieel {sum_first:.0f} vs {sum_second:.0f} punten"
@@ -1268,19 +1268,10 @@ def _build_all_valid_matchups(
         if truncated and len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
             break
         # PADEL_ANALYSIS_TIE_VARIANT_DEDUP_FIX_2026-09-19 (root cause van
-        # "Stijn Mortier komt nooit voor in match 1 van rotatie 1"): dit was
-        # voorheen een frozenset-van-frozensets, wat de VOLGORDE van de
-        # paren (dus WIE op match 1 vs match 2 van een rotatie staat)
-        # volledig negeert. Bij een officieel gelijkspel genereert
-        # _rotation_order_variants() BEIDE volgordes (elk met
-        # is_regulation_compliant=True) - maar omdat de oude sleutel enkel
-        # de ONGEORDENDE verzameling paren gebruikte, botsten die twee
-        # varianten op EXACT dezelfde (our_pairs_key, their_key,
-        # fully_compliant)-combinatie en werd de 2de (de omgedraaide, dus
-        # de variant die bv. Stijn Mortier's duo WEL op match 1 zou zetten)
-        # stilzwijgend weggefilterd als "duplicaat". Een TUPLE behoudt de
-        # positie (Rotatie1-1 vs Rotatie1-2, ...) terwijl elk paar zelf nog
-        # steeds een set is (volgorde BINNEN het koppel maakt niet uit).
+        # "Stijn Mortier komt nooit voor in match 1 van rotatie 1", 1ste
+        # hypothese - zie ook de LATERE, eigenlijke verklaring hieronder bij
+        # de tabel-render): dit was voorheen een frozenset-van-frozensets,
+        # wat de VOLGORDE van de paren negeert. Een TUPLE behoudt de positie.
         our_pairs_key = tuple(frozenset(p) for p in own_ordered_pairs)
         for their_key, info in unique_opponent_lineups.items():
             boards = info["boards"]
@@ -1333,45 +1324,24 @@ def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
 
 
-# PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19 (op verzoek van Kim:
-# "los ook het probleem op met de rijen die niet breed genoeg zijn om alle
-# tekst gewrapped te tonen want de kolommen zijn anders te breed"):
-#
-# ROOT CAUSE gevonden in de Streamlit-frontend zelf (glide-data-grid): een
-# TextColumn-cel krijgt ENKEL "allowWrapping" (dus effectief tekst-wrap over
-# meerdere regels) als de dataframe's row_height MEER dan 4rem (64px)
-# bedraagt. De vorige fix (PADEL_ANALYSIS_TABLE_READABILITY_FIX_2026-09-19)
-# gebruikte row_height=56 — dat zit ONDER die 64px-drempel, dus wrapping werd
-# in werkelijkheid NOOIT geactiveerd. Om toch iets van de 2de regel zichtbaar
-# te krijgen was toen een kunstmatig brede, VASTE kolombreedte (280/320px)
-# nodig voor ALLE matchkolommen, ongeacht de werkelijke inhoud — vandaar Kim's
-# terechte klacht dat de kolommen nu te breed zijn.
-#
-# FIX: (1) row_height ruim BOVEN de 64px-drempel zetten, zodat wrapping
-# effectief aanspringt; (2) per kolom een DYNAMISCHE breedte berekenen op
-# basis van de langste tekstregel die er werkelijk in staat (i.p.v. 1 vaste
-# brede waarde voor alle kolommen) — zo blijven kolommen met kortere namen
-# smal, en worden enkel kolommen met langere namen breder, met de tekst
-# netjes gewrapt over de 2 (of meer) regels binnen de rijhoogte.
-_TABLE_ROW_HEIGHT = 88  # ruim boven de 64px/4rem-drempel voor tekst-wrap
-_TABLE_CHAR_WIDTH_PX = 6.6  # ruwe schatting breedte per karakter (Source Sans, ~14px)
-_TABLE_COL_MIN_WIDTH = 130
-_TABLE_COL_MAX_WIDTH = 260
+# PADEL_ANALYSIS_SEPARATE_DUO_COLUMNS_2026-09-19: dynamische kolombreedte
+# per kolom (i.p.v. 1 vaste waarde voor alle kolommen), gebaseerd op de
+# langste tekst die er werkelijk in staat. Nu elke cel single-line is
+# (geen "ons duo\nvs hun duo" meer samengevoegd), is er ook geen wrap/
+# row_height-truc meer nodig - gewone standaard rijhoogte volstaat.
+_TABLE_CHAR_WIDTH_PX = 6.6
+_TABLE_COL_MIN_WIDTH = 90
+_TABLE_COL_MAX_WIDTH = 240
 
 
-def _estimate_wrapped_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
-    """Schat een kolombreedte die groot genoeg is voor de LANGSTE individuele
-    tekstregel (dus na een eventuele "\\n"-split) in deze kolom, met een
-    minimum en maximum. Zo wordt elke kolom niet breder dan nodig, terwijl
-    lange namen nog steeds leesbaar over 2 regels wrappen i.p.v. afgekapt te
-    worden."""
-    max_line_len = 0
+def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
+    """Schat een kolombreedte op basis van de langste waarde in de kolom."""
+    max_len = 0
     for v in values:
         if v is None:
             continue
-        for line in str(v).split("\n"):
-            max_line_len = max(max_line_len, len(line))
-    width = int(max_line_len * _TABLE_CHAR_WIDTH_PX) + 24  # + padding
+        max_len = max(max_len, len(str(v)))
+    width = int(max_len * _TABLE_CHAR_WIDTH_PX) + 24
     return max(min_width, min(max_width, width))
 
 
@@ -1386,16 +1356,9 @@ def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_globa
     """PADEL_ANALYSIS_BEST_WORST_CASE_SUMMARY_2026-09-19 (op verzoek van Kim:
     "ik wou dus eigenlijk onze ploegopstellingen visualiseren en voor elk
     van onze mogelijke ploegopstellingen een best case en worst case
-    resultaat is. Dat is niet te zien."):
-
-    Groepeert alle matchup-rijen per unieke EIGEN koppelverdeling (dezelfde
-    koppels, ongeacht bordvolgorde of tegen welke tegenstander-opstelling)
-    en toont per groep het BESTE en SLECHTSTE verwachte resultaat over alle
-    doorgerekende tegenstander-scenario's - en, indien de checkbox
-    "bewust omgedraaide varianten" hierboven aanstaat, ook over de
-    reglementaire vs. bewust niet-reglementaire bordvolgorde. Zo wordt in
-    1 oogopslag zichtbaar wat een "sacrifice"-opstelling (zoals Carl+Stijn
-    bewust op de zwaarste match) in het beste/slechtste geval oplevert."""
+    resultaat is. Dat is niet te zien."): groepeert alle matchup-rijen per
+    unieke EIGEN koppelverdeling en toont per groep het beste/slechtste
+    verwachte resultaat over alle doorgerekende tegenstander-scenario's."""
     if not all_matchups:
         return
     groups: dict = {}
@@ -1416,9 +1379,7 @@ def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_globa
     st.markdown('<div class="section-header">🏆 Best case / worst case per eigen opstelling</div>', unsafe_allow_html=True)
     st.caption(
         "Voor elke unieke combinatie van ONZE koppels (ongeacht bordvolgorde of tegen wie), het beste en "
-        "het slechtste verwachte resultaat over alle doorgerekende tegenstander-opstellingen hierboven — "
-        "en, als je de checkbox 'bewust omgedraaide varianten' aanvinkt, ook over de reglementaire vs. "
-        "bewust niet-reglementaire bordvolgorde (bv. een zwakker duo bewust op de zwaarste match)."
+        "het slechtste verwachte resultaat over alle doorgerekende tegenstander-opstellingen hierboven."
     )
     summary_rows = []
     for key, rows_for_group in groups.items():
@@ -1441,20 +1402,10 @@ def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_globa
             "# scenario's": len(rows_for_group),
         })
     summary_rows.sort(key=lambda r: r.pop("_best_sort"), reverse=True)
-    # PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19: ook hier dynamische
-    # kolombreedte i.p.v. vaste 260/220/220, zodat kortere namen geen
-    # onnodig brede kolommen opleveren (deze cellen bevatten geen "\n", dus
-    # 1 tekstregel volstaat - row_height=40 blijft hier dus prima).
     col_widths = {
-        "Eigen opstelling (koppels)": _estimate_wrapped_column_width(
-            [r.get("Eigen opstelling (koppels)") for r in summary_rows], min_width=160, max_width=300,
-        ),
-        "Best case tegen": _estimate_wrapped_column_width(
-            [r.get("Best case tegen") for r in summary_rows], min_width=140, max_width=260,
-        ),
-        "Worst case tegen": _estimate_wrapped_column_width(
-            [r.get("Worst case tegen") for r in summary_rows], min_width=140, max_width=260,
-        ),
+        "Eigen opstelling (koppels)": _estimate_column_width([r.get("Eigen opstelling (koppels)") for r in summary_rows], min_width=160, max_width=300),
+        "Best case tegen": _estimate_column_width([r.get("Best case tegen") for r in summary_rows], min_width=140, max_width=260),
+        "Worst case tegen": _estimate_column_width([r.get("Worst case tegen") for r in summary_rows], min_width=140, max_width=260),
     }
     st.dataframe(
         summary_rows, use_container_width=True, hide_index=True,
@@ -1464,40 +1415,39 @@ def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_globa
             "Worst case tegen": st.column_config.TextColumn("Worst case tegen", width=col_widths["Worst case tegen"]),
             "# scenario's": st.column_config.NumberColumn("# scenario's", width="small"),
         },
-        row_height=40,
     )
     st.divider()
 
 
 # ─────────────────────────────────────────────
-# Matchup-tabel: volledige namen over 2 tekstregels, winkans + reglementair
-# als APARTE, sorteerbare kolommen.
+# Matchup-tabel: ELK SPELERDUO IN EEN APARTE KOLOM (op verzoek van Kim,
+# PADEL_ANALYSIS_SEPARATE_DUO_COLUMNS_2026-09-19), i.p.v. "ons duo\nvs hun
+# duo" samengevoegd in 1 cel. Geen "Reglementair"-kolom meer (op Kim's
+# verzoek weggehaald - de ⚠️-toelichting per rotatie in de kolom
+# "Toelichting" blijft dit wel signaleren, dus die info gaat niet verloren).
 # ─────────────────────────────────────────────
 def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
-    """Bouwt de rijen voor de matchup-tabel. Elke RotatieR-B krijgt TWEE
-    kolommen ("RotatieR-B" met de namen, "RotatieR-B %" met de winkans als
-    apart, sorteerbaar getal). NIEUW: een "Reglementair"-kolom (✅/⚠️) die
-    in 1 oogopslag toont of DEZE volledige matchup-rij de reglementair
-    verplichte bordvolgorde gebruikt, of een bewust omgedraaide, niet-
-    reglementaire "wat als"-variant is (PADEL_ANALYSIS_BEST_WORST_CASE_
-    VARIANTS_2026-09-18)."""
+    """Bouwt de rijen voor de matchup-tabel. Elke RotatieR MatchB krijgt nu
+    DRIE aparte kolommen i.p.v. 1 samengevoegde cel:
+        "RotatieR MB — Ons duo", "RotatieR MB — Tegenstander", "RotatieR MB %"
+    Dit maakt elke cel een korte, single-line tekst (geen "\\n" meer nodig)
+    en maakt het meteen visueel controleerbaar WELK eigen duo op welke
+    positie (Match 1 = sterkste, Match 2 = zwakkere) terechtkomt - net wat
+    nodig is om te verifiëren of bv. Stijn's duo ooit op Match 1 verschijnt."""
     rows = []
     board_column_names: list = []
     for rank, m in enumerate(matchups, start=1):
         assignment = m["assignment"]
         n_boards = len(assignment)
         n_rotations = -(-n_boards // 2)  # ceiling
-        row = {
-            "#": rank, "Verwacht": m.get("expected_boards_won"),
-            "Reglementair": "✅" if m.get("fully_compliant", True) else "⚠️ NIET",
-        }
+        row = {"#": rank, "Verwacht": m.get("expected_boards_won")}
         for r in range(n_rotations):
             for board_in_rotation in range(2):
                 board_idx = r * 2 + board_in_rotation
                 if board_idx >= n_boards:
                     continue
                 a = assignment[board_idx]
-                col_base = f"Rotatie{r+1}-{board_in_rotation+1}"
+                col_base = f"Rotatie{r+1} M{board_in_rotation+1}"
                 if col_base not in board_column_names:
                     board_column_names.append(col_base)
                 p1, p2 = a["our_pair"]
@@ -1506,7 +1456,8 @@ def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
                 opp_pair = a["opponent_board"]["opponent_pair"]
                 their_full = [p.get("name", "?") for p in opp_pair]
                 wp = a.get("win_probability")
-                row[col_base] = f"{our_full_1}+{our_full_2}\nvs {'+'.join(their_full)}"
+                row[f"{col_base} — Ons duo"] = f"{our_full_1}+{our_full_2}"
+                row[f"{col_base} — Tegenstander"] = "+".join(their_full)
                 row[f"{col_base} %"] = round(wp * 100, 0) if wp is not None else None
         swap_notes = [
             rot.get("swap_label", "") for rot in (m.get("own_rotations") or [])
@@ -1677,44 +1628,50 @@ def _render_all_valid_matchups(
     ) if len(all_matchups) > _MATCHUP_DISPLAY_DEFAULT_N else False
     display_matchups = all_matchups if show_all else all_matchups[:_MATCHUP_DISPLAY_DEFAULT_N]
     table_rows, board_column_names = _matchups_to_table_rows(display_matchups, name_lookup_global)
+    # PADEL_ANALYSIS_SEPARATE_DUO_COLUMNS_2026-09-19 (op verzoek van Kim:
+    # "toon elk spelerduo in een aparte kolom. de kolom reglementair mag
+    # weg."): elke RotatieR MB krijgt nu 3 aparte kolommen ("— Ons duo",
+    # "— Tegenstander", "%") i.p.v. 1 samengevoegde 2-regelige cel, en de
+    # "Reglementair"-kolom is volledig verwijderd (de ⚠️-info blijft wel
+    # zichtbaar via "Toelichting"). Elke duo-kolom krijgt een dynamische
+    # breedte o.b.v. de langste naam erin, zodat je in 1 oogopslag kan
+    # scannen welk duo op welke positie (Match 1 = sterkste) terechtkomt.
     column_config = {
         "#": st.column_config.NumberColumn("#", width="small"),
         "Verwacht": st.column_config.NumberColumn("Verwacht", format="%.2f", width="small"),
-        "Reglementair": st.column_config.TextColumn("Reglementair", width="small"),
     }
-    # PADEL_ANALYSIS_TABLE_WRAP_ROOT_CAUSE_FIX_2026-09-19: kolombreedte per
-    # matchkolom wordt nu PER KOLOM berekend op basis van de langste
-    # werkelijke tekstregel erin (zie _estimate_wrapped_column_width), i.p.v.
-    # 1 vaste brede waarde voor alle kolommen. Gecombineerd met de rijhoogte
-    # hieronder (> 64px), wrapt lange tekst netjes over 2 regels i.p.v.
-    # afgekapt te worden — en kolommen met kortere namen blijven smal.
     for col_base in board_column_names:
-        col_values = [row.get(col_base) for row in table_rows]
-        width = _estimate_wrapped_column_width(col_values)
-        column_config[col_base] = st.column_config.TextColumn(col_base, width=width)
-        column_config[f"{col_base} %"] = st.column_config.NumberColumn(f"{col_base} %", format="%.0f%%", width="small")
-    toelichting_width = _estimate_wrapped_column_width(
-        [row.get("Toelichting") for row in table_rows], min_width=160, max_width=_TABLE_COL_MAX_WIDTH,
+        ons_col = f"{col_base} — Ons duo"
+        tegen_col = f"{col_base} — Tegenstander"
+        pct_col = f"{col_base} %"
+        column_config[ons_col] = st.column_config.TextColumn(
+            ons_col, width=_estimate_column_width([row.get(ons_col) for row in table_rows]),
+        )
+        column_config[tegen_col] = st.column_config.TextColumn(
+            tegen_col, width=_estimate_column_width([row.get(tegen_col) for row in table_rows]),
+        )
+        column_config[pct_col] = st.column_config.NumberColumn(pct_col, format="%.0f%%", width="small")
+    column_config["Toelichting"] = st.column_config.TextColumn(
+        "Toelichting", width=_estimate_column_width([row.get("Toelichting") for row in table_rows], min_width=160, max_width=320),
     )
-    column_config["Toelichting"] = st.column_config.TextColumn("Toelichting", width=toelichting_width)
-    column_order = ["#", "Verwacht", "Reglementair"]
+    column_order = ["#", "Verwacht"]
     for col_base in board_column_names:
-        column_order.append(col_base)
+        column_order.append(f"{col_base} — Ons duo")
+        column_order.append(f"{col_base} — Tegenstander")
         column_order.append(f"{col_base} %")
     column_order.append("Toelichting")
     column_order.append("Vorige keer")
     st.dataframe(
         table_rows, use_container_width=True, hide_index=True,
         column_config=column_config, column_order=column_order,
-        row_height=_TABLE_ROW_HEIGHT,  # > 64px/4rem: dit is wat tekst-wrap in st.dataframe daadwerkelijk activeert
     )
     st.caption(
-        "Elke matchkolom toont de koppels op 2 regels (koppel / vs tegenstander), netjes gewrapt binnen een "
-        "kolombreedte die zich aanpast aan de langste naam in die kolom; de winkans staat in de kolom "
-        "ernaast als apart, sorteerbaar percentage. 'Reglementair' toont ⚠️ NIET voor een bewust omgedraaide, "
-        "niet-toegelaten variant (enkel zichtbaar als je de checkbox hierboven aanvinkt). De kolom "
-        "'Toelichting' toont ALTIJD de exacte OFFICIËLE puntensom per duo die de bordvolgorde bepaalt "
-        "(nooit de padelstat-score) — zo kan je die basis meteen zelf controleren."
+        "Elk speler-duo staat nu in zijn eigen kolom ('Ons duo' / 'Tegenstander'), naast een aparte "
+        "winkans-kolom per match. 'Rotatie1 M1' = Match 1 van rotatie 1 (sterkste duo volgens officieel "
+        "klassement, art. 6.6), 'Rotatie1 M2' = Match 2, enz. De kolom 'Toelichting' toont de exacte "
+        "officiële puntensom per duo die deze volgorde bepaalt (nooit de padelstat-score), inclusief een "
+        "⚠️-label voor een bewust niet-reglementaire variant (enkel zichtbaar als je de checkbox hierboven "
+        "aanvinkt) — dit vervangt de eerdere aparte 'Reglementair'-kolom."
     )
     if not show_all and len(all_matchups) > len(display_matchups):
         st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} matchups getoond — vink hierboven aan om alles te zien.")
@@ -1802,6 +1759,149 @@ def _render_all_valid_matchups(
         doc_id = fb.save_lineup_analysis(sel_player_id, payload)
         st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
     return all_matchups
+
+
+def _render_lineup_sandbox(
+    bundle, opp, available_ids, name_lookup_global,
+    player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
+) -> None:
+    """PADEL_ANALYSIS_LINEUP_SANDBOX_2026-09-19 (op verzoek van Kim: "zou
+    mss handig zijn dat je ergens alle combinaties test en kan opzoeken maar
+    dat je dan zelf gewoon een opstelling kan maken in duidelijke vakjes
+    spelers aanduiden per rotatie. voor de tegenspeler kan je dan ook
+    kiezen. een soort sandbox om je hypothese te testen"):
+
+    Aanvullend op de automatisch gegenereerde combinatie-tabel hierboven,
+    laat dit de gebruiker HANDMATIG - rotatie per rotatie, match per match -
+    een eigen duo (via dropdown/multiselect) EN het tegenstander-duo kiezen,
+    en berekent meteen de winkans, de officiële puntensom en of de gekozen
+    volgorde reglementair is (art. 6.6). Ideaal om een specifieke hypothese
+    te testen (bv. "wat als Stijn+Nico op Match 1 tegen hun sterkste duo
+    staat?") zonder in de volledige combinatie-tabel te moeten zoeken."""
+    st.markdown('<div class="section-header">🧪 Sandbox: bouw je eigen opstelling</div>', unsafe_allow_html=True)
+    st.caption(
+        "Stel zelf, rotatie per rotatie en match per match, een opstelling samen: kies wie van ONS team en "
+        "wie van DE TEGENSTANDER er in elke match staat. Handig om een specifieke hypothese te testen zonder "
+        "te moeten zoeken in de volledige combinatie-tabel hierboven."
+    )
+    unique_players = bundle.get("unique_players", []) or []
+    if len(available_ids) < 2:
+        st.info("Selecteer hierboven minstens 2 eigen spelers om de sandbox te gebruiken.")
+        return
+    if len(unique_players) < 2:
+        st.info("Nog geen tegenstander-spelers gekend om in de sandbox te kiezen.")
+        return
+
+    own_labels = [name_lookup_global.get(pid, pid) for pid in available_ids]
+    own_label_to_id = {name_lookup_global.get(pid, pid): pid for pid in available_ids}
+    opp_labels = [p.get("name", "?") for p in unique_players]
+    opp_label_to_player = {p.get("name", "?"): p for p in unique_players}
+
+    ploeg_key = opp["ploeg_id"]
+    n_rotations = st.number_input(
+        "Aantal rotaties in de sandbox", min_value=1, max_value=6, value=2, step=1,
+        key=f"sandbox_n_rot_{ploeg_key}",
+    )
+
+    own_ordered_pairs, opp_boards, rotation_meta = [], [], []
+    used_own_pairs_seen: dict = {}
+    incomplete = False
+
+    for r in range(int(n_rotations)):
+        st.markdown(f"**Rotatie {r + 1}**")
+        col_m1, col_m2 = st.columns(2)
+        matches = []
+        for m_i, col in enumerate((col_m1, col_m2)):
+            with col:
+                st.markdown(f"Match {m_i + 1}" + (" *(sterkste duo, art. 6.6)*" if m_i == 0 else ""))
+                our_sel = st.multiselect(
+                    "Ons duo", own_labels, max_selections=2,
+                    key=f"sandbox_own_r{r}_m{m_i}_{ploeg_key}",
+                )
+                opp_sel = st.multiselect(
+                    "Tegenstander-duo", opp_labels, max_selections=2,
+                    key=f"sandbox_opp_r{r}_m{m_i}_{ploeg_key}",
+                )
+                matches.append((our_sel, opp_sel))
+        m1_own, m1_opp = matches[0]
+        m2_own, m2_opp = matches[1]
+        own_overlap = set(m1_own) & set(m2_own)
+        opp_overlap = set(m1_opp) & set(m2_opp)
+        if own_overlap:
+            st.error(f"⚠️ Rotatie {r + 1}: {', '.join(own_overlap)} kan niet in beide matchen tegelijk spelen.")
+        if opp_overlap:
+            st.error(f"⚠️ Rotatie {r + 1}: tegenstander {', '.join(opp_overlap)} kan niet in beide matchen tegelijk spelen.")
+        for m_i, (our_sel, opp_sel) in enumerate(matches):
+            if len(our_sel) != 2 or len(opp_sel) != 2:
+                incomplete = True
+                continue
+            p1, p2 = own_label_to_id[our_sel[0]], own_label_to_id[our_sel[1]]
+            pair_key = frozenset({p1, p2})
+            if pair_key in used_own_pairs_seen:
+                prev_rot = used_own_pairs_seen[pair_key]
+                st.warning(
+                    f"⚠️ Rotatie {r + 1} Match {m_i + 1}: koppel {our_sel[0]}+{our_sel[1]} speelde al samen in "
+                    f"Rotatie {prev_rot} — een zelfde koppel mag normaliter niet 2× samenspelen."
+                )
+            used_own_pairs_seen[pair_key] = r + 1
+            opp_players = [opp_label_to_player[lbl] for lbl in opp_sel]
+            own_ordered_pairs.append((p1, p2))
+            opp_boards.append({"opponent_pair": opp_players})
+            rotation_meta.append((r + 1, m_i + 1))
+
+    if incomplete:
+        st.info("Vul voor elke match exact 2 eigen spelers en 2 tegenstander-spelers in om de resultaten te zien.")
+    if not own_ordered_pairs:
+        return
+
+    computed = _compute_matchup(own_ordered_pairs, opp_boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings)
+
+    rows = []
+    for (rot_no, match_no), a in zip(rotation_meta, computed["assignment"]):
+        p1, p2 = a["our_pair"]
+        our_sum = _pair_official_sum(frozenset({p1, p2}), official_ranks_strict)
+        wp = a.get("win_probability")
+        rows.append({
+            "Rotatie": rot_no, "Match": match_no,
+            "Ons duo": f"{name_lookup_global.get(p1, p1)}+{name_lookup_global.get(p2, p2)}",
+            "Officieel (ons)": our_sum,
+            "Tegenstander": "+".join(p.get("name", "?") for p in a["opponent_board"]["opponent_pair"]),
+            "Winkans %": round(wp * 100) if wp is not None else None,
+        })
+
+    st.dataframe(
+        rows, use_container_width=True, hide_index=True,
+        column_config={
+            "Rotatie": st.column_config.NumberColumn("Rotatie", width="small"),
+            "Match": st.column_config.NumberColumn("Match", width="small"),
+            "Ons duo": st.column_config.TextColumn("Ons duo", width=_estimate_column_width([r.get("Ons duo") for r in rows])),
+            "Officieel (ons)": st.column_config.NumberColumn("Officieel (ons)", width="small"),
+            "Tegenstander": st.column_config.TextColumn("Tegenstander", width=_estimate_column_width([r.get("Tegenstander") for r in rows])),
+            "Winkans %": st.column_config.NumberColumn("Winkans %", format="%.0f%%", width="small"),
+        },
+    )
+
+    # Reglement-check (art. 6.6): per rotatie moet Match 1 de hoogste
+    # officiële som hebben; enkel bij een EXACT gelijke som mag het
+    for r in range(1, int(n_rotations) + 1):
+        rot_rows = [row for row in rows if row["Rotatie"] == r]
+        if len(rot_rows) == 2:
+            s1, s2 = rot_rows[0]["Officieel (ons)"], rot_rows[1]["Officieel (ons)"]
+            if s1 is not None and s2 is not None:
+                if s1 < s2:
+                    st.warning(
+                        f"⚠️ Rotatie {r}: Match 1 ({s1:.0f}p) is officieel ZWAKKER dan Match 2 ({s2:.0f}p) — "
+                        "dit is NIET reglementair (art. 6.6), tenzij je dit bewust test als 'wat als'-scenario."
+                    )
+                elif s1 == s2:
+                    st.caption(f"ℹ️ Rotatie {r}: Match 1 en Match 2 zijn officieel exact gelijk sterk ({s1:.0f}p) — beide volgordes zijn toegelaten.")
+                else:
+                    st.caption(f"✅ Rotatie {r}: Match 1 ({s1:.0f}p) is officieel sterker dan Match 2 ({s2:.0f}p) — reglementair conform (art. 6.6).")
+
+    total_ebw = computed.get("expected_boards_won")
+    if total_ebw is not None:
+        st.metric("Verwacht totaal aantal gewonnen matchen (deze sandbox-opstelling)", f"{total_ebw:.2f} / {len(own_ordered_pairs)}")
+    st.divider()
 
 
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
@@ -1910,6 +2010,11 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         opponent_boards=chosen_scenario_boards, player_ratings=player_ratings,
         opponent_ratings=opponent_ratings, report_for_ai=report,
         tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
+    )
+    st.divider()
+    _render_lineup_sandbox(
+        bundle, opp, available_ids, name_lookup_global,
+        player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
     )
 
 
