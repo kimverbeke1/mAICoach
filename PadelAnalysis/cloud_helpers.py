@@ -87,9 +87,60 @@ wat een duidelijk signaal is om het input-schema te corrigeren.
 Beide triggers gebeuren ONAFHANKELIJK van elkaar (2 aparte API-calls) —
 als de ene mislukt (bv. workflow-bestand nog niet gepusht) blijft de
 andere gewoon doorgaan; beide resultaten worden apart teruggemeld.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18 (op verzoek van Kim,
+na het testen van de knop hierboven: "duurt eerst lang tegen dat je daar
+kan op klikken. na het klikken lijkt er iets te gebeuren maar je heb niet
+echt goeie feedback [...] lijkt eigenlijk niet gelukt. ik zie ook niets
+verschijnen bij actions")
+
+ROOT CAUSE (bevestigd door het echte .github/workflows/refresh-padelstat.yml
+in te zien - het input-schema {"player","max","force_all"} bleek WEL
+correct, dat was dus niet de oorzaak): het meest waarschijnlijke probleem
+is dat een workflow_dispatch-aanroep via de API STILZWIJGEND een 404
+teruggeeft (geen run, niets zichtbaar in Actions) als het aangeroepen
+workflow-bestand nog niet op de 'main'-branch van GitHub zelf staat (een
+bekende GitHub-eigenaardigheid: workflow_dispatch via de REST API werkt
+ENKEL voor workflow-bestanden die GitHub al kent op de default branch -
+lokaal/in OneDrive bestaan is niet voldoende, het moet ook echt gepusht
+EN gemerged zijn). Kim's eigen bestanden waren op het moment van testen
+mogelijk nog niet gepusht.
+
+Twee bijkomende, structurele problemen die de "geen goede feedback"-klacht
+zelfstandig verklaren, los van de 404-hypothese:
+  1. st.success()/st.error() in Streamlit tonen enkel EENMALIG, binnen de
+     render-cyclus van de klik zelf. Gebeurt er nadien, om eender welke
+     reden, nog een st.rerun() (bv. door een andere widget-interactie
+     elders op de pagina), dan verdwijnt de melding volledig - de
+     gebruiker ziet dan "leek iets te gebeuren" gevolgd door niets.
+  2. Er was geen enkele manier om, VOOR het effectief triggeren, te
+     verifiëren of GitHub de workflow uberhaupt herkent - een fout kwam
+     pas AAN HET LICHT na de mislukte poging zelf, zonder onderscheid
+     tussen "workflow onbekend" en "andere fout".
+
+FIX:
+  - check_workflow_registered(workflow_file): NIEUWE functie, doet een
+    read-only GET-aanroep naar de GitHub API (GEEN dispatch) om
+    DEFINITIEF te bevestigen of een workflow-bestand herkend wordt op de
+    default branch, VOOR er ooit een trigger-poging gebeurt. Dit
+    onderscheidt meteen "workflow bestaat niet/nog niet gepusht" van
+    "workflow bestaat wel, dispatch faalde om een andere reden".
+  - trigger_github_actions_scrape(): geeft nu ALTIJD de verstreken tijd en
+    (bij een fout) de ruwe HTTP-statuscode/foutdetail mee in het bericht,
+    en onderscheidt expliciet een netwerktime-out van een verbindingsfout
+    (i.p.v. beide als generieke "kon GitHub niet bereiken" te melden).
+  - render_full_player_scrape_button(): het LAATSTE resultaat (per speler)
+    wordt nu bewaard in st.session_state en bij ELKE render van de pagina
+    opnieuw getoond (met tijdstip) - een pagina-rerun kan de feedback dus
+    niet langer laten verdwijnen. Toont bovendien EERST het resultaat van
+    check_workflow_registered() voor beide workflows, zodat Kim in 1 oogopslag
+    ziet of het probleem 'workflow onbekend bij GitHub' is, nog vóór de
+    eigenlijke trigger-poging.
 """
 import os
 import sys
+import time
 
 _CLOUD_PATH_MARKERS = ("/mount/src/", "/home/adminuser/")
 
@@ -147,6 +198,65 @@ def is_github_trigger_configured() -> bool:
     return bool(token)
 
 
+def check_workflow_registered(workflow_file: str) -> tuple[bool, str]:
+    """
+    PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: read-only
+    pre-flight check (GEEN workflow_dispatch, GEEN nieuwe run) die
+    rechtstreeks bij GitHub bevestigt of dit workflow-bestand ECHT
+    herkend wordt op de default branch van de repo.
+
+    Dit is de directe test voor de meest waarschijnlijke oorzaak van
+    "niets verschijnt in Actions": workflow_dispatch via de REST API
+    werkt ENKEL voor workflow-bestanden die GitHub al kent op de default
+    branch (lokaal/in OneDrive bestaan is niet voldoende - het moet ook
+    echt gepusht EN gemerged zijn naar bv. 'main').
+
+    Returns (gevonden, detail):
+      - (True, "actief")           -> workflow bestaat en kan getriggerd worden.
+      - (True, "state=<state>")    -> workflow bestaat, maar staat NIET op
+                                       'active' (bv. handmatig uitgeschakeld
+                                       via GitHub UI) - dispatch zal dan
+                                       waarschijnlijk ALSNOG mislukken.
+      - (False, "<foutdetail>")    -> workflow NIET gevonden op de default
+                                       branch, of een andere fout (token/
+                                       netwerk) - detail bevat de reden.
+    """
+    import requests
+    token, repo, _default_workflow, _ref = _get_github_settings()
+    if not token:
+        return False, "geen GitHub-token geconfigureerd"
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow_file}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except Exception as e:
+        return False, f"kon GitHub niet bereiken ({type(e).__name__}: {e})"
+    if resp.status_code == 200:
+        try:
+            state = resp.json().get("state", "onbekend")
+        except Exception:
+            state = "onbekend"
+        if state == "active":
+            return True, "actief"
+        return True, f"state={state} (waarschijnlijk NIET triggerbaar zolang dit niet 'active' is)"
+    if resp.status_code == 404:
+        return False, (
+            f"GitHub kent '{workflow_file}' niet op de standaardbranch van '{repo}'. "
+            "Meest waarschijnlijke oorzaak: het bestand staat lokaal/in OneDrive, maar is nog "
+            "NIET gepusht+gemerged naar GitHub. Controleer via GitHub.com -> Actions: staat "
+            "deze workflow in de linkerlijst?"
+        )
+    if resp.status_code == 401:
+        return False, "GitHub-token ongeldig of verlopen"
+    if resp.status_code == 403:
+        return False, "GitHub-token heeft onvoldoende rechten"
+    return False, f"onverwachte statuscode {resp.status_code}"
+
+
 def trigger_github_actions_scrape(
     player_ids: str = "",
     mode: str = "missing",
@@ -171,8 +281,15 @@ def trigger_github_actions_scrape(
       — volledig achterwaarts compatibel.
 
     Returns (success, message).
+
+    PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het bericht bevat
+    nu ALTIJD de verstreken tijd (transparantie: was het traag, of net heel
+    snel mislukt?), en onderscheidt een netwerktime-out expliciet van een
+    verbindingsfout, i.p.v. beide als generieke "kon GitHub niet bereiken"
+    te meIden.
     """
     import requests
+    start = time.monotonic()
     token, repo, default_workflow, ref = _get_github_settings()
     workflow = workflow_file or default_workflow
     if not token:
@@ -187,20 +304,40 @@ def trigger_github_actions_scrape(
     payload = {"ref": ref, "inputs": payload_inputs}
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    except requests.exceptions.Timeout:
+        elapsed = time.monotonic() - start
+        return False, f"Mislukt: GitHub antwoordde niet binnen 15s (time-out na {elapsed:.1f}s)."
+    except requests.exceptions.ConnectionError as e:
+        elapsed = time.monotonic() - start
+        return False, f"Mislukt: kon geen verbinding maken met GitHub na {elapsed:.1f}s ({e})."
     except Exception as e:
-        return False, f"Kon GitHub niet bereiken: {e}"
+        elapsed = time.monotonic() - start
+        return False, f"Mislukt: onverwachte fout na {elapsed:.1f}s ({type(e).__name__}: {e})."
+    elapsed = time.monotonic() - start
     if resp.status_code == 204:
         run_url = f"https://github.com/{repo}/actions/workflows/{workflow}"
-        return True, f"✅ Data wordt ververst. Volg de voortgang op [GitHub Actions]({run_url}) (duurt meestal enkele minuten)."
+        return True, f"✅ Getriggerd in {elapsed:.1f}s. Volg de voortgang op [GitHub Actions]({run_url}) (duurt meestal enkele minuten)."
     if resp.status_code == 401:
-        return False, "Mislukt: het GitHub-token is ongeldig of verlopen."
+        return False, f"Mislukt ({elapsed:.1f}s): het GitHub-token is ongeldig of verlopen."
     if resp.status_code == 403:
-        return False, "Mislukt: het GitHub-token heeft onvoldoende rechten."
+        return False, f"Mislukt ({elapsed:.1f}s): het GitHub-token heeft onvoldoende rechten."
     if resp.status_code == 404:
-        return False, f"Mislukt: workflow '{workflow}' of repo '{repo}' niet gevonden. Staat het bestand in .github/workflows/ en is het al gepusht naar '{ref}'?"
+        return False, (
+            f"Mislukt ({elapsed:.1f}s, HTTP 404): workflow '{workflow}' niet gevonden op de "
+            f"standaardbranch van '{repo}'. Meest waarschijnlijke oorzaak: het bestand is nog "
+            "niet gepusht+gemerged naar GitHub."
+        )
     if resp.status_code == 422:
-        return False, f"Mislukt (422): GitHub verwierp de inputs — controleer of het input-schema van '{workflow}' overeenkomt met wat hier verstuurd werd."
-    return False, f"Mislukt ({resp.status_code})."
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:
+            detail = ""
+        return False, (
+            f"Mislukt ({elapsed:.1f}s, HTTP 422): GitHub verwierp de inputs voor '{workflow}'"
+            + (f" — {detail}" if detail else "")
+            + ". Controleer of het input-schema overeenkomt met wat hier verstuurd werd."
+        )
+    return False, f"Mislukt ({elapsed:.1f}s, HTTP {resp.status_code})."
 
 
 def render_cloud_scrape_trigger(
@@ -270,10 +407,21 @@ def render_full_player_scrape_button(
     Bedoeld om herbruikbaar te zijn op ELKE plek waar een individuele
     speler getoond wordt (Team-analyse detail-per-speler, Opstelling-
     analyse, Spelers-pagina, Mijn profiel, ...) - zie opponent_dossier.py:
-    render_player_summary_inline() voor de eerste, centrale integratie."""
+    render_player_summary_inline() voor de eerste, centrale integratie.
+
+    PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het resultaat van
+    de LAATSTE klik wordt bewaard in st.session_state en bij ELKE render
+    van de pagina opnieuw getoond (met tijdstip) - een pagina-rerun kan de
+    feedback dus niet langer laten verdwijnen ("leek iets te gebeuren maar
+    geen goede feedback"). Vóór de eigenlijke trigger-poging wordt bovendien
+    EERST, via check_workflow_registered(), rechtstreeks bij GitHub
+    geverifieerd of beide workflows daar effectief herkend worden - dat
+    geeft een DEFINITIEF antwoord op de vraag "waarom zie ik niets in
+    Actions?" (workflow onbekend bij GitHub vs. een andere fout)."""
     import streamlit as st
     if not is_github_trigger_configured():
         return
+    result_key = f"{key_prefix}_last_result_{player_id}"
     label_naam = f" voor {player_name}" if player_name else ""
     if st.button(
         f"🔄 Scrape deze speler nu (TVL + padelstat){label_naam}",
@@ -283,26 +431,51 @@ def render_full_player_scrape_button(
              "(enkel ontbrekende/huidige periode) en padelstats.be playing strength. "
              "Duurt meestal enkele minuten.",
     ):
-        with st.spinner("Bezig met starten..."):
-            ok_tvl, msg_tvl = trigger_github_actions_scrape(
-                player_ids=str(player_id), mode="missing",
-            )
-            ok_padelstat, msg_padelstat = trigger_github_actions_scrape(
-                workflow_file=PADELSTAT_WORKFLOW_FILE,
-                inputs={"player": str(player_id), "max": "1", "force_all": "false"},
-            )
-        st.markdown("**TVL-matchdata (missing/huidige periode):**")
+        with st.spinner("Stap 1/2: controleren of GitHub beide workflows herkent..."):
+            tvl_workflow = _get_github_settings()[2] or DEFAULT_WORKFLOW_FILE
+            tvl_registered, tvl_reg_detail = check_workflow_registered(tvl_workflow)
+            padelstat_registered, padelstat_reg_detail = check_workflow_registered(PADELSTAT_WORKFLOW_FILE)
+        with st.spinner("Stap 2/2: workflows starten op GitHub..."):
+            if tvl_registered:
+                ok_tvl, msg_tvl = trigger_github_actions_scrape(
+                    player_ids=str(player_id), mode="missing", workflow_file=tvl_workflow,
+                )
+            else:
+                ok_tvl, msg_tvl = False, f"Overgeslagen — workflow niet herkend: {tvl_reg_detail}"
+            if padelstat_registered:
+                ok_padelstat, msg_padelstat = trigger_github_actions_scrape(
+                    workflow_file=PADELSTAT_WORKFLOW_FILE,
+                    inputs={"player": str(player_id), "max": "1", "force_all": "false"},
+                )
+            else:
+                ok_padelstat, msg_padelstat = False, f"Overgeslagen — workflow niet herkend: {padelstat_reg_detail}"
+        st.session_state[result_key] = {
+            "timestamp": time.strftime("%H:%M:%S"),
+            "tvl": (ok_tvl, msg_tvl, tvl_registered, tvl_reg_detail),
+            "padelstat": (ok_padelstat, msg_padelstat, padelstat_registered, padelstat_reg_detail),
+        }
+    # PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het laatst bekende
+    # resultaat wordt ALTIJD opnieuw getoond (niet enkel binnen de if-branch
+    # van de klik zelf), zodat een latere pagina-rerun de feedback niet kan
+    # laten verdwijnen.
+    last = st.session_state.get(result_key)
+    if last:
+        st.caption(f"Resultaat van de laatste poging, om {last['timestamp']}:")
+        ok_tvl, msg_tvl, tvl_registered, tvl_reg_detail = last["tvl"]
+        ok_padelstat, msg_padelstat, padelstat_registered, padelstat_reg_detail = last["padelstat"]
+        st.markdown(f"**TVL-matchdata** (workflow-check: {'✅ herkend' if tvl_registered else '❌ NIET herkend — ' + tvl_reg_detail}):")
         if ok_tvl:
             st.success(msg_tvl)
         else:
             st.error(msg_tvl)
-        st.markdown("**Padelstats.be playing strength:**")
+        st.markdown(f"**Padelstats.be playing strength** (workflow-check: {'✅ herkend' if padelstat_registered else '❌ NIET herkend — ' + padelstat_reg_detail}):")
         if ok_padelstat:
             st.success(msg_padelstat)
         else:
             st.error(msg_padelstat)
-            st.caption(
-                "⚠️ Als dit blijft mislukken: controleer of '.github/workflows/"
-                f"{PADELSTAT_WORKFLOW_FILE}' bestaat in de repo en of het input-schema "
-                "overeenkomt met {\"player\": ..., \"max\": ..., \"force_all\": ...}."
+        if not tvl_registered or not padelstat_registered:
+            st.warning(
+                "⚠️ Minstens 1 workflow wordt niet herkend door GitHub. Controleer op GitHub.com "
+                "-> Actions of de betrokken workflow(s) in de linkerlijst staan — staan ze er niet, "
+                "dan is het bestand nog niet gepusht+gemerged naar de standaardbranch."
             )
