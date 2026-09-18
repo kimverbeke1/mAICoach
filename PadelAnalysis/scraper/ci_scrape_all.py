@@ -54,11 +54,42 @@ BUG (opgelost): "het padelstat getal zal voortdurend wijzigen. moet dus
 regelmatig geupdate worden. checken als dat werkt". Dat werkte NIET: een
 speler met eenmaal een gecachete padelstat-rating werd voor ALTIJD
 overgeslagen in elke volgende run, ongeacht hoe oud die waarde was.
+
 Fix (kern zit in enrich_opponents.py): run_padelstat_for_players() ververst
 nu automatisch ook ratings die ouder zijn dan PADELSTAT_STALE_DAYS, niet
 enkel volledig ontbrekende. Nieuwe env var:
     - PADELSTAT_STALE_DAYS (getal, standaard 14): na hoeveel dagen een
       bestaande padelstat-rating automatisch opnieuw wordt opgehaald.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van Kim)
+--------------------------------------------------------------------------
+BUG (opgelost): "ik heb dit profiel verversen gekozen bij Stijn Mortier. Ik
+zie dat de scraper heel wat spelers aan het verversen is (en niet Stijn
+Mortier wegens beperking in aantal). [...] ik zie nu weer een heleboel
+nieuwe spelers in mijn spelerslijst. [...] bedoeling is dat enkel die
+speler ververst wordt (id speler meegeven)."
+
+ROOT CAUSE: de knop "Scrape deze speler nu" (cloud_helpers.py) triggert
+deze workflow met PLAYER_IDS=<1 speler>. main() riep tot nu toe ALTIJD
+run_enrichment(player_ids) aan (zodra ENABLE_ENRICH=true, standaard),
+ONGEACHT hoeveel spelers er gevraagd werden. Dat deed twee ongewenste
+dingen voor een 1-speler-aanvraag:
+  1. discover_opponent_players() vond AL die ene speler's tegenstanders/
+     partners zonder eigen profiel (uit ZIJN/HAAR eigen interclub-
+     matchgeschiedenis) en maakte daar nieuwe ghost-profielen voor aan.
+  2. run_klassement_for_players() heeft GEEN staleness-check (enkel
+     bestaat/bestaat-niet) -- had de aangevraagde speler dus al ÉÉNMAAL
+     een (mogelijk foutieve/verouderde) klassement_history staan, dan werd
+     die speler NOOIT opnieuw geprobeerd, terwijl de nieuw ontdekte ghost-
+     profielen wél het gedeelde KLASSEMENT_MAX-budget opsouperen.
+
+FIX: wanneer PLAYER_IDS na filtering exact 1 speler bevat, wordt nu
+run_single_player_enrichment() aangeroepen i.p.v. run_enrichment(): dat
+ververst ENKEL en ALTIJD (cache genegeerd) padelstat + klassement voor
+die ene speler, zonder discovery/nieuwe profielen. Bij 2+ spelers (bv. de
+dagelijkse cron, of een bewuste bulk-refresh) blijft het bestaande gedrag
+(met discovery/enrichment) volledig ongewijzigd.
 
 Environment variables (optioneel, met veilige defaults):
     - ENABLE_POULE_UPDATE ("true"/"false", standaard "true")
@@ -111,7 +142,6 @@ logger = logging.getLogger("ci_scrape_all")
 
 DELAY_BETWEEN_PLAYERS = 3.0
 DELAY_BETWEEN_POULE_UPDATES = 3.0
-
 VALID_MODES = ("missing", "new_users", "full")
 DEFAULT_MODE = "missing"
 
@@ -280,6 +310,13 @@ def run_enrichment(player_ids: list) -> dict:
     verversing van VEROUDERDE ratings, niet enkel ontbrekende), en hun
     klassementshistoriek.
 
+    LET OP: dit is de BULK-variant (2+ spelers, bv. de dagelijkse cron of
+    een bewuste multi-speler-refresh) — inclusief discovery/nieuwe ghost-
+    profielen. Voor een 1-speler-aanvraag wordt in main() in plaats hiervan
+    run_single_player_enrichment() gebruikt (zie PADEL_ANALYSIS_SINGLE_
+    PLAYER_REFRESH_FIX_2026-09-19 hierboven) — GEEN discovery, gegarandeerde
+    refresh van enkel die ene speler.
+
     Draait NA de matchdata-scrape en VOOR de poule-stap.
     """
     leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
@@ -291,7 +328,6 @@ def run_enrichment(player_ids: list) -> dict:
             "Plaats enrich_opponents.py naast dit bestand in de scraper-map."
         )
         return leeg
-
     do_padelstat = get_padelstat_enabled()
     do_klassement = get_klassement_enabled()
     stale_days = get_padelstat_stale_days()
@@ -300,7 +336,6 @@ def run_enrichment(player_ids: list) -> dict:
         f"padelstat_max={get_padelstat_max()}, padelstat_stale_days={stale_days}, "
         f"klassement={do_klassement}, klassement_max={get_klassement_max()}) ==="
     )
-
     try:
         resultaat = eo.enrich(
             player_ids,
@@ -344,7 +379,6 @@ def run_enrichment(player_ids: list) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.exception(f"Verrijkingsstap mislukt: {e}")
         return leeg
-
     nieuwe = resultaat.get("nieuwe_profielen") or []
     if nieuwe:
         logger.info(f"{len(nieuwe)} nieuw(e) spelersprofiel(en) aangemaakt voor tegenstanders.")
@@ -357,7 +391,6 @@ def run_enrichment(player_ids: list) -> dict:
                 "Hun matchdata (klassement, winrate, partners) wordt opgehaald in de "
                 "volgende run. Zet ENRICH_SCRAPE_NEW=true om dat meteen te doen."
             )
-
     p = resultaat.get("padelstat") or {}
     if p:
         logger.info(
@@ -369,7 +402,6 @@ def run_enrichment(player_ids: list) -> dict:
                 f"{p['overgeslagen_limiet']} speler(s) wachten op een volgende run "
                 f"(limiet PADELSTAT_MAX={get_padelstat_max()})."
             )
-
     k = resultaat.get("klassement") or {}
     if k:
         logger.info(
@@ -381,15 +413,43 @@ def run_enrichment(player_ids: list) -> dict:
                 f"{k['overgeslagen_limiet']} speler(s) wachten op een volgende run "
                 f"(limiet KLASSEMENT_MAX={get_klassement_max()})."
             )
-
     return resultaat
+
+
+def run_single_player_enrichment(player_id: str) -> dict:
+    """PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van
+    Kim: "bedoeling is dat enkel die speler ververst wordt (id speler
+    meegeven)").
+
+    Roept enrich_opponents.run_single_player_refresh() aan: GEEN discovery,
+    GEEN nieuwe ghost-profielen, en een GEFORCEERDE refresh (cache/
+    staleness genegeerd) van padelstat + klassement voor exact deze ene
+    speler. Gebruikt door main() zodra er na filtering exact 1 speler
+    overblijft (zie daar)."""
+    leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
+    try:
+        import enrich_opponents as eo
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"enrich_opponents niet beschikbaar ({e}) — losse-speler-verversing overgeslagen."
+        )
+        return leeg
+    try:
+        result = eo.run_single_player_refresh(player_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"Losse-speler-verversing mislukt voor {player_id}: {e}")
+        return leeg
+    return {
+        "nieuwe_profielen": [],
+        "padelstat": result.get("padelstat", {}),
+        "klassement": result.get("klassement", {}),
+    }
 
 
 def run_poule_updates(player_ids: list, force: bool, include_eindronde: bool = True) -> tuple[list, list]:
     """PADEL_ANALYSIS_AUTO_POULE_UPDATE_2026-09-14 +
     PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15."""
     import poule_playwright as pp
-
     updated, skipped_or_failed = [], []
     total = len(player_ids)
     for i, pid in enumerate(player_ids, start=1):
@@ -440,23 +500,32 @@ def main() -> int:
     mode = get_mode()
     player_ids = get_requested_player_ids()
     player_ids = filter_by_mode(player_ids, mode)
-
     if not player_ids:
         logger.warning(f"Geen spelers gevonden/aangevraagd voor mode='{mode}' — niets te verversen.")
         return 0
-
     logger.info(f"Mode: '{mode}' — {len(player_ids)} speler(s) worden verwerkt: {player_ids}")
-
     ok, failed, skipped_up_to_date = run_match_scrapes(player_ids, mode)
-
     logger.info("=== Samenvatting matchdata ===")
     logger.info(f"Ververst: {len(ok)} — Al up-to-date: {len(skipped_up_to_date)} — Mislukt: {len(failed)}")
     for pid, err in failed:
         logger.error(f"  \u274c {pid}: {err}")
-
     enrich_result = {}
     if get_enrich_enabled():
-        enrich_result = run_enrichment(player_ids)
+        # PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19: bij EXACT 1
+        # aangevraagde speler (bv. de "Scrape deze speler nu"-knop) NOOIT
+        # discovery/nieuwe ghost-profielen aanmaken, en die ene speler altijd
+        # geforceerd verversen (cache/staleness genegeerd) i.p.v. de
+        # bulk-verrijking te draaien die met andere (ghost-)spelers kan
+        # concurreren om het gedeelde *_MAX-budget.
+        if len(player_ids) == 1:
+            logger.info(
+                f"=== Losse-speler-verversing gedetecteerd (PLAYER_IDS bevat exact 1 speler: "
+                f"{player_ids[0]}) — ENKEL deze speler wordt ververst (padelstat+klassement), "
+                "GEEN discovery/nieuwe tegenstander-profielen. ==="
+            )
+            enrich_result = run_single_player_enrichment(player_ids[0])
+        else:
+            enrich_result = run_enrichment(player_ids)
         logger.info("=== Samenvatting verrijking ===")
         logger.info(
             f"Nieuwe profielen: {len(enrich_result.get('nieuwe_profielen') or [])} — "
@@ -465,7 +534,6 @@ def main() -> int:
         )
     else:
         logger.info("Verrijkingsstap uitgeschakeld via ENABLE_ENRICH=false.")
-
     poule_updated, poule_skipped = [], []
     if get_poule_update_enabled():
         force = get_poule_force()
@@ -483,7 +551,6 @@ def main() -> int:
             logger.info(f"  \u26a0\ufe0f {pid}: {info}")
     else:
         logger.info("Poule-schema-stap uitgeschakeld via ENABLE_POULE_UPDATE=false.")
-
     if ok or skipped_up_to_date or not player_ids:
         return 0
     return 1
