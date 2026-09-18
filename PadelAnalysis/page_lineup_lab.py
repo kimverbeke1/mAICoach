@@ -1058,25 +1058,41 @@ def _rotation_order_variants(
     is_tie = (sum_a == sum_b)
     ranked = _rank_pairs_with_padelstat_tiebreak([duo_a, duo_b], official_ranks, padelstat_ratings)
     compliant_first, compliant_second = ranked[0], ranked[1]
+    # PADEL_ANALYSIS_LINEUP_TRANSPARENCY_2026-09-19 (op verzoek van Kim: "ik
+    # vermoed dat het systeem de padelstat score gebruikt ipv de officiele
+    # score"): toon ALTIJD de exacte OFFICIËLE puntensom per duo die de
+    # volgorde bepaalt, zodat dit nooit een black box is en meteen
+    # controleerbaar is welk cijfer de beslissing stuurt (officieel
+    # klassement, NIET padelstat - padelstat wordt uitsluitend als
+    # tie-breaker gebruikt bij een EXACT gelijke officiële som).
+    sum_first = _pair_official_sum(compliant_first, official_ranks)
+    sum_second = _pair_official_sum(compliant_second, official_ranks)
+    punten_txt = f"officieel {sum_first:.0f} vs {sum_second:.0f} punten"
 
     variants = [{
         "ordered_pairs": [compliant_first, compliant_second],
         "is_regulation_compliant": True,
-        "swap_label": "" if not is_tie else "gelijke officiële sterkte — aanbevolen o.b.v. padelstat",
+        "swap_label": (
+            f"gelijke officiële sterkte ({punten_txt}) — aanbevolen o.b.v. padelstat" if is_tie
+            else f"{punten_txt} — sterkste eerst (art. 6.6)"
+        ),
         "total_points": total_points, "valid": valid, "reason": reason,
     }]
     if is_tie:
         variants.append({
             "ordered_pairs": [compliant_second, compliant_first],
             "is_regulation_compliant": True,
-            "swap_label": "gelijke officiële sterkte — alternatieve, even geldige keuze",
+            "swap_label": f"gelijke officiële sterkte ({punten_txt}) — alternatieve, even geldige keuze",
             "total_points": total_points, "valid": valid, "reason": reason,
         })
     else:
         variants.append({
             "ordered_pairs": [compliant_second, compliant_first],
             "is_regulation_compliant": False,
-            "swap_label": "⚠️ NIET reglementair: het sterkere duo moet normaliter eerst spelen (art. 6.6)",
+            "swap_label": (
+                f"⚠️ NIET reglementair ({punten_txt}, omgedraaid): het sterkere duo moet "
+                "normaliter eerst spelen (art. 6.6)"
+            ),
             "total_points": total_points, "valid": valid, "reason": reason,
         })
     return {"variants": variants}
@@ -1235,7 +1251,21 @@ def _build_all_valid_matchups(
     for own_ordered_pairs, own_rotations_info, fully_compliant in valid_own_options:
         if truncated and len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
             break
-        our_pairs_key = frozenset(frozenset(p) for p in own_ordered_pairs)
+        # PADEL_ANALYSIS_TIE_VARIANT_DEDUP_FIX_2026-09-19 (root cause van
+        # "Stijn Mortier komt nooit voor in match 1 van rotatie 1"): dit was
+        # voorheen een frozenset-van-frozensets, wat de VOLGORDE van de
+        # paren (dus WIE op match 1 vs match 2 van een rotatie staat)
+        # volledig negeert. Bij een officieel gelijkspel genereert
+        # _rotation_order_variants() BEIDE volgordes (elk met
+        # is_regulation_compliant=True) - maar omdat de oude sleutel enkel
+        # de ONGEORDENDE verzameling paren gebruikte, botsten die twee
+        # varianten op EXACT dezelfde (our_pairs_key, their_key,
+        # fully_compliant)-combinatie en werd de 2de (de omgedraaide, dus
+        # de variant die bv. Stijn Mortier's duo WEL op match 1 zou zetten)
+        # stilzwijgend weggefilterd als "duplicaat". Een TUPLE behoudt de
+        # positie (Rotatie1-1 vs Rotatie1-2, ...) terwijl elk paar zelf nog
+        # steeds een set is (volgorde BINNEN het koppel maakt niet uit).
+        our_pairs_key = tuple(frozenset(p) for p in own_ordered_pairs)
         for their_key, info in unique_opponent_lineups.items():
             boards = info["boards"]
             if len(boards) != len(own_ordered_pairs):
@@ -1285,6 +1315,85 @@ def _build_all_valid_matchups(
 
 def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
+
+
+def _own_lineup_group_key(assignment: list) -> frozenset:
+    """De ONGEORDENDE verzameling eigen koppels van 1 matchup-rij - dus
+    dezelfde 'opstelling' ongeacht bordvolgorde of tegen welke
+    tegenstander-opstelling ze doorgerekend werd."""
+    return frozenset(frozenset(a["our_pair"]) for a in assignment)
+
+
+def _render_best_worst_case_per_own_lineup(all_matchups: list, name_lookup_global: dict) -> None:
+    """PADEL_ANALYSIS_BEST_WORST_CASE_SUMMARY_2026-09-19 (op verzoek van Kim:
+    "ik wou dus eigenlijk onze ploegopstellingen visualiseren en voor elk
+    van onze mogelijke ploegopstellingen een best case en worst case
+    resultaat is. Dat is niet te zien."):
+
+    Groepeert alle matchup-rijen per unieke EIGEN koppelverdeling (dezelfde
+    koppels, ongeacht bordvolgorde of tegen welke tegenstander-opstelling)
+    en toont per groep het BESTE en SLECHTSTE verwachte resultaat over alle
+    doorgerekende tegenstander-scenario's - en, indien de checkbox
+    "bewust omgedraaide varianten" hierboven aanstaat, ook over de
+    reglementaire vs. bewust niet-reglementaire bordvolgorde. Zo wordt in
+    1 oogopslag zichtbaar wat een "sacrifice"-opstelling (zoals Carl+Stijn
+    bewust op de zwaarste match) in het beste/slechtste geval oplevert."""
+    if not all_matchups:
+        return
+    groups: dict = {}
+    for m in all_matchups:
+        key = _own_lineup_group_key(m["assignment"])
+        groups.setdefault(key, []).append(m)
+
+    def _sort_val(m):
+        ebw = m.get("expected_boards_won")
+        return ebw if ebw is not None else m.get("total_score", 0.0)
+
+    def _opp_label(m):
+        return " | ".join(
+            "+".join(p.get("name", "?") for p in a["opponent_board"]["opponent_pair"])
+            for a in m["assignment"]
+        )
+
+    st.markdown('<div class="section-header">🏆 Best case / worst case per eigen opstelling</div>', unsafe_allow_html=True)
+    st.caption(
+        "Voor elke unieke combinatie van ONZE koppels (ongeacht bordvolgorde of tegen wie), het beste en "
+        "het slechtste verwachte resultaat over alle doorgerekende tegenstander-opstellingen hierboven — "
+        "en, als je de checkbox 'bewust omgedraaide varianten' aanvinkt, ook over de reglementaire vs. "
+        "bewust niet-reglementaire bordvolgorde (bv. een zwakker duo bewust op de zwaarste match)."
+    )
+    summary_rows = []
+    for key, rows_for_group in groups.items():
+        rows_sorted = sorted(rows_for_group, key=_sort_val)
+        worst, best = rows_sorted[0], rows_sorted[-1]
+        pair_labels = " | ".join(
+            f"{name_lookup_global.get(p1, p1)}/{name_lookup_global.get(p2, p2)}"
+            for p1, p2 in (tuple(pair) for pair in key)
+        )
+        best_ebw, worst_ebw = best.get("expected_boards_won"), worst.get("expected_boards_won")
+        summary_rows.append({
+            "Eigen opstelling (koppels)": pair_labels,
+            "_best_sort": _sort_val(best),
+            "Best case": f"{best_ebw:.2f}" if best_ebw is not None else f"score {best.get('total_score', 0):.3f}",
+            "Best case tegen": _opp_label(best),
+            "Best reglementair": "✅" if best.get("fully_compliant", True) else "⚠️ NIET",
+            "Worst case": f"{worst_ebw:.2f}" if worst_ebw is not None else f"score {worst.get('total_score', 0):.3f}",
+            "Worst case tegen": _opp_label(worst),
+            "Worst reglementair": "✅" if worst.get("fully_compliant", True) else "⚠️ NIET",
+            "# scenario's": len(rows_for_group),
+        })
+    summary_rows.sort(key=lambda r: r.pop("_best_sort"), reverse=True)
+    st.dataframe(
+        summary_rows, use_container_width=True, hide_index=True,
+        column_config={
+            "Eigen opstelling (koppels)": st.column_config.TextColumn("Eigen opstelling (koppels)", width=260),
+            "Best case tegen": st.column_config.TextColumn("Best case tegen", width=220),
+            "Worst case tegen": st.column_config.TextColumn("Worst case tegen", width=220),
+            "# scenario's": st.column_config.NumberColumn("# scenario's", width="small"),
+        },
+        row_height=40,
+    )
+    st.divider()
 
 
 # ─────────────────────────────────────────────
@@ -1501,9 +1610,17 @@ def _render_all_valid_matchups(
         "Reglementair": st.column_config.TextColumn("Reglementair", width="small"),
     }
     for col_base in board_column_names:
-        column_config[col_base] = st.column_config.TextColumn(col_base, width="medium")
+        # PADEL_ANALYSIS_TABLE_READABILITY_FIX_2026-09-19 (op verzoek van Kim:
+        # "tabel niet leesbaar want de namen passen er niet in" + "er is een
+        # 2de regel in de tabel maar die is niet zichtbaar"): "medium" (~200px)
+        # was te smal voor 2 volledige spelersnamen + "vs" + 2 tegenstander-
+        # namen op 1 regel, en de standaard rijhoogte van st.dataframe toont
+        # enkel de EERSTE tekstregel van een cel. Vaste, ruimere pixelbreedte
+        # + expliciete row_height (zie st.dataframe hieronder) lossen dit
+        # samen op: de 2de regel ("vs ...") wordt nu gewoon zichtbaar.
+        column_config[col_base] = st.column_config.TextColumn(col_base, width=280)
         column_config[f"{col_base} %"] = st.column_config.NumberColumn(f"{col_base} %", format="%.0f%%", width="small")
-    column_config["Toelichting"] = st.column_config.TextColumn("Toelichting", width="medium")
+    column_config["Toelichting"] = st.column_config.TextColumn("Toelichting", width=320)
     column_order = ["#", "Verwacht", "Reglementair"]
     for col_base in board_column_names:
         column_order.append(col_base)
@@ -1513,15 +1630,20 @@ def _render_all_valid_matchups(
     st.dataframe(
         table_rows, use_container_width=True, hide_index=True,
         column_config=column_config, column_order=column_order,
+        row_height=56,  # genoeg ruimte voor de 2 tekstregels per matchkolom
     )
     st.caption(
-        "Elke matchkolom toont de koppels (2 regels); de winkans staat in de kolom ernaast als apart, "
-        "sorteerbaar percentage. 'Reglementair' toont ⚠️ NIET voor een bewust omgedraaide, "
-        "niet-toegelaten variant (enkel zichtbaar als je de checkbox hierboven aanvinkt)."
+        "Elke matchkolom toont de koppels op 2 regels (koppel / vs tegenstander); de winkans staat in de "
+        "kolom ernaast als apart, sorteerbaar percentage. 'Reglementair' toont ⚠️ NIET voor een bewust "
+        "omgedraaide, niet-toegelaten variant (enkel zichtbaar als je de checkbox hierboven aanvinkt). "
+        "De kolom 'Toelichting' toont ALTIJD de exacte OFFICIËLE puntensom per duo die de bordvolgorde "
+        "bepaalt (nooit de padelstat-score) — zo kan je die basis meteen zelf controleren."
     )
     if not show_all and len(all_matchups) > len(display_matchups):
         st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} matchups getoond — vink hierboven aan om alles te zien.")
     st.divider()
+
+    _render_best_worst_case_per_own_lineup(all_matchups, name_lookup_global)
 
     # PADEL_ANALYSIS_AI_FOLLOWUP_ON_MATCHUPS_2026-09-18 (op verzoek van
     # Kim: "zorg dat ik kan doorvragen"): AI-sectie voor deze matchup-tabel
