@@ -785,6 +785,149 @@ def _aggregate_scenario_scores(scenarios: list) -> list:
     return aggregated
 
 
+def _default_opponent_max_per_player(chosen_opp_ids: list, needed_slots: int) -> dict:
+    """Verdeelt de benodigde speler-plaatsen (needed_slots = 2 x aantal
+    wedstrijden) zo gelijk mogelijk over de gekozen tegenstander-spelers —
+    exact dezelfde verdeelstrategie als voor onze eigen kant (afronden naar
+    boven voor de eerste spelers, zodat de som altijd exact klopt)."""
+    n = len(chosen_opp_ids)
+    if n == 0:
+        return {}
+    base = needed_slots // n
+    extra = needed_slots % n
+    return {pid: base + (1 if i < extra else 0) for i, pid in enumerate(chosen_opp_ids)}
+
+
+def _enumerate_all_opponent_pairings(
+    player_ids: list, required_counts: dict, call_budget: int = 200_000,
+) -> tuple:
+    """PADEL_ANALYSIS_OPPONENT_REPEAT_SUPPORT_FIX_2026-09-18 (op verzoek van
+    Kim, na 3 mislukte pogingen — DE ECHTE ROOT CAUSE):
+
+    Kim's eigen, gemelde bewijs: in ZIJN historische wedstrijd tegen deze
+    tegenstander speelden 5 verschillende tegenstander-spelers 4 matchen
+    (2 rotaties). Eén speler (Claeys Gregory) speelde daarbij TWEE keer,
+    met twee VERSCHILLENDE partners. Dat is volkomen normaal en toegelaten.
+
+    lineup_lab.generate_all_opponent_lineups() (de tot nu toe gebruikte
+    functie voor THEORETISCHE tegenstander-opstellingen) ondersteunt dit
+    NIET: die eist letterlijk 2 x aantal_wedstrijden VERSCHILLENDE,
+    NOOIT-HERHAALDE spelers (itertools.combinations zonder herhaling). Bij
+    4 matchen (8 plaatsen) en slechts 5 gekende tegenstander-spelers is
+    `len(ids) < needed` dus ALTIJD waar, en de functie geeft dan ALTIJD een
+    lege lijst terug — zonder foutmelding, gewoon stil niets. Vandaar dat
+    Kim keer op keer "1 unieke tegenstander-opstelling" (enkel de
+    historische) te zien kreeg, ongeacht of de UI-laag zelf (default-
+    selectie, automatische berekening) intussen wél correct was gefixt.
+
+    Dit is dus GEEN UI-probleem (de vorige 2 fixes daar waren wel degelijk
+    correct), maar een ECHT MODEL-GAT in de onderliggende combinatoriek:
+    onze EIGEN kant ondersteunt al langer dat een speler meerdere keren
+    speelt (via `required`/`max_per_player`, zie lineup_lab.optimize_
+    lineup()), maar de TEGENSTANDER-kant had dat nooit.
+
+    Deze functie is het tegenstander-equivalent van lineup_lab.
+    optimize_lineup()'s backtracking-enumeratie, maar ZONDER synergie-score
+    (die is voor de tegenstander niet zinvol/beschikbaar) — enumereert
+    simpelweg ALLE structureel verschillende, geldige paar-toewijzingen die
+    exact voldoen aan `required_counts` (hoeveel matchen elke speler exact
+    speelt), met de bestaande regel "nooit twee keer dezelfde partner".
+
+    Returns (lijst_van_paarverdelingen, truncated). Elke paarverdeling is
+    een lijst van frozensets van 2 speler-id's. Begrensd door call_budget
+    om nooit te ontsporen bij een zeer grote/ongebalanceerde roster."""
+    total_slots = sum(required_counts.values())
+    if total_slots % 2 != 0:
+        return [], False
+    if total_slots == 0:
+        return [], False
+
+    results = []
+    seen_keys = set()
+    calls = [0]
+    truncated = [False]
+
+    def backtrack(remaining, used_partners, pairs):
+        calls[0] += 1
+        if calls[0] > call_budget:
+            truncated[0] = True
+            return
+        if not any(v > 0 for v in remaining.values()):
+            key = tuple(sorted(tuple(sorted(p)) for p in pairs))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                results.append(list(pairs))
+            return
+        anchor = max((p for p in player_ids if remaining[p] > 0), key=lambda p: (remaining[p], p))
+        for partner in player_ids:
+            if partner == anchor or remaining[partner] <= 0 or partner in used_partners[anchor]:
+                continue
+            remaining[anchor] -= 1
+            remaining[partner] -= 1
+            used_partners[anchor].add(partner)
+            used_partners[partner].add(anchor)
+            pairs.append(frozenset((anchor, partner)))
+            backtrack(remaining, used_partners, pairs)
+            pairs.pop()
+            used_partners[anchor].discard(partner)
+            used_partners[partner].discard(anchor)
+            remaining[anchor] += 1
+            remaining[partner] += 1
+            if calls[0] > call_budget:
+                return
+
+    backtrack(dict(required_counts), {p: set() for p in player_ids}, [])
+    return results, truncated[0]
+
+
+def _build_opponent_boards_from_pairing(
+    pairing: list, name_by_id: dict, rank_by_id: dict, tournament_rules_dict,
+) -> list:
+    """Zet 1 paarverdeling (lijst van frozensets van 2 speler-id's) om naar
+    het standaard 'boards'-formaat, MET de officiële bordvolgorde-regel
+    correct toegepast PER ROTATIE (dezelfde regel als voor onze eigen kant,
+    hergebruikt via ll.filter_and_order_lineup_by_rotations — consistent
+    art. 6.6 aan BEIDE kanten van de ontmoeting, niet enkel de onze)."""
+    rotation_eval = ll.filter_and_order_lineup_by_rotations(pairing, rank_by_id, rules=tournament_rules_dict)
+    boards = []
+    for pair in rotation_eval["ordered_pairs"]:
+        p1, p2 = tuple(pair)
+        boards.append({"opponent_pair": [
+            {"name": name_by_id.get(p1, p1), "user_id": p1,
+             "ranking": (f"P{int(rank_by_id[p1])}" if rank_by_id.get(p1) is not None else None)},
+            {"name": name_by_id.get(p2, p2), "user_id": p2,
+             "ranking": (f"P{int(rank_by_id[p2])}" if rank_by_id.get(p2) is not None else None)},
+        ]})
+    return boards
+
+
+def _generate_theoretical_opponent_boards_with_repeats(
+    chosen_opp_players: list, opponent_max_per_player: dict, opponent_official_ranks: dict,
+    tournament_rules_dict, max_variants: int,
+) -> tuple:
+    """PADEL_ANALYSIS_OPPONENT_REPEAT_SUPPORT_FIX_2026-09-18: vervangt
+    ll.generate_all_opponent_lineups() als primaire generator — die kan
+    immers NOOIT werken zodra de tegenstander-roster kleiner is dan 2 x
+    aantal wedstrijden (zie de uitgebreide toelichting in
+    _enumerate_all_opponent_pairings()). Retourneert (boards_lijst, meta)
+    in hetzelfde meta-formaat als de oude functie, voor UI-compatibiliteit."""
+    ids = [str(p["user_id"]) for p in chosen_opp_players]
+    name_by_id = {str(p["user_id"]): p.get("name", str(p["user_id"])) for p in chosen_opp_players}
+    pairings, truncated = _enumerate_all_opponent_pairings(ids, opponent_max_per_player)
+    total_theoretical = len(pairings)
+    all_boards = []
+    for pairing in pairings[:max_variants]:
+        boards = _build_opponent_boards_from_pairing(pairing, name_by_id, opponent_official_ranks, tournament_rules_dict)
+        all_boards.append(boards)
+    meta = {
+        "total_theoretical": total_theoretical,
+        "truncated": truncated or total_theoretical > len(all_boards),
+        "players_used": len(ids),
+        "resting_combinations": None,  # niet van toepassing bij dit model (spelers kunnen herhalen i.p.v. exact 1x/0x)
+    }
+    return all_boards, meta
+
+
 def _historical_opponent_boards_list(bundle: dict) -> list:
     """Geeft een lijst van (label, boards) terug voor elke historische
     (al gespeelde) opstelling van de tegenstander (bundle["previous_fixtures"]).
@@ -986,10 +1129,9 @@ def _render_all_valid_matchups(
         chosen_opp_labels_final = chosen_opp_labels
         chosen_opp_ids = [opp_label_to_id[lbl] for lbl in chosen_opp_labels]
         needed = 2 * total_boards
-        if len(chosen_opp_ids) < needed:
+        if len(chosen_opp_ids) < 2:
             st.info(
-                f"Selecteer minstens {needed} tegenstander-speler(s) ({total_boards} wedstrijden — zie "
-                "'Aantal wedstrijden deze ontmoeting' hierboven) om theoretische scenario's toe te voegen. "
+                "Selecteer minstens 2 tegenstander-spelers om theoretische scenario's toe te voegen. "
                 "De historische opstelling(en) hierboven blijven sowieso al in de lijst staan."
             )
         else:
@@ -1002,31 +1144,52 @@ def _render_all_valid_matchups(
                     f"ℹ️ Geen officieel klassement gekend voor: {', '.join(opp_names)} — behandeld als "
                     "'onbekende sterkte' bij het genereren van theoretische opstellingen."
                 )
-            lineups, meta = ll.generate_all_opponent_lineups(
-                chosen_opp_players, total_boards, opponent_official_ranks=opponent_official_ranks,
-                max_variants=_THEORETICAL_MAX_VARIANTS,
+            # PADEL_ANALYSIS_OPPONENT_REPEAT_SUPPORT_FIX_2026-09-18 (op
+            # verzoek van Kim, ECHTE ROOT CAUSE van "1 unieke tegenstander-
+            # opstelling"): de tegenstander mag, net als onze eigen kant,
+            # met MINDER spelers dan 2xwedstrijden werken — een speler kan
+            # dan meerdere matchen spelen (met verschillende partners).
+            # Standaard gelijk verdeeld, hier zelf aanpasbaar (bv. 0 voor
+            # een tegenstander waarvan je zeker weet dat die niet meespeelt).
+            default_opp_max = _default_opponent_max_per_player(chosen_opp_ids, needed)
+            st.caption(
+                f"Max. aantal wedstrijden per tegenstander-speler (standaard gelijk verdeeld over {needed} "
+                "benodigde plaatsen — een speler mag, net als bij ons, meerdere matchen spelen met "
+                "verschillende partners):"
             )
-            if meta["resting_combinations"] > 1:
-                st.caption(
-                    f"🔢 {len(chosen_opp_ids)} beschikbare speler(s), {needed} nodig -> {meta['resting_combinations']} "
-                    f"keuzes wie rust × koppelverdelingen = **{meta['total_theoretical']}** theoretische opstellingen."
+            opp_cols = st.columns(min(len(chosen_opp_ids), 6) or 1)
+            opponent_max_per_player = {}
+            for i, pid in enumerate(chosen_opp_ids):
+                with opp_cols[i % len(opp_cols)]:
+                    opponent_max_per_player[pid] = st.number_input(
+                        next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid),
+                        min_value=0, max_value=int(total_boards),
+                        value=default_opp_max.get(pid, 0), step=1,
+                        key=f"opp_max_{opp['ploeg_id']}_{pid}",
+                    )
+            opp_total_slots = sum(opponent_max_per_player.values())
+            if opp_total_slots != needed:
+                st.error(
+                    f"Som van tegenstander-plaatsen ({opp_total_slots}) moet gelijk zijn aan 2× wedstrijden "
+                    f"({needed}). Pas de aantallen hierboven aan."
                 )
             else:
-                st.caption(f"🔢 **{meta['total_theoretical']}** theoretische opstellingen mogelijk.")
-            if meta["truncated"]:
-                st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
-            # PADEL_ANALYSIS_ALL_VALID_MATCHUPS_FLAT_LIST_FIX_2026-09-18:
-            # AUTOMATISCH berekend zodra de selectie verandert — GEEN
-            # handmatige "(her)bereken"-knop meer nodig (die stap was
-            # precies waarom de theoretische opstellingen bij Kim nooit
-            # meegenomen werden: hij had niet expliciet geklikt).
-            compute_key = f"theoretical_boards_{opp['ploeg_id']}"
-            sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
-            signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
-            if st.session_state.get(sig_key) != signature:
-                st.session_state[compute_key] = lineups
-                st.session_state[sig_key] = signature
-            theoretical_boards = st.session_state.get(compute_key) or []
+                lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
+                    chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
+                    tournament_rules_dict, _THEORETICAL_MAX_VARIANTS,
+                )
+                st.caption(f"🔢 **{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
+                if meta["truncated"]:
+                    st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
+                # AUTOMATISCH berekend zodra de selectie verandert — geen
+                # handmatige "(her)bereken"-knop meer nodig.
+                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
+                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
+                signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
+                if st.session_state.get(sig_key) != signature:
+                    st.session_state[compute_key] = lineups
+                    st.session_state[sig_key] = signature
+                theoretical_boards = st.session_state.get(compute_key) or []
 
     # ── Samenvoegen tot unieke tegenstander-opstellingen ──
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
