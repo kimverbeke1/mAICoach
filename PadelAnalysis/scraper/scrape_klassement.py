@@ -1,7 +1,6 @@
 """
 scrape_klassement.py — TVL padel klassementshistoriek scraper V3 compact
 Fixes: periode uit dropdown-label, klassement begin periode, defensieve match-count parser.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_2026-09-17 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -9,7 +8,6 @@ BUG (opgelost): meerdere spelers (Breda Hilde, Mondy Severine, De Pourcq
 Hilde) kregen structureel een vrijwel lege klassementshistoriek: één enkele
 rij met periode "Huidige pagina" en klassement=None, in plaats van de
 volledige periode-lijst. Root cause, bevestigd door de code zelf:
-
     def _dismiss_cookies(page):
         for txt in [...]:
             try:
@@ -18,14 +16,12 @@ volledige periode-lijst. Root cause, bevestigd door de code zelf:
                     loc.first.click(timeout=2500)
                     page.wait_for_timeout(1000)
                     return   # <-- GEEN verificatie, GEEN retry
-
 Zodra de cookie-consent-banner niet ECHT gesloten was na die ene klik (bv.
 de klik miste, de banner had een tweede laag, of de banner verscheen met
 enige vertraging NA de eerste dismiss-poging), bleef de pagina overlapt.
 _get_sel() vond dan geen bruikbare periode-selector (score < 20) en
 scrape_klassement() viel terug op de "Huidige pagina"-noodgreep - een
 losse, vrijwel inhoudsloze parse van de ongewijzigde standaardweergave.
-
 Dit is EXACT dezelfde bugfamilie als
 PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16 in
 padelstats_scraper.py (andere website, identiek probleem: een banner-klik
@@ -39,24 +35,46 @@ zonder verificatie). Fix hier is analoog:
   3. Geeft nu een statusstring terug (voorheen None) voor logging/debug-
      doeleinden. De bestaande aanroep in scrape_klassement() gebruikt de
      return-waarde niet, dus dit is een backward-compatibele wijziging.
-
 Dit lost het probleem naar verwachting bij de bron op. Blijft de "Huidige
 pagina"-fallback ondanks deze fix nog optreden voor een specifieke speler,
 dan wijst dat op een ANDER onderliggend probleem (bv. een echt gewijzigde
 paginastructuur) - de fallback zelf blijft daarom bewust bestaan als
 vangnet, met de klassement_debug.html-dump voor verdere diagnose.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 (op verzoek van Kim, chat
+2026-09-19: "Ook wel handig om een link naar het klassement te hebben bij
+de ploeganalyse. eventueel in aparte tab.")
+--------------------------------------------------------------------------
+BELANGRIJKE STRUCTURELE WIJZIGING: de top-level import
+`from playwright.sync_api import TimeoutError as PlaywrightTimeoutError,
+sync_playwright` is VERPLAATST naar binnen scrape_klassement() (lazy
+import, met `global PlaywrightTimeoutError, sync_playwright` zodat de
+module-level helper _goto() - de enige andere plek die PlaywrightTimeoutError
+gebruikt - dit gewoon blijft vinden zodra scrape_klassement() minstens
+1x is aangeroepen/geïmporteerd).
+WAAROM: dit bestand kon voorheen NOOIT op module-niveau geïmporteerd worden
+op Streamlit Community Cloud (geen Playwright daar) - elke bestaande
+aanroeper (opponent_scout_ui.py, refresh_klassement_only.py,
+refresh_klassement_biannual.py) deed daarom al een LAZY import binnen een
+functie-body, telkens opnieuw, als gangbare workaround. Met deze fix is het
+bestand voortaan ALTIJD veilig te importeren (ook op Cloud) - enkel het
+DRAAIEN van scrape_klassement() zelf vereist nog steeds Playwright/een
+browser. Dit maakt build_klassement_url() (nieuw, zie hieronder) herbruikbaar
+als gewone, module-level import in UI-code (opponent_dossier.py), zonder
+een playwright-afhankelijkheid te erven.
+NIEUWE FUNCTIE: build_klassement_url(player_id) - publieke, Playwright-vrije
+variant van _build_url(), voor UI-modules die enkel een LINK naar de
+officiële TVL-klassementberekeningspagina willen tonen (niet zelf scrapen).
 """
 from __future__ import annotations
 import argparse, json, logging, re, time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 logger=logging.getLogger(__name__)
 BASE_URL="https://www.tennisenpadelvlaanderen.be"
 KLASSEMENT_PARAMS={"tab":"calcPadel","tspid":"80","tdpid":"80","ppid":"81","tscid":"80","pcid":"81"}
 MAX_REASONABLE_MATCHES_PER_LEVEL=250
-
 # PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_2026-09-17
 _COOKIE_TEXTS = [
     "Alle cookies accepteren", "Cookies accepteren", "Accepteren", "Akkoord",
@@ -64,8 +82,14 @@ _COOKIE_TEXTS = [
 ]
 _COOKIE_DISMISS_ATTEMPTS = 4
 _COOKIE_POLL_INTERVAL_MS = 300
-
 def _build_url(player_id:str)->str: return f"{BASE_URL}/nl/berekening-klassement?{urlencode({'userId':str(player_id),**KLASSEMENT_PARAMS})}"
+def build_klassement_url(player_id) -> str:
+    """PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: publieke, Playwright-vrije
+    naam voor _build_url() - bedoeld voor UI-modules (opponent_dossier.py)
+    die enkel een klikbare LINK naar de officiële TVL-klassementberekenings-
+    pagina willen tonen. Zelfde URL als scrape_klassement() zelf bezoekt,
+    dus altijd consistent met wat de scraper daadwerkelijk scrapet."""
+    return _build_url(player_id)
 def _clean(t:Optional[str])->str: return re.sub(r"\s+"," ",t or "").strip()
 def _progress(cb,i,total,label,status):
     if not cb: return
@@ -85,8 +109,6 @@ def _goto(page,url):
     try: page.wait_for_selector("body",state="attached",timeout=20000)
     except Exception: pass
     page.wait_for_timeout(2500)
-
-
 def _consent_banner_present(page) -> bool:
     """PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_2026-09-17: controleert
     EXPLICIET of er nog een zichtbare 'cookie accepteren'-knoptekst op de
@@ -100,8 +122,6 @@ def _consent_banner_present(page) -> bool:
         except Exception:
             continue
     return False
-
-
 def _dismiss_cookies(page) -> str:
     """PADEL_ANALYSIS_KLASSEMENT_COOKIE_VERIFY_FIX_2026-09-17: volledige
     herschrijving t.o.v. de vorige, niet-verifiërende versie (zie
@@ -110,13 +130,11 @@ def _dismiss_cookies(page) -> str:
     wordt expliciet gecontroleerd of de banner ECHT verdwenen is, tot
     _COOKIE_DISMISS_ATTEMPTS pogingen. Klikken gebeuren met force=True,
     zodat een eventueel overlappend element de klik niet blokkeert.
-
     Geeft een statusstring terug voor logging/debug-doeleinden (de
     bestaande aanroep in scrape_klassement() gebruikt de return-waarde
     niet, dus dit is een backward-compatibele wijziging)."""
     if not _consent_banner_present(page):
         return "geen banner aanwezig"
-
     for attempt in range(1, _COOKIE_DISMISS_ATTEMPTS + 1):
         clicked_via = None
         for txt in _COOKIE_TEXTS:
@@ -128,22 +146,17 @@ def _dismiss_cookies(page) -> str:
                     break
             except Exception:
                 continue
-
         try:
             page.wait_for_timeout(_COOKIE_POLL_INTERVAL_MS)
         except Exception:
             pass
-
         if not _consent_banner_present(page):
             return (f"banner gesloten via '{clicked_via}' (poging {attempt})" if clicked_via
                     else f"banner verdween na poging {attempt} (geen klik meer nodig)")
-
     return (
         f"WAARSCHUWING: banner nog steeds aanwezig na {_COOKIE_DISMISS_ATTEMPTS} "
         "klikpogingen — volgende stappen proberen desondanks door te gaan."
     )
-
-
 def _try_activate_padel_tab(page):
     for txt in ["Padel","Berekening padel","Padel klassement","Klassement Padel"]:
         try:
@@ -154,8 +167,8 @@ def _try_activate_padel_tab(page):
         except Exception: pass
     return False
 def _wait(page):
-    for st in ["domcontentloaded","networkidle"]:
-        try: page.wait_for_load_state(st,timeout=6000)
+    for state in ["domcontentloaded","networkidle"]:
+        try: page.wait_for_load_state(state,timeout=6000)
         except Exception: pass
     try: page.wait_for_function("() => !window.PrimeFaces || !PrimeFaces.ajax || !PrimeFaces.ajax.Queue || (typeof PrimeFaces.ajax.Queue.isEmpty === 'function' ? PrimeFaces.ajax.Queue.isEmpty() : true)",timeout=6000)
     except Exception: pass
@@ -211,12 +224,12 @@ def _select(sel,value,label):
     if h is None: raise RuntimeError(f"Geen element_handle voor {label}")
     h.evaluate("(el,value)=>{el.value=value;el.dispatchEvent(new Event('input',{bubbles:true,cancelable:true}));el.dispatchEvent(new Event('change',{bubbles:true,cancelable:true}));if(typeof el.onchange==='function'){try{el.onchange();}catch(e){}}}",value)
 def _pct(t):
-    m=re.search(r"(\d+(?:[,.]\d+)?)\s*%",str(t or ""));
+    m=re.search(r"(\d+(?:[,.]\d+)?)\s*%",str(t or ""))
     if not m: return None
     try: return float(m.group(1).replace(",","."))
     except Exception: return None
 def _smallint(v):
-    m=re.search(r"\b\d{1,3}\b",str(v or ""));
+    m=re.search(r"\b\d{1,3}\b",str(v or ""))
     if not m: return None
     n=int(m.group(0)); return n if 0<=n<=MAX_REASONABLE_MATCHES_PER_LEVEL else None
 def _first(patterns,text):
@@ -346,6 +359,12 @@ def _parse(html, selected_label=None):
         "periodeomschrijving": selected_label,
     }
 def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_periods=1.2,progress_callback=None,debug=False):
+    # PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: lazy import (was top-level),
+    # zie module-docstring voor de volledige toelichting. `global` zorgt
+    # dat _goto() (hieronder, module-level) PlaywrightTimeoutError blijft
+    # vinden zodra deze functie minstens 1x werd aangeroepen.
+    global PlaywrightTimeoutError, sync_playwright
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
     url=_build_url(player_id); results=[]
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=headless); ctx=browser.new_context(viewport={"width":1440,"height":1100},user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")

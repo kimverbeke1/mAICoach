@@ -1,5 +1,5 @@
 """
-opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v13).
+opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v14).
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De overzichtstabel toont per speler ZOWEL de huidige poule als de historiek
@@ -87,7 +87,6 @@ op analyse ploeg drukt om zeker de laatste waarde te hebben" aankaart: een
 klik op "Verversen" gaf geen enkele garantie dat de onderliggende padelstat-
 waarde zelf recent was, enkel dat het RAPPORT de (mogelijk verouderde)
 cache opnieuw inlas.
-
 FIX: render_team_header() vraagt nu, bij elke klik op "🔄 Verversen", ook
 EXPLICIET een geforceerde padelstat-verversing aan voor de volledige
 tegenploeg-roster (via cloud_helpers.trigger_github_actions_scrape(),
@@ -102,43 +101,56 @@ een volgende render van deze pagina. Dit is dezelfde asynchrone aanpak als
 _ensure_fresh_padelstat_for_roster() in opponent_scout_ui.py (bij
 "🔍 Tegenstander analyseren") - beide knoppen garanderen nu consistent een
 verse-waarde-aanvraag.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 (v14, op verzoek van Kim, chat
+2026-09-19: "Ook wel handig om een link naar het klassement te hebben bij
+de ploeganalyse. eventueel in aparte tab.")
+--------------------------------------------------------------------------
+Twee, elkaar aanvullende toevoegingen (bewust GEEN ingrijpende herstructurering
+van de bestaande Overzicht/Detail-indeling, om niets te breken voor de
+bestaande aanroepers - page_lineup_lab.py, poule_teams_ui.py - die
+render_overview_and_detail() als 1 ondeelbaar blok aanroepen):
+  1. De Overzichtstabel krijgt een NIEUWE "🔗 Klassement"-kolom
+     (st.column_config.LinkColumn) - rechtstreeks klikbaar vanuit de tabel
+     zelf, per speler. Gebruikt build_player_summary()'s (opponent_dossier.py)
+     nieuwe "klassement_url"-veld - geen aparte URL-berekening hier nodig.
+     Valt terug op een gewone tekstkolom (ruwe URL) als LinkColumn niet
+     beschikbaar is (oudere Streamlit-versie) - nooit een harde crash.
+  2. Nieuwe, aparte sectie "🔗 Alle klassement-links op TVL" (een
+     st.expander, ingeklapt getoond onder de Overzichtstabel) die ELKE
+     speler als een losse, klikbare link-knop toont - dit is de "eventueel
+     in aparte tab"-optie die Kim noemde. Gekozen voor een expander i.p.v.
+     een letterlijke st.tabs()-herstructurering van deze functie, om het
+     bestaande Overzicht/Detail-gedrag 100% ongewijzigd te laten (lagere
+     regressiekans) - zeg het gerust als een ECHTE aparte tab (st.tabs())
+     hiervoor toch de voorkeur geniet, dat is een kleine aanpassing.
 """
 from __future__ import annotations
-
 import re
 from datetime import datetime, timezone
 from typing import Callable, Optional
-
 import pandas as pd
 import streamlit as st
-
 import firebase_service as fb
 import opponent_dossier as od
 import freshness_cache as fcache
-
 try:
     import team_ai_advisor as taa
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
-
 try:  # cloud_helpers is optioneel aanwezig; nooit hard falen op import
     from cloud_helpers import is_scraping_available, trigger_github_actions_scrape
 except Exception:  # pragma: no cover
     def is_scraping_available() -> bool:
         return False
-
     def trigger_github_actions_scrape(**_kwargs):
         return False, "cloud_helpers ontbreekt"
-
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v13
+REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v14
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
 def _format_ts(value) -> str:
     if not value:
         return "onbekend"
@@ -147,8 +159,6 @@ def _format_ts(value) -> str:
         return datetime.fromisoformat(cleaned).strftime("%d/%m/%Y %H:%M")
     except Exception:
         return str(value)
-
-
 def _parse_iso(value) -> Optional[datetime]:
     """PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17: robuuste
     ISO-timestamp-parser."""
@@ -162,8 +172,6 @@ def _parse_iso(value) -> Optional[datetime]:
         return dt
     except Exception:
         return None
-
-
 def _parse_simple_date(text) -> Optional[tuple]:
     if not text:
         return None
@@ -175,8 +183,6 @@ def _parse_simple_date(text) -> Optional[tuple]:
     if m:
         return int(m.group(3)), int(m.group(2)), int(m.group(1))
     return None
-
-
 # ─────────────────────────────────────────────
 # Rapport opbouwen / bewaren / laden
 # ─────────────────────────────────────────────
@@ -205,8 +211,6 @@ def _build_report(
         "schema_version": REPORT_SCHEMA_VERSION,
         "players": players,
     }
-
-
 def _save_report(report: dict) -> None:
     doc_id = str(report.get("opponent_ploeg_id") or "onbekend")
     try:
@@ -215,16 +219,12 @@ def _save_report(report: dict) -> None:
         )
     except Exception:
         pass  # Bewaren is comfort, geen blokkerende vereiste voor de UI.
-
-
 def _load_report(ploeg_id: str) -> Optional[dict]:
     try:
         doc = fb.db.collection(REPORTS_COLLECTION).document(str(ploeg_id)).get()
         return doc.to_dict() if doc.exists else None
     except Exception:
         return None
-
-
 def _underlying_data_is_fresher(report: dict, bundle: dict) -> bool:
     """PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17, aangepast in
     PADEL_ANALYSIS_SPARK_QUOTA_CACHE_2026-09-17. Zie module-docstring."""
@@ -243,8 +243,6 @@ def _underlying_data_is_fresher(report: dict, bundle: dict) -> bool:
         if scraped_at and scraped_at > report_updated:
             return True
     return False
-
-
 def _needs_rebuild(
     report: Optional[dict],
     bundle: dict,
@@ -263,8 +261,6 @@ def _needs_rebuild(
     if _underlying_data_is_fresher(report, bundle):
         return True
     return False
-
-
 def get_team_report(
     bundle: dict,
     opp: dict,
@@ -286,8 +282,6 @@ def get_team_report(
         _save_report(report)
         st.session_state[state_key] = report
     return report
-
-
 def _trigger_fresh_padelstat_for_team(bundle: dict) -> None:
     """PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (op verzoek
     van Kim: "ook als je op analyse ploeg drukt om zeker de laatste waarde
@@ -320,8 +314,6 @@ def _trigger_fresh_padelstat_for_team(bundle: dict) -> None:
         st.caption(f"🎯 Padelstat-verversing gestart voor {len(players)} speler(s) (meestal 1-3 min).")
     else:
         st.caption(f"⚠️ Padelstat-verversing kon niet gestart worden: {msg}")
-
-
 def render_team_header(
     report: dict,
     bundle: dict,
@@ -334,7 +326,6 @@ def render_team_header(
 ) -> dict:
     """Titel + 'Verversen'-knop. Geeft het (evt. na verversen NIEUWE) rapport
     terug.
-
     PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19: vraagt nu ook
     EXPLICIET een geforceerde padelstat-verversing aan (zie
     _trigger_fresh_padelstat_for_team()), vóór het rapport herbouwd wordt -
@@ -357,10 +348,8 @@ def render_team_header(
             st.session_state[state_key] = report
             st.rerun()
     return report
-
-
 # ─────────────────────────────────────────────
-# Overzichtstabel (twee lagen naast elkaar + playing strength)
+# Overzichtstabel (twee lagen naast elkaar + playing strength + klassement-link)
 # ─────────────────────────────────────────────
 def _overview_row(summary: dict) -> dict:
     current = summary.get("current_rank")
@@ -386,6 +375,11 @@ def _overview_row(summary: dict) -> dict:
         "Huidig": f"P{current}" if current is not None else "?",
         "Beste ooit": best_text,
         "Playing strength (padelstats.be)": elo_text,
+        # PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: ruwe URL hier - de
+        # kolom zelf wordt in render_overview_and_detail() als klikbare
+        # LinkColumn geconfigureerd (of, als fallback, gewoon als tekst-URL
+        # getoond op een oudere Streamlit-versie).
+        "Klassement": summary.get("klassement_url") or "",
         "Matchen deze poule": summary.get("matches_relevant", 0),
         "Winrate deze poule": summary.get("winrate_relevant", "-"),
         "Partner deze poule": partner_now,
@@ -394,14 +388,40 @@ def _overview_row(summary: dict) -> dict:
         "Vaste partner historiek": partner_hist,
         "Vorm": summary.get("form_history", "-"),
     }
-
-
+def _render_klassement_links_expander(players: list[dict]) -> None:
+    """PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 (op verzoek van Kim:
+    "eventueel in aparte tab"): toont ELKE speler van de tegenploeg als een
+    losse, klikbare link-knop naar de officiële TVL-klassementberekenings-
+    pagina, verzameld in 1 overzichtelijke, ingeklapte sectie - een
+    alternatief voor het los opzoeken van elke speler in "Detail per
+    speler". Gebruikt st.link_button() (Streamlit >= 1.27) met een
+    veilige markdown-fallback voor oudere versies."""
+    with_link = [p for p in players if p.get("klassement_url")]
+    if not with_link:
+        return
+    with st.expander(f"🔗 Alle klassement-links op TVL ({len(with_link)} van {len(players)} speler(s))", expanded=False):
+        st.caption("Rechtstreekse links naar de officiële TVL-klassementberekeningspagina per speler.")
+        cols = st.columns(3)
+        for i, p in enumerate(with_link):
+            with cols[i % 3]:
+                label = f"🔗 {p.get('name', '?')}"
+                url = p["klassement_url"]
+                try:
+                    st.link_button(label, url, use_container_width=True)
+                except AttributeError:
+                    st.markdown(f"[{label}]({url})")
 def render_overview_and_detail(
     report: dict,
     go_to_player_fn: Optional[Callable[[str], None]] = None,
     key_prefix: str = "team_analysis",
 ) -> None:
-    """Overzichtstabel + Detail-per-speler."""
+    """Overzichtstabel + Detail-per-speler.
+    PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: de Overzichtstabel toont nu
+    ook een klikbare "🔗 Klassement"-kolom (LinkColumn), en eronder een
+    inklapbare "🔗 Alle klassement-links op TVL"-sectie met alle spelers als
+    losse link-knoppen (de "eventueel in aparte tab"-optie die Kim noemde -
+    zie module-docstring voor waarom hier bewust voor een expander i.p.v.
+    een letterlijke st.tabs()-herstructurering gekozen is)."""
     ploeg_id = report.get("opponent_ploeg_id")
     players = report.get("players", []) or []
     if not players:
@@ -409,10 +429,22 @@ def render_overview_and_detail(
         return
     st.markdown("#### 📊 Overzicht")
     overview_df = pd.DataFrame([_overview_row(p) for p in players])
-    st.dataframe(
-        overview_df, use_container_width=True, hide_index=True,
+    try:
+        klassement_col_config = st.column_config.LinkColumn(
+            "🔗 Klassement", display_text="Bekijk op TVL", help="Officiële TVL-klassementberekeningspagina",
+        )
+    except AttributeError:
+        # Oudere Streamlit-versie zonder LinkColumn: gewone tekstkolom met
+        # de ruwe URL - minder mooi, maar nooit een harde crash.
+        klassement_col_config = None
+    dataframe_kwargs = dict(
+        use_container_width=True, hide_index=True,
         height=min(400, 40 + 36 * len(overview_df)),
     )
+    if klassement_col_config is not None:
+        dataframe_kwargs["column_config"] = {"Klassement": klassement_col_config}
+    st.dataframe(overview_df, **dataframe_kwargs)
+    _render_klassement_links_expander(players)
     missing_padelstat = sum(1 for p in players if p.get("elo_source") != "padelstat")
     if missing_padelstat:
         st.caption(
@@ -439,8 +471,6 @@ def render_overview_and_detail(
     selected = next((p for p in players if p.get("name") == sel_name), None)
     if selected:
         od.render_player_summary_inline(selected)
-
-
 # ─────────────────────────────────────────────
 # Eigen-speler rating (gedeeld met dashboard.py's Opstelling-scenario's)
 # ─────────────────────────────────────────────
@@ -449,8 +479,6 @@ def _get_own_profiles() -> list[dict]:
         return [d.to_dict() for d in fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()]
     except Exception:
         return []
-
-
 def get_own_player_rating(player_id: str) -> tuple[float, str]:
     """Geeft (sterkte, bron) terug voor één van ONZE spelers. Volgorde:
     1. padelstats.be, 2. officieel TVL-klassement, 3. neutrale default 200."""
@@ -473,8 +501,6 @@ def get_own_player_rating(player_id: str) -> tuple[float, str]:
     if current_rank is not None:
         return float(current_rank), "official_klassement"
     return 200.0, "onbekend"
-
-
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18
 # AI-sectie: nu een ECHTE, doorlopende chat i.p.v. losse, contextloze vragen.
@@ -549,12 +575,8 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
                 {"role": "assistant", "content": antwoord},
             ]
             st.rerun()
-
-
 # Alias voor achterwaartse compatibiliteit (was de interne naam vóór v9).
 _render_ai_section = render_ai_section
-
-
 # ─────────────────────────────────────────────
 # Hoofdfunctie (dunne wrapper, oude volgorde - voor eventuele andere aanroepers)
 # ─────────────────────────────────────────────
