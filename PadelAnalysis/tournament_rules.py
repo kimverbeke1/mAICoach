@@ -146,6 +146,84 @@ def player_klassement_ok(klassement: Optional[float], rules: Optional[dict]) -> 
 
 
 # ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_RULES_TABLE_AND_SUGGESTION_2026-09-19 (op verzoek van Kim:
+# "die afdeling dropdown is niet geheel duidelijk. je mag deze teksten
+# volledig tonen: Afdeling / Minimum en maximum aantal punten per rotatie /
+# Minimum en maximum toegelaten klassement [...]" + "In principe kan je
+# eigenlijk welk klassement het is want je kent de spelers van een ploeg en
+# dan weet je wat er gekozen moet worden")
+# ---------------------------------------------------------------------------
+def format_afdeling_label(tournament: str, category: str, afdeling) -> str:
+    """Kort, direct leesbaar label voor 1 afdeling-optie in een dropdown:
+    toont ALTIJD zowel de punten/rotatie-grens als de individueel-klassement-
+    grens naast elkaar (i.p.v. enkel "Afdeling N"), zodat je niet apart de
+    caption moet lezen om te weten wat een afdeling betekent."""
+    rules = get_afdeling_rules(tournament, category, afdeling)
+    if not rules:
+        return f"Afdeling {afdeling}"
+    return (
+        f"Afdeling {afdeling} — Punten/rotatie {rules['punten_min']:,}–{rules['punten_max']:,} · "
+        f"Individueel klassement P{rules['klassement_min']}–P{rules['klassement_max']}"
+    ).replace(",", ".")
+
+
+def format_full_rules_table_markdown(tournament: str, category: str) -> str:
+    """Bouwt de VOLLEDIGE reglementstabel (alle afdelingen naast elkaar) als
+    markdown-tabel, letterlijk gebaseerd op de tabel uit het PDF-reglement
+    (artikel 2.1) — op uitdrukkelijk verzoek van Kim om deze NOOIT enkel
+    verstopt te tonen achter 1 dropdown-regel, maar volledig zichtbaar."""
+    afdelingen = list_afdelingen(tournament, category)
+    if not afdelingen:
+        return "_Geen reglementsparameters gekend voor deze combinatie._"
+    lines = [
+        "| Afdeling | Minimum en maximum aantal punten per rotatie | Minimum en maximum toegelaten klassement |",
+        "|---|---|---|",
+    ]
+    for a in afdelingen:
+        r = get_afdeling_rules(tournament, category, a)
+        if not r:
+            continue
+        lines.append(
+            f"| {a} | Min. {r['punten_min']:,} ptn – max. {r['punten_max']:,} ptn | "
+            f"{r['klassement_min']} – {r['klassement_max']} |".replace(",", ".")
+        )
+    return "\n".join(lines)
+
+
+def suggest_afdeling(tournament: str, category: str, player_klassementen: list):
+    """PADEL_ANALYSIS_RULES_TABLE_AND_SUGGESTION_2026-09-19: stelt de meest
+    passende afdeling voor op basis van de GEKENDE officiële klassementen van
+    de geselecteerde teamspelers (None-waarden worden genegeerd).
+
+    Retourneert (afdeling, exact_match: bool):
+      - exact_match=True  → ALLE gekende klassementen vallen binnen de
+        klassement_min/max-grens van de voorgestelde afdeling.
+      - exact_match=False → geen enkele afdeling dekt iedereen exact; de
+        afdeling met de KLEINSTE totale afwijking (som van hoeveel elke
+        speler buiten de grenzen valt) wordt voorgesteld — de aanroeper
+        moet dit dan duidelijk labelen als "geen perfecte match".
+      - (None, False) als er geen enkel klassement gekend is of geen
+        afdelingen bestaan voor deze combinatie.
+    """
+    known = [k for k in player_klassementen if k is not None]
+    afdelingen = list_afdelingen(tournament, category)
+    if not known or not afdelingen:
+        return None, False
+
+    best_afdeling, best_score, best_exact = None, None, False
+    for a in afdelingen:
+        r = get_afdeling_rules(tournament, category, a)
+        if not r:
+            continue
+        lo, hi = r["klassement_min"], r["klassement_max"]
+        deviation = sum(max(0, lo - k, k - hi) for k in known)
+        exact = deviation == 0
+        if best_score is None or deviation < best_score:
+            best_afdeling, best_score, best_exact = a, deviation, exact
+    return best_afdeling, best_exact
+
+
+# ---------------------------------------------------------------------------
 # PADEL_ANALYSIS_KLASSEMENT_DISCRETE_STEPS_FIX_2026-09-19
 # ---------------------------------------------------------------------------
 def _steps_for_category(category: str) -> tuple:
