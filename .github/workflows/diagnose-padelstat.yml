@@ -13,6 +13,27 @@
 # Voorwaarde: diagnose_padelstat_search.py moet in PadelAnalysis/scraper/
 # staan (zelfde map als padelstats_scraper.py).
 #
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_PREBUILT_DOCKER_IMAGE_2026-09-19 (op verzoek van Kim: "docker
+# image" - performance-item; gevonden bij het nalopen van ALLE workflow-
+# bestanden op verzoek van Kim, chat 2026-09-19: "dit zijn al mijn yml files
+# om te checken")
+# --------------------------------------------------------------------------
+# ROOT CAUSE: dit bestand had, in tegenstelling tot alle andere Playwright-
+# gebruikende workflows, HELEMAAL GEEN caching — elke (handmatige) run deed
+# een volledige "pip install -r requirements-scraper.txt" +
+# "playwright install --with-deps chromium" vanaf nul. Het was ook nooit
+# meegenomen in de overstap naar de vooraf-gebouwde Docker-image (zie
+# build-scraper-image.yml, dat destijds expliciet slechts "4 scrape/
+# refresh-workflows" vermeldde).
+# FIX: draait nu, net als de andere Playwright-workflows, rechtstreeks in
+# het vooraf-gebouwde image (zie PadelAnalysis/scraper/Dockerfile +
+# .github/workflows/build-scraper-image.yml) - geen enkele installatiestap
+# meer nodig. Aangezien dit een zeldzaam, handmatig gebruikt diagnose-
+# script is (geen dagelijkse/wekelijkse cron), is de tijdswinst hier vooral
+# comfort bij ad-hoc gebruik, geen structurele noodzaak zoals bij de
+# geplande workflows.
+#
 # Gebruik:
 #   GitHub -> Actions -> "Diagnose padelstat search" -> Run workflow
 #   -> vul bij 'namen' de te testen spelernamen in, komma-gescheiden, bv.:
@@ -21,7 +42,6 @@
 #   tekstoutput staat in de log. Er wordt GEEN Firestore/Firebase-toegang
 #   gebruikt; dit script leest/schrijft niets, het test enkel padelstats.be.
 name: Diagnose padelstat search
-
 on:
   workflow_dispatch:
     inputs:
@@ -29,29 +49,21 @@ on:
         description: "Spelernamen, komma-gescheiden (bv. 'Mondy Severine, Vanlerberghe Vivianne')"
         required: true
         default: "Mondy Severine, Vanlerberghe Vivianne"
-
 jobs:
   diagnose:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    container:
+      image: ghcr.io/kimverbeke1/padelanalysis-scraper:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     defaults:
       run:
         working-directory: PadelAnalysis/scraper
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Installeer dependencies (inclusief Playwright)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-scraper.txt
-          playwright install --with-deps chromium
-
       - name: Diagnose uitvoeren
         run: |
           IFS=',' read -ra NAMEN_ARRAY <<< "${{ github.event.inputs.namen }}"
