@@ -57,6 +57,7 @@ import opponent_analysis as oa
 import opponent_scout as osc
 import opponent_scout_ui as osu
 import schedule_scraper as ss
+import team_freshness as tf
 
 
 def _extract_poule_teams(fixtures: list[dict], own_ploeg_id: Optional[str]) -> list[dict]:
@@ -101,6 +102,10 @@ def render_poule_teams_tab(
 ) -> None:
     """Rendert het volledige "🌐 Andere ploegen"-tabblad."""
     st.markdown('<div class="section-header">🌐 Andere ploegen in je poule</div>', unsafe_allow_html=True)
+    # PADEL_ANALYSIS_TEAM_FRESHNESS_CHECK_2026-09-19 (Fase D3): toont, indien
+    # bekend, wanneer de nachtelijke achtergrond-poule-scan (Fase D2) voor
+    # het laatst liep — puur informatief, geen actie.
+    tf.render_last_prescan_caption()
     fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}")
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
     if not fixtures or not own_ploeg_id:
@@ -128,12 +133,18 @@ def render_poule_teams_tab(
     # ploeg_id/naam en een hogere lookback (volledige seizoenshistoriek
     # i.p.v. de "1" die voor de eerstvolgende tegenstander gebruikt wordt).
     bundle_key = f"poule_team_bundle_{ploeg_id}"
+    # PADEL_ANALYSIS_TEAM_FRESHNESS_CHECK_2026-09-19 (Fase D3): bewaart HOEVEEL
+    # gespeelde wedstrijden er waren op het moment van scouten — dit is het
+    # ijkpunt waartegen we later (bij elke render) vergelijken of de ploeg
+    # intussen NIEUWE wedstrijden speelde (zie team_freshness.py).
+    known_played_key = f"poule_team_known_played_{ploeg_id}"
     lookback = _team_lookback(fixtures, ploeg_id)
     if st.button(f"🔍 {chosen['name']} analyseren", key=f"poule_team_analyze_{ploeg_id}", type="primary"):
         with st.spinner(f"Wedstrijden en opstelling van {chosen['name']} opzoeken..."):
             st.session_state[bundle_key] = osc.scout_opponent(
                 fixtures, chosen["name"], ploeg_id, before_date_text="", lookback=lookback,
             )
+            st.session_state[known_played_key] = lookback
     bundle = st.session_state.get(bundle_key)
     if not bundle:
         st.info(f"⬆️ Klik op '🔍 {chosen['name']} analyseren' om hun gegevens te bekijken.")
@@ -145,6 +156,25 @@ def render_poule_teams_tab(
     if not unique_players:
         st.info("Geen spelers gevonden voor deze ploeg.")
         return
+
+    # PADEL_ANALYSIS_TEAM_FRESHNESS_CHECK_2026-09-19 (Fase D3, op verzoek van
+    # Kim: "Freshness-check bij elke analyse i.p.v. enkel manueel verversen —
+    # gebaseerd op aantal matchen + tijdstip laatste padelstat-check."):
+    # controleert bij ELKE render (dus ook zonder een nieuwe klik) of (a) de
+    # ploeg intussen meer wedstrijden speelde dan waarop deze analyse
+    # gebaseerd is, en (b) de playing strength van 1 of meer spelers
+    # verouderd is. Toont enkel een banner — de effectieve actie loopt via
+    # de bestaande '🔄 Ontbrekende gegevens ophalen'-knop hieronder.
+    freshness = tf.team_freshness_status(
+        unique_players, fixtures=fixtures, ploeg_id=ploeg_id,
+        known_played_count=st.session_state.get(known_played_key),
+    )
+    tf.render_freshness_banner(freshness, key_prefix=key_prefix)
+    if freshness.get("new_matches_detected"):
+        st.caption(
+            f"↳ Klik opnieuw op '🔍 {chosen['name']} analyseren' hierboven om de nieuwe "
+            "wedstrijd(en) en eventuele nieuwe spelers mee te nemen."
+        )
 
     opp = {"name": chosen["name"], "ploeg_id": ploeg_id}
     # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19: dezelfde "ontbrekende

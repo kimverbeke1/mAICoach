@@ -870,6 +870,24 @@ def render_scout_header(
             "Zonder historische tegenstander-data kan enkel de eigen ploeg-sterkte "
             "getoond worden, niet die van hen."
         )
+    # PADEL_ANALYSIS_TEAM_FRESHNESS_CHECK_2026-09-19 (Fase D3, op verzoek van
+    # Kim: "Freshness-check bij elke analyse i.p.v. enkel manueel
+    # verversen"): controleert bij ELKE render of de playing strength van 1
+    # of meer spelers in deze roster verouderd is (ouder dan
+    # team_freshness.PADELSTAT_STALE_AFTER_DAYS). GEEN match-count-check
+    # hier — deze flow gebruikt bewust een vaste lookback=1 (enkel de meest
+    # recente wedstrijd van de eerstvolgende tegenstander), dus een
+    # "speelden ze intussen meer wedstrijden"-vergelijking is hier niet
+    # zinvol (zie team_freshness.team_freshness_status() docstring). Die
+    # check gebeurt wél in poule_teams_ui.py (Fase D1), waar de volledige
+    # seizoenshistoriek als lookback gebruikt wordt.
+    if bundle.get("unique_players"):
+        try:
+            import team_freshness as tf
+            freshness = tf.team_freshness_status(bundle["unique_players"])
+            tf.render_freshness_banner(freshness, key_prefix=f"scout_freshness_{sel_player_id}")
+        except Exception:
+            pass
     # PADEL_ANALYSIS_TEAM_UNIFIED_SYNC_2026-09-19 (Fase C, vervangt de
     # vroegere _render_cloud_klassement_padelstat_triggers() met 2 losse
     # knoppen): op Cloud (can_scrape False) tonen we hier ÉÉN gecombineerde
