@@ -91,31 +91,47 @@ die ene speler, zonder discovery/nieuwe profielen. Bij 2+ spelers (bv. de
 dagelijkse cron, of een bewuste bulk-refresh) blijft het bestaande gedrag
 (met discovery/enrichment) volledig ongewijzigd.
 
-Environment variables (optioneel, met veilige defaults):
-    - ENABLE_POULE_UPDATE ("true"/"false", standaard "true")
-    - POULE_FORCE         ("true"/"false", standaard "false")
-    - POULE_EINDRONDE     ("true"/"false", standaard "true")
-    - ENABLE_ENRICH       ("true"/"false", standaard "true")
-    - ENABLE_PADELSTAT    ("true"/"false", standaard "true")
-    - PADELSTAT_REFRESH   ("true"/"false", standaard "false"): negeer de
-      padelstat-cache VOLLEDIG (forceer iedereen, traag). Los van de
-      automatische staleness-check hierboven, die draait sowieso al mee.
-    - PADELSTAT_MAX       (getal, standaard 25)
-    - PADELSTAT_STALE_DAYS (getal, standaard 14)
-    - ENABLE_KLASSEMENT   ("true"/"false", standaard "true")
-    - KLASSEMENT_REFRESH  ("true"/"false", standaard "false")
-    - KLASSEMENT_MAX      (getal, standaard 8)
-    - ENRICH_SCRAPE_NEW   ("true"/"false", standaard "false")
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19 (Fase E, op verzoek van Kim,
+chat 2026-09-19: "check ci_scrape_all.py en de refresh_*_only.py-scripts
+zoals je zelf aangeeft")
+--------------------------------------------------------------------------
+BEVINDING bij het nagaan van "ik wil de scraping tijd verkorten" (zie ook
+Fase E, deel 1 — de venv-/Playwright-cache in de workflow-yml's): dit
+bestand had, IN TEGENSTELLING TOT bijna elke andere instelling hier
+(PADELSTAT_MAX, KLASSEMENT_MAX, PADELSTAT_STALE_DAYS, ...), twee HARDCODED
+wachttijd-constanten (DELAY_BETWEEN_PLAYERS, DELAY_BETWEEN_POULE_UPDATES,
+elk 3.0s) die NIET via een environment variable aan te passen waren. Bij
+bv. 15 spelers in de nachtelijke poule-pre-scan (zie discover_poule_
+players.py/prescan-poule.yml, Fase D2) kost dat alleen al 15×3s + 15×3s =
+90s PURE wachttijd, zonder dat Kim dit ooit kon bijstellen zonder de code
+te wijzigen.
 
-Gebruik (lokaal testen, PowerShell):
-    $env:FIREBASE_SERVICE_ACCOUNT_JSON = Get-Content -Raw firebase-key.json
-    $env:PLAYER_IDS = "214435"
-    $env:MODE = "missing"
-    $env:ENABLE_ENRICH = "true"
-    $env:PADELSTAT_MAX = "25"
-    $env:PADELSTAT_STALE_DAYS = "14"
-    $env:KLASSEMENT_MAX = "8"
-    python ci_scrape_all.py
+Geen enkel bestand in de scraper (padelstats_scraper.py, scrape_player.py,
+fetch_period_playwright.py, enrich_opponents.py, refresh_padelstat_only.py,
+refresh_klassement_only.py, refresh_klassement_biannual.py) bevat een
+letterlijke "5 seconden"-sleep — de dichtstbijzijnde waarde is
+fetch_period_playwright.py's `select_option(..., timeout=5000)`, maar dat
+is een MAXIMALE wachttijd voor een Playwright-actie (hoe lang er hooguit
+op gewacht wordt), geen vaste sleep — een periode-wissel die normaal
+verloopt, duurt doorgaans veel korter dan die 5000ms-limiet.
+
+FIX: DELAY_BETWEEN_PLAYERS en DELAY_BETWEEN_POULE_UPDATES zijn nu
+overrideable via de nieuwe env vars DELAY_BETWEEN_PLAYERS_SECONDS /
+DELAY_BETWEEN_POULE_UPDATES_SECONDS (default ONGEWIJZIGD: 3.0s voor beide)
+— consistent met het bestaande configuratiepatroon van dit bestand. Dit
+verandert NIETS aan het standaardgedrag; het geeft enkel de mogelijkheid om
+dit per workflow-run te verlagen (bv. testen met 1.5s) ZONDER de code te
+moeten aanpassen.
+
+⚠️ BELANGRIJKE WAARSCHUWING (bewust NIET zomaar verlaagd als default): deze
+pauzes zijn een BEWUSTE beleefdheids-/rate-limiting-maatregel tegenover
+tennisenpadelvlaanderen.be, niet enkel "willekeurige vertraging". Een te
+lage waarde riskeert dat de site verzoeken als geautomatiseerd/verdacht
+herkent en (tijdelijk) blokkeert — wat de VOLLEDIGE scrape-pijplijn zou
+kunnen breken, een veel groter tijdverlies dan de paar seconden die je nu
+bespaart. Verlaag dit dus enkel bewust, bij voorkeur eerst getest met een
+kleine batch (bv. --player <1 id> of PLAYER_IDS met een paar spelers).
 """
 import logging
 import os
@@ -140,6 +156,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ci_scrape_all")
 
+# PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: dit zijn nog steeds de
+# DEFAULT-waarden (ongewijzigd, 3.0s) — zie get_delay_between_players()/
+# get_delay_between_poule_updates() hieronder voor de env-overrideable
+# versie die main() daadwerkelijk gebruikt.
 DELAY_BETWEEN_PLAYERS = 3.0
 DELAY_BETWEEN_POULE_UPDATES = 3.0
 VALID_MODES = ("missing", "new_users", "full")
@@ -196,6 +216,19 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _get_float_env(name: str, default: float) -> float:
+    """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: analoog aan
+    _get_int_env(), maar voor de nieuwe, floating-point wachttijd-env-vars."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        logger.warning(f"{name}='{raw}' is geen getal, val terug op {default}.")
+        return default
+
+
 def get_poule_update_enabled() -> bool:
     return _get_bool_env("ENABLE_POULE_UPDATE", True)
 
@@ -245,6 +278,19 @@ def get_enrich_scrape_new() -> bool:
     return _get_bool_env("ENRICH_SCRAPE_NEW", False)
 
 
+def get_delay_between_players() -> float:
+    """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
+    versie van DELAY_BETWEEN_PLAYERS (default ONGEWIJZIGD, 3.0s). Zie de
+    module-docstring voor de waarschuwing tegen te agressief verlagen."""
+    return _get_float_env("DELAY_BETWEEN_PLAYERS_SECONDS", DELAY_BETWEEN_PLAYERS)
+
+
+def get_delay_between_poule_updates() -> float:
+    """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
+    versie van DELAY_BETWEEN_POULE_UPDATES (default ONGEWIJZIGD, 3.0s)."""
+    return _get_float_env("DELAY_BETWEEN_POULE_UPDATES_SECONDS", DELAY_BETWEEN_POULE_UPDATES)
+
+
 def filter_by_mode(player_ids: list, mode: str) -> list:
     """Mode-specifieke voorselectie VOOR het scrapen begint."""
     if mode != "new_users":
@@ -270,8 +316,12 @@ def scrape_kwargs_for_mode(mode: str) -> dict:
     return {"force_full_refresh": False, "refresh_recent": 0, "strict_missing_only": True}
 
 
-def run_match_scrapes(player_ids: list, mode: str) -> tuple[list, list, list]:
-    """Matchdata-scrape-stap. Returns (ok, failed, skipped_up_to_date)."""
+def run_match_scrapes(player_ids: list, mode: str, delay_seconds: float = DELAY_BETWEEN_PLAYERS) -> tuple[list, list, list]:
+    """Matchdata-scrape-stap. Returns (ok, failed, skipped_up_to_date).
+    PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: delay_seconds is nu een
+    parameter (default ONGEWIJZIGD) i.p.v. de module-constante rechtstreeks
+    te gebruiken — main() geeft de env-overrideable waarde door (zie
+    get_delay_between_players())."""
     kwargs = scrape_kwargs_for_mode(mode)
     logger.info(f"scrape_player kwargs: {kwargs}")
     ok, failed, skipped_up_to_date = [], [], []
@@ -296,7 +346,7 @@ def run_match_scrapes(player_ids: list, mode: str) -> tuple[list, list, list]:
             logger.exception(f"[{pid}] Onverwachte fout: {e}")
             failed.append((pid, str(e)))
         if i < len(player_ids):
-            time.sleep(DELAY_BETWEEN_PLAYERS)
+            time.sleep(delay_seconds)
     return ok, failed, skipped_up_to_date
 
 
@@ -384,7 +434,7 @@ def run_enrichment(player_ids: list) -> dict:
         logger.info(f"{len(nieuwe)} nieuw(e) spelersprofiel(en) aangemaakt voor tegenstanders.")
         if get_enrich_scrape_new():
             logger.info(f"ENRICH_SCRAPE_NEW=true — matchdata ophalen voor {len(nieuwe)} nieuwe speler(s).")
-            ok_new, failed_new, _ = run_match_scrapes(nieuwe, "missing")
+            ok_new, failed_new, _ = run_match_scrapes(nieuwe, "missing", delay_seconds=get_delay_between_players())
             logger.info(f"Nieuwe spelers gescraped: {len(ok_new)} OK, {len(failed_new)} mislukt.")
         else:
             logger.info(
@@ -446,9 +496,15 @@ def run_single_player_enrichment(player_id: str) -> dict:
     }
 
 
-def run_poule_updates(player_ids: list, force: bool, include_eindronde: bool = True) -> tuple[list, list]:
+def run_poule_updates(
+    player_ids: list, force: bool, include_eindronde: bool = True,
+    delay_seconds: float = DELAY_BETWEEN_POULE_UPDATES,
+) -> tuple[list, list]:
     """PADEL_ANALYSIS_AUTO_POULE_UPDATE_2026-09-14 +
-    PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15."""
+    PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15.
+    PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: delay_seconds is nu een
+    parameter (default ONGEWIJZIGD) i.p.v. de module-constante rechtstreeks
+    te gebruiken."""
     import poule_playwright as pp
     updated, skipped_or_failed = [], []
     total = len(player_ids)
@@ -469,7 +525,7 @@ def run_poule_updates(player_ids: list, force: bool, include_eindronde: bool = T
             logger.exception(f"[{pid}] Onverwachte fout bij poule-update: {e}")
             skipped_or_failed.append((pid, str(e)))
             if i < total:
-                time.sleep(DELAY_BETWEEN_POULE_UPDATES)
+                time.sleep(delay_seconds)
             continue
         if result.get("error"):
             logger.info(f"[{pid}] Poule-schema overgeslagen: {result['error']}")
@@ -492,7 +548,7 @@ def run_poule_updates(player_ids: list, force: bool, include_eindronde: bool = T
                 )
             updated.append((pid, detail))
         if i < total:
-            time.sleep(DELAY_BETWEEN_POULE_UPDATES)
+            time.sleep(delay_seconds)
     return updated, skipped_or_failed
 
 
@@ -503,8 +559,19 @@ def main() -> int:
     if not player_ids:
         logger.warning(f"Geen spelers gevonden/aangevraagd voor mode='{mode}' — niets te verversen.")
         return 0
+    # PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: eenmalig opgehaald en
+    # doorgegeven, i.p.v. de module-constanten rechtstreeks in de
+    # onderliggende functies te gebruiken — zie module-docstring.
+    delay_players = get_delay_between_players()
+    delay_poule = get_delay_between_poule_updates()
+    if delay_players != DELAY_BETWEEN_PLAYERS or delay_poule != DELAY_BETWEEN_POULE_UPDATES:
+        logger.info(
+            f"Aangepaste wachttijden actief: tussen spelers={delay_players}s "
+            f"(standaard {DELAY_BETWEEN_PLAYERS}s), tussen poule-updates={delay_poule}s "
+            f"(standaard {DELAY_BETWEEN_POULE_UPDATES}s)."
+        )
     logger.info(f"Mode: '{mode}' — {len(player_ids)} speler(s) worden verwerkt: {player_ids}")
-    ok, failed, skipped_up_to_date = run_match_scrapes(player_ids, mode)
+    ok, failed, skipped_up_to_date = run_match_scrapes(player_ids, mode, delay_seconds=delay_players)
     logger.info("=== Samenvatting matchdata ===")
     logger.info(f"Ververst: {len(ok)} — Al up-to-date: {len(skipped_up_to_date)} — Mislukt: {len(failed)}")
     for pid, err in failed:
@@ -543,7 +610,7 @@ def main() -> int:
             f"(force={force}, eindronde={include_eindronde}) ==="
         )
         poule_updated, poule_skipped = run_poule_updates(
-            player_ids, force=force, include_eindronde=include_eindronde
+            player_ids, force=force, include_eindronde=include_eindronde, delay_seconds=delay_poule,
         )
         logger.info("=== Samenvatting poule-schema ===")
         logger.info(f"Bijgewerkt: {len(poule_updated)} — Overgeslagen/mislukt: {len(poule_skipped)}")
