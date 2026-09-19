@@ -21,6 +21,17 @@
 # pagina'-fallback-historiek wordt automatisch, met voorrang, opnieuw
 # geprobeerd.
 #
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_WORKFLOW_SPEEDUP_2026-09-19 (Fase E, op verzoek van Kim:
+# zie de volledige toelichting in refresh-padelstat.yml — dezelfde
+# bevinding en fix gelden hier 1-op-1.)
+# --------------------------------------------------------------------------
+# FIX: dezelfde venv-/Playwright-browsercache-stappen als scrape-padel.yml/
+# search-player.yml/refresh-padelstat.yml, met IDENTIEKE cache-keys, zodat
+# alle workflows dezelfde cache-entries hergebruiken (een cache-hit door
+# bv. scrape-padel.yml maakt deze workflow dus OOK meteen warm, en
+# omgekeerd) i.p.v. elk hun eigen, aparte, redundante cache op te bouwen.
+#
 # Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
 #                                   scrape-padel.yml/refresh-padelstat.yml)
@@ -28,7 +39,6 @@
 # Handmatig testen/forceren: Actions -> Refresh klassement -> Run workflow,
 # met desgewenst een aangepaste 'max', 'force_all' of 'player' input.
 name: Refresh klassement (tennisenpadelvlaanderen.be)
-
 on:
   schedule:
     # Dagelijks om 04:22 UTC. Bewust een ander tijdstip dan refresh-
@@ -54,11 +64,9 @@ on:
         description: "Enkel dit ene player_id controleren (optioneel, laat leeg voor normale werking)"
         required: false
         default: ""
-
 concurrency:
   group: refresh-klassement
   cancel-in-progress: false
-
 jobs:
   refresh:
     runs-on: ubuntu-latest
@@ -67,36 +75,72 @@ jobs:
     # (~20-40s per speler, afhankelijk van het aantal periodes) blijft dit
     # ruim binnen 25 minuten.
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: PadelAnalysis/scraper/requirements-scraper.txt
-
-      - name: Installeer dependencies
-        working-directory: PadelAnalysis
+          cache-dependency-path: |
+            requirements.txt
+            PadelAnalysis/scraper/requirements-scraper.txt
+      # ── Volledige venv-cache (PADEL_ANALYSIS_WORKFLOW_SPEEDUP_2026-09-19:
+      # identiek aan scrape-padel.yml/search-player.yml/refresh-padelstat.yml,
+      # zelfde cache-key). ─────────────────────────────────────────────────
+      - name: Cache Python-venv (alle pip-packages + playwright)
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: PadelAnalysis/scraper/.venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('requirements.txt', 'PadelAnalysis/scraper/requirements-scraper.txt') }}
+      - name: Bouw venv + installeer dependencies (alleen bij cache-miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install -r ../requirements.txt
-          pip install -r scraper/requirements-scraper.txt
-
-      - name: Installeer Playwright Chromium
-        working-directory: PadelAnalysis
+          pip install -r ../../requirements.txt
+          pip install -r requirements-scraper.txt
+      - name: Bevestig venv aanwezig (warme run)
+        if: steps.cache-venv.outputs.cache-hit == 'true'
         run: |
+          echo "Venv-cache-hit: pip install volledig overgeslagen."
+          . .venv/bin/activate
+          python -c "import playwright, bs4, requests; print('deps OK uit cache')"
+      # ── Playwright-browsercache (identiek aan scrape-padel.yml) ─────────
+      - name: Bepaal Playwright-versie (voor cache-key)
+        id: playwright-version
+        run: |
+          . .venv/bin/activate
+          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright-browserbinaries
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright browsers (Chromium binary + OS-libraries)
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: |
+          . .venv/bin/activate
           python -m playwright install --with-deps chromium
-
+      - name: Installeer enkel OS-libraries (bij browser-cache-hit)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: |
+          . .venv/bin/activate
+          python -m playwright install-deps chromium
       - name: Klassement-controle uitvoeren
-        working-directory: PadelAnalysis/scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           KLASSEMENT_MAX: ${{ github.event.inputs.max || '15' }}
           KLASSEMENT_MAX_PERIODS: ${{ github.event.inputs.max_periods }}
         run: |
+          . .venv/bin/activate
           ARGS="--max ${KLASSEMENT_MAX}"
           if [ -n "${KLASSEMENT_MAX_PERIODS}" ]; then
             ARGS="$ARGS --max-periods-per-player ${KLASSEMENT_MAX_PERIODS}"
