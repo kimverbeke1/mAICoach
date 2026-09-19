@@ -1,0 +1,197 @@
+# .github/workflows/prescan-poule.yml
+#
+# PADEL_ANALYSIS_POULE_PRESCAN_2026-09-19 (Fase D2, op verzoek van Kim, chat
+# 2026-09-19): "Nu ik er aan denk is het misschien wel beter om in de
+# achtergrond al meteen alle spelers van je poule op te halen op voorhand.
+# bv. om middernacht. Dat kan gemakkelijk na match 1."
+#
+# Doel: ALLE ploegen in de poule (niet enkel de eerstvolgende tegenstander)
+# proactief laten voorzien van matchdata + playing strength + klassement,
+# ZODAT wanneer Kim naar "🌐 Andere ploegen" gaat (page_lineup_lab.py,
+# poule_teams_ui.py) of naar zijn eigen "Volgende match" analyse, de data
+# meestal al klaarstaat i.p.v. pas dan opgehaald te moeten worden.
+#
+# --------------------------------------------------------------------------
+# OPBOUW: 2 aparte jobs, bewust gescheiden op snelheid/zwaarte
+# --------------------------------------------------------------------------
+# Job "discover" (licht, GEEN Playwright): bepaalt WELKE spelers er over de
+# volledige poule besproken moeten worden (discover_poule_players.py, enkel
+# requests + BeautifulSoup). Dit is snel (geen browser-installatie nodig) en
+# geeft zijn resultaat door aan job 2 via job-outputs.
+#
+# Job "prescan_scrape" (zwaar, MET Playwright, wacht op "discover"): voert de
+# BESTAANDE, al goed geteste ci_scrape_all.py uit op exact de spelerslijst
+# die job 1 bepaalde — dus GEEN nieuwe scrape-logica, volledig hergebruik van
+# de matchdata-/padelstat-/klassement-pijplijn (incl. zijn eigen "missing"-
+# skip-logica voor reeds actuele spelers). Gebruikt dezelfde venv-/Playwright-
+# browsercache als scrape-padel.yml, voor dezelfde snelheidswinst.
+#
+# --------------------------------------------------------------------------
+# WAAROM GEEN "schedule:"-trigger HIER (belangrijk, lees dit voor je dit
+# workflow-bestand activeert)
+# --------------------------------------------------------------------------
+# scrape-padel.yml se eigen geschiedenis (zie PADEL_ANALYSIS_CRON_UNRELIABLE_
+# 2026-09-17 in dat bestand) toont dat GitHub's eigen "schedule:"-trigger
+# onbetrouwbaar bleek (vertraagd of stilzwijgend overgeslagen bij piek-
+# belasting) en DAAROM vervangen is door een externe GCP Cloud Scheduler-job
+# die de workflow_dispatch-API aanroept. Om diezelfde, bewust gekozen
+# betrouwbaarheid te behouden, heeft DIT workflow-bestand BEWUST ENKEL een
+# workflow_dispatch-trigger (handmatig testbaar, en programmatisch
+# triggerbaar) — GEEN natieve "schedule:". Voeg dit workflow-bestand toe aan
+# je bestaande GCP Cloud Scheduler-mechanisme (dezelfde Cloud Run function
+# die scrape-padel.yml/sync-mAIcoach.yml al aanstuurt, zie gcp-triggers/
+# maicoach-sync-trigger/main.py) met een tijdstip kort na middernacht, zodat
+# dit consistent even betrouwbaar draait als je bestaande nachtelijke taken.
+# Ik heb dat GCP-scriptbestand zelf niet gezien, dus kan dit niet voor je
+# instellen — voeg gewoon "prescan-poule.yml" toe aan de lijst van
+# workflow_file-waarden die die Cloud Run function al ondersteunt.
+#
+# Vereist repo secret (zelfde als de andere workflows):
+#   FIREBASE_SERVICE_ACCOUNT_JSON
+#
+# Handmatig testen: Actions -> Poule pre-scan -> Run workflow.
+name: Poule pre-scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_players_max:
+        description: "Max. aantal VOLLEDIG NIEUWE spelers deze run (rest volgt een volgende run)"
+        required: false
+        default: "15"
+      padelstat_max:
+        description: "Max. aantal spelers waarvoor playing strength deze run ververst wordt"
+        required: false
+        default: "25"
+      klassement_max:
+        description: "Max. aantal spelers waarvoor klassement deze run opgehaald wordt"
+        required: false
+        default: "8"
+
+concurrency:
+  group: prescan-poule
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    # Licht: enkel requests + BeautifulSoup, geen Playwright — ruim binnen
+    # enkele minuten, ook voor een grote poule (elke "team"-opzoeking is
+    # slechts een paar lichte HTTP-aanroepen, geen browsersessie).
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
+    outputs:
+      player_ids: ${{ steps.discover.outputs.player_ids }}
+      player_count: ${{ steps.discover.outputs.player_count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            PadelAnalysis/scraper/requirements-scraper.txt
+      - name: Installeer dependencies (licht — geen Playwright nodig)
+        working-directory: PadelAnalysis
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ../requirements.txt
+          pip install -r scraper/requirements-scraper.txt
+      - name: Poule-spelers bepalen
+        id: discover
+        working-directory: PadelAnalysis/scraper
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          PRESCAN_NEW_PLAYERS_MAX: ${{ github.event.inputs.new_players_max || '15' }}
+        run: |
+          python discover_poule_players.py
+
+  prescan_scrape:
+    needs: discover
+    runs-on: ubuntu-latest
+    if: needs.discover.outputs.player_count != '0'
+    # Zelfde conservatieve marge onder de 30-minuten-limiet als de andere
+    # workflows (scrape-padel.yml/refresh-padelstat.yml).
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: PadelAnalysis/scraper
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            PadelAnalysis/scraper/requirements-scraper.txt
+      # ── Zelfde venv-/Playwright-cachepatroon als scrape-padel.yml, voor
+      # dezelfde snelheidswinst op een warme run. ──────────────────────────
+      - name: Cache Python-venv (alle pip-packages + playwright)
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: PadelAnalysis/scraper/.venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('requirements.txt', 'PadelAnalysis/scraper/requirements-scraper.txt') }}
+      - name: Bouw venv + installeer dependencies (alleen bij cache-miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install -r ../../requirements.txt
+          pip install -r requirements-scraper.txt
+      - name: Bevestig venv aanwezig (warme run)
+        if: steps.cache-venv.outputs.cache-hit == 'true'
+        run: |
+          echo "Venv-cache-hit: pip install volledig overgeslagen."
+          . .venv/bin/activate
+          python -c "import playwright, bs4, requests; print('deps OK uit cache')"
+      - name: Bepaal Playwright-versie (voor cache-key)
+        id: playwright-version
+        run: |
+          . .venv/bin/activate
+          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright-browserbinaries
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright browsers (Chromium binary + OS-libraries)
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: |
+          . .venv/bin/activate
+          python -m playwright install --with-deps chromium
+      - name: Installeer enkel OS-libraries (bij browser-cache-hit)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: |
+          . .venv/bin/activate
+          python -m playwright install-deps chromium
+      # ── Hergebruik van de bestaande, al goed geteste pijplijn: GEEN
+      # nieuwe scrape-logica, enkel een andere PLAYER_IDS-doelgroep. ───────
+      - name: Poule-spelers verversen (matchdata + padelstat + klassement)
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          PLAYER_IDS: ${{ needs.discover.outputs.player_ids }}
+          MODE: missing
+          ENABLE_ENRICH: "true"
+          ENABLE_PADELSTAT: "true"
+          PADELSTAT_MAX: ${{ github.event.inputs.padelstat_max || '25' }}
+          ENABLE_KLASSEMENT: "true"
+          KLASSEMENT_MAX: ${{ github.event.inputs.klassement_max || '8' }}
+          # Poule-schema-update is per EIGEN speler bedoeld (schrijft naar
+          # DIENS profiel) — niet zinvol/nodig voor deze doelgroep van
+          # ANDERE ploegen se spelers, dus uitgeschakeld om tijd te sparen.
+          ENABLE_POULE_UPDATE: "false"
+        run: |
+          . .venv/bin/activate
+          echo "Ververs ${{ needs.discover.outputs.player_count }} poule-speler(s)..."
+          python ci_scrape_all.py
