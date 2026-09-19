@@ -1,9 +1,7 @@
 """
 enrich_opponents.py — zorgt dat TEGENSTANDERS volwaardige spelers worden.
-
 Locatie: PadelAnalysis/scraper/enrich_opponents.py
 (naast scrape_player.py / ci_scrape_all.py, zelfde path-setup patroon)
-
 --------------------------------------------------------------------------
 HET PROBLEEM DAT DIT OPLOST
 --------------------------------------------------------------------------
@@ -12,7 +10,6 @@ verschillende spelers (De Purcq Hilde, Brede Hilde, Severine, ...):
   - geen playing strength   ("voer bulk_fetch_padelstat_ratings.py uit")
   - geen klassement, geen klassementshistoriek
   - geen winrate historiek, geen vaste partner historiek
-
 Dat lijken drie losse problemen, maar het is EEN oorzaak. In
 opponent_dossier.build_player_summary() staat:
     doc = fb.get_player(player_id) or all_docs.get(str(player_id)) or {}
@@ -22,10 +19,8 @@ matches leeg. Gevolg, in cascade: winrate/partners/vorm/periodes leeg,
 klassement + historiek leeg, playing strength leeg (want
 bulk_fetch_padelstat_ratings loopt over fb.search_player_profiles() en die
 speler heeft geen profiel).
-
 De poule-scrape haalt enkel FIXTURES en NAMEN op; ze maakt geen spelers aan.
 Tegenstanders bestonden dus enkel als naam in een uitslagenblad.
-
 --------------------------------------------------------------------------
 WAT DIT BESTAND DOET
 --------------------------------------------------------------------------
@@ -35,14 +30,12 @@ WAT DIT BESTAND DOET
 2. ensure_profiles()            - maakt voor die spelers een profiel aan.
 3. run_padelstat_for_players()  - haalt de padelstats.be playing strength op.
 4. run_klassement_for_players() - haalt de TVL-klassementshistoriek op.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16
 --------------------------------------------------------------------------
 run_klassement_for_players(), zelfde opbouw als de bestaande lokale flow in
 opponent_scout_ui.py (scrape_klassement() + klassement_to_history_summary()
 + extract_niveau_winrates() uit scrape_klassement.py).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 ("worst case")
 --------------------------------------------------------------------------
@@ -52,7 +45,6 @@ zodat jarenlange tornooihistoriek geen honderden irrelevante ghost-profielen
 genereert. run_padelstat_for_players() en run_klassement_for_players()
 geven bovendien spelers MET bestaande matchdata voorrang boven ghosts (zie
 _prioritize()) wanneer een *_MAX-limiet spelers moet laten wachten.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16
 --------------------------------------------------------------------------
@@ -60,7 +52,6 @@ ensure_profiles() zet een "discovered_at"-tijdstempel op elk NIEUW
 aangemaakt profiel, gebruikt door cleanup_ghost_profiles.py om te
 onderscheiden tussen een écht irrelevant profiel en een net ontdekte
 speler die nog geen kans kreeg om verrijkt te worden.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -72,7 +63,6 @@ voor ALTIJD over, tenzij refresh=True werd gezet -- en dat gebeurde nergens
 automatisch in de reguliere CI-run. Een speler kreeg dus zijn/haar
 padelstat-waarde precies EEN keer, nooit meer bijgewerkt, terwijl
 padelstats.be die waarde continu herberekent op basis van nieuwe resultaten.
-
 Fix, twee onderdelen:
   1. save_padelstat_rating() wordt nog steeds ONGEWIJZIGD aangeroepen. Het
      bestaande veld dat het als tijdstempel zet, heet -- geverifieerd in de
@@ -88,7 +78,6 @@ Fix, twee onderdelen:
      doet nu automatisch OOK de verouderde ratings, niet enkel de volledig
      ontbrekende. _prioritize() geeft binnen de te-verversen-lijst nog steeds
      voorrang aan spelers met matchdata boven ghost-profielen.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -96,7 +85,6 @@ BUG (opgelost): "ik heb dit profiel verversen gekozen bij Stijn Mortier. Ik
 zie dat de scraper heel wat spelers aan het verversen is (en niet Stijn
 Mortier wegens beperking in aantal). [...] ik zie nu weer een heleboel
 nieuwe spelers in mijn spelerslijst."
-
 ROOT CAUSE (bevestigd in code, geen aanname):
 De knop "Scrape deze speler nu" (cloud_helpers.render_full_player_scrape_
 button()) triggert scrape-padel.yml met player_ids=<EEN speler>. Op de
@@ -117,7 +105,6 @@ gevraagd werden. Dat doet twee dingen tegelijk, voor DIE ENE speler:
      (die nog niets hebben) wel in de wachtrij kwamen en het gedeelde budget
      (KLASSEMENT_MAX_PER_RUN=8) opsouperen. Vandaar exact "veel spelers
      verversen, Stijn niet, wegens een limiet".
-
 FIX: nieuwe functie run_single_player_refresh(player_id) hieronder. Wordt
 gebruikt door ci_scrape_all.py zodra er EXACT 1 speler werd aangevraagd
 (zie daar): GEEN discovery, GEEN nieuwe ghost-profielen, en een
@@ -125,10 +112,44 @@ GEFORCEERDE refresh (refresh=True, cache/staleness volledig genegeerd) van
 ENKEL padelstat + klassement voor DIE ENE speler. Dit garandeert dat een
 gerichte "ververs deze speler"-actie ook effectief ENKEL die speler
 ververst, zoals bedoeld.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19 (op verzoek van Kim: "jij
+moet de code aanpassen zodat je de club meegeeft als je begin te scrapen")
+--------------------------------------------------------------------------
+BUG/BEPERKING (opgelost, best-effort): discover_opponent_players() haalde
+tot nu toe UITSLUITEND player_id + naam uit de matchrecords van onze eigen
+spelers. ensure_profiles() ONDERSTEUNDE al een club-parameter (zie
+signatuur hieronder), maar enrich() riep die NOOIT aan met een effectieve
+club -- nieuw ontdekte tegenstander-profielen kregen dus altijd
+club="(leeg)". Gevolg, bevestigd in run_padelstat_for_players(): daar wordt
+exact dit veld gebruikt om padelstats.be te doorzoeken
+(ps.search_and_fetch_padelstat_rating(naam, club=club or None)) -- ZONDER
+club kan de zoekfunctie twee gelijknamige spelers (bv. "Kim Verbeke" bij
+Padel Factory vs. bij Tennis en Padel Pollare, een reëel, al bevestigd
+scenario) niet van elkaar onderscheiden en loopt het risico de VERKEERDE
+speler op te slaan.
+FIX: elk matchrecord bevat een "encounter"-veld met de vorm
+"<Ploeg A> / <Ploeg B>" (bevestigd in een echt matchrecord, bv.
+"PADEL 4U2 GENT A / Padel Factory A"). Omdat we het CLUB-veld van onze
+EIGEN speler al kennen (player_profiles.club, ingevuld bij het aanmaken van
+onze eigen spelers), kunnen we bepalen welke van de twee ploegnamen "onze"
+kant is, en dus welke de kant van de tegenstander/partner is.
+_derive_opponent_club_from_encounter() doet dit, INCLUSIEF het wegknippen
+van een eventuele losse team-letter op het einde ("Padel Factory A" ->
+"Padel Factory"), zodat het resultaat vergelijkbaar is met de ALL-CAPS
+clubnamen die elders al in player_profiles.club staan (bv. "PADEL FACTORY").
+Dit blijft een HEURISTIEK op basis van tekstvergelijking, geen exacte
+koppeling met een clubregister: als de eigen clubnaam niet duidelijk in
+een van beide ploegnamen terug te vinden is, wordt GEEN club gegokt (liever
+"onbekend" dan een foutieve club opslaan). discover_opponent_players()
+geeft daarom voortaan {player_id: {"name": ..., "club": ... of None}}
+terug (i.p.v. enkel de naam) -- ensure_profiles(), enrich() en de
+--dry-run-uitvoer hieronder zijn hierop aangepast.
 """
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -154,7 +175,6 @@ PADELSTAT_PAUSE_SECONDS = 1.5
 # bestaande padelstat-rating als "verouderd" geldt en dus automatisch
 # opnieuw wordt opgehaald, ook zonder refresh=True.
 PADELSTAT_STALE_AFTER_DAYS = 14
-
 # Klassement kost een volledige Playwright-sessie per speler, dus een
 # beduidend lagere limiet dan padelstat.
 KLASSEMENT_MAX_PER_RUN = 8
@@ -188,6 +208,79 @@ def _parse_iso(value) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: club afleiden uit het
+# "encounter"-veld van een matchrecord.
+# ---------------------------------------------------------------------------
+_TEAM_LETTER_SUFFIX_RE = re.compile(r"\s+[A-Za-z]$")
+
+
+def _normalize_club_text(text: str) -> str:
+    """Normaliseert een clubnaam/ploegnaam voor VERGELIJKING (niet voor
+    opslag): hoofdletters, ingekort van een eventuele losse team-letter op
+    het einde ("Padel Factory A" -> "PADEL FACTORY"), overtollige spaties
+    weg. Enkel gebruikt om te bepalen welke ploeghelft bij "onze" club
+    hoort -- de uiteindelijk OPGESLAGEN clubnaam behoudt zijn originele
+    schrijfwijze uit het "encounter"-veld (zie _derive_opponent_club_from_
+    encounter())."""
+    cleaned = _TEAM_LETTER_SUFFIX_RE.sub("", (text or "").strip())
+    return " ".join(cleaned.upper().split())
+
+
+def _strip_team_letter_suffix(text: str) -> str:
+    """Knipt enkel de losse team-letter aan het einde weg ("Padel Factory A"
+    -> "Padel Factory"), voor de OP TE SLAAN clubnaam (dus zonder de rest
+    naar hoofdletters om te zetten -- dat gebeurt enkel in
+    _normalize_club_text() voor de vergelijking zelf)."""
+    return _TEAM_LETTER_SUFFIX_RE.sub("", (text or "").strip()).strip()
+
+
+def _derive_opponent_club_from_encounter(encounter: str, own_club: str) -> Optional[str]:
+    """PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: bepaalt de club van
+    de TEGENOVERGESTELDE kant in een "encounter"-veld (vorm "<Ploeg A> /
+    <Ploeg B>", bv. "PADEL 4U2 GENT A / Padel Factory A"), op basis van de
+    reeds GEKENDE club van onze eigen speler (own_club, uit diens
+    player_profiles.club).
+
+    Retourneert de tegenstander-clubnaam (team-letter weggeknipt, originele
+    schrijfwijze behouden) ZODRA precies één van de twee ploeghelften
+    (genormaliseerd: hoofdletters, team-letter weg) overeenkomt met de
+    genormaliseerde own_club. In elk ander geval (own_club onbekend,
+    "encounter" niet in de verwachte vorm, geen EENDUIDIGE match, of BEIDE
+    helften lijken op own_club) wordt None teruggegeven -- bewust GEEN club
+    gokken bij twijfel."""
+    if not own_club or not encounter or "/" not in encounter:
+        return None
+    parts = [p.strip() for p in encounter.split("/")]
+    if len(parts) != 2 or not all(parts):
+        return None
+    own_norm = _normalize_club_text(own_club)
+    if not own_norm:
+        return None
+    normalized = [_normalize_club_text(p) for p in parts]
+    matches = [i for i, n in enumerate(normalized) if n == own_norm]
+    if len(matches) != 1:
+        # 0 matches: own_club komt in geen van beide helften voor (kan bv.
+        # gebeuren als de teamnaam anders geschreven is dan de clubnaam).
+        # 2 matches: beide helften zien er (na normalisatie) identiek uit --
+        # in beide gevallen te onzeker om een kant te kiezen.
+        return None
+    own_idx = matches[0]
+    opponent_idx = 1 - own_idx
+    return _strip_team_letter_suffix(parts[opponent_idx]) or None
+
+
+def _own_club_for_owner(owner_player_id: str) -> str:
+    """Haalt de GEKENDE club van onze EIGEN speler op (player_profiles.club),
+    nodig als referentiepunt om in _derive_opponent_club_from_encounter() te
+    bepalen welke ploeghelft van "encounter" de tegenstander-kant is."""
+    try:
+        profile = fb.get_player_profile(owner_player_id) or {}
+    except Exception:  # noqa: BLE001
+        profile = {}
+    return (profile.get("club") or "").strip()
+
+
+# ---------------------------------------------------------------------------
 # 1. Tegenstanders ontdekken
 # ---------------------------------------------------------------------------
 def _known_profile_ids() -> set:
@@ -210,36 +303,68 @@ def discover_opponent_players(
     PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16: interclub_only=True
     (standaard) beperkt de scan tot match_type == "interclub".
 
-    Returns {player_id: display_name} voor de ONTBREKENDE spelers.
+    PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: geeft nu, naast de
+    naam, ook een BEST-EFFORT club mee per ontdekte speler. Belangrijk
+    onderscheid, want opp1/opp2 en partner staan NIET aan dezelfde kant:
+      - opp1/opp2 (de TEGENSTANDER) krijgen een club afgeleid uit het
+        "encounter"-veld van het matchrecord (zie
+        _derive_opponent_club_from_encounter()) -- is geen club af te
+        leiden (own_club onbekend, "encounter" ontbreekt/onduidelijk), dan
+        blijft "club" gewoon None (exact het vorige gedrag, geen regressie).
+      - de PARTNER speelt in HETZELFDE team als de owner-speler (bv. Stijn
+        Mortier is een eigen ploegmaat, geen tegenstander) en krijgt daarom
+        gewoon de reeds GEKENDE eigen club (own_club) rechtstreeks, zonder
+        afleiding uit "encounter" nodig te hebben.
+
+    Returns {player_id: {"name": str, "club": Optional[str]}} voor de
+    ONTBREKENDE spelers. (Vóór PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19
+    was dit {player_id: naam} -- zie ensure_profiles()/enrich() hieronder
+    voor de bijhorende aanpassing van alle aanroepers binnen dit bestand.)
     """
     known = _known_profile_ids()
-    found: dict[str, str] = {}
+    found: dict[str, dict] = {}
     overgeslagen_tornooi = 0
+    own_club_cache: dict[str, str] = {}
     for pid in player_ids:
         try:
             doc = fb.get_player(pid) or {}
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[enrich] [{pid}] kon document niet lezen: {e}")
             continue
+        owner_key = _norm_id(pid)
+        if owner_key not in own_club_cache:
+            own_club_cache[owner_key] = _own_club_for_owner(owner_key)
+        own_club = own_club_cache[owner_key]
         for match in doc.get("matches", []) or []:
             if interclub_only and match.get("match_type") != "interclub":
                 overgeslagen_tornooi += 1
                 continue
+            # PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: opp1/opp2
+            # staan bij de TEGENSTANDER (club afgeleid uit "encounter"),
+            # maar de partner speelt in HETZELFDE team als de owner (bv.
+            # "Stijn Mortier is 1 van mijn ploegmembers", eerder al
+            # bevestigd) -- die krijgt dus own_club rechtstreeks, NIET de
+            # afgeleide tegenstander-club. Zonder dit onderscheid zou een
+            # eigen ploegmaat foutief de tegenstander-club krijgen.
+            opponent_club = _derive_opponent_club_from_encounter(
+                match.get("encounter") or "", own_club
+            )
             paren = [
-                (match.get("opp1_user_id"), match.get("opp1_name")),
-                (match.get("opp2_user_id"), match.get("opp2_name")),
+                (match.get("opp1_user_id"), match.get("opp1_name"), opponent_club),
+                (match.get("opp2_user_id"), match.get("opp2_name"), opponent_club),
             ]
             if include_partners:
-                paren.append((match.get("partner_user_id"), match.get("partner_name")))
-            for raw_id, naam in paren:
+                paren.append((match.get("partner_user_id"), match.get("partner_name"), own_club or None))
+            for raw_id, naam, club in paren:
                 other_id = _norm_id(raw_id)
                 if not other_id or not other_id.isdigit():
                     continue
                 if other_id in known or other_id in found:
                     continue
                 naam = (naam or "").strip()
-                if naam:
-                    found[other_id] = naam
+                if not naam:
+                    continue
+                found[other_id] = {"name": naam, "club": club}
     if interclub_only and overgeslagen_tornooi:
         logger.info(
             f"[enrich] {overgeslagen_tornooi} tornooi-matchrij(en) overgeslagen bij "
@@ -252,7 +377,18 @@ def discover_opponent_players(
 # 2. Profielen aanmaken
 # ---------------------------------------------------------------------------
 def ensure_profiles(players: dict, club: Optional[str] = None) -> list:
-    """Maak player_profiles-documenten aan voor {player_id: naam}.
+    """Maak player_profiles-documenten aan voor de ontdekte spelers.
+
+    PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: `players` verwacht nu
+    het formaat {player_id: {"name": str, "club": Optional[str]}}, zoals
+    teruggegeven door discover_opponent_players(). Voor achterwaartse
+    compatibiliteit (bv. een toekomstige aanroeper die enkel namen kent)
+    wordt een waarde die GEEN dict is (dus een kale string) nog steeds als
+    "enkel naam, geen club" behandeld.
+    Het optionele `club`-argument blijft bestaan als EXPLICIETE override die
+    voor ALLE meegegeven spelers dezelfde club forceert (bv. bij een
+    toekomstige "importeer volledige tegenploeg"-functie) -- heeft voorrang
+    op de per-speler afgeleide club uit `players`.
 
     PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16: discovered_at wordt
     hier gezet, enkel bij eerste aanmaak.
@@ -261,21 +397,29 @@ def ensure_profiles(players: dict, club: Optional[str] = None) -> list:
     """
     aangemaakt = []
     discovered_at = _utc_now_iso()
-    for player_id, naam in (players or {}).items():
+    for player_id, info in (players or {}).items():
+        if isinstance(info, dict):
+            naam = info.get("name") or ""
+            per_speler_club = info.get("club")
+        else:
+            naam = info or ""
+            per_speler_club = None
+        effectieve_club = club or per_speler_club
         payload = {
             "player_id": str(player_id),
             "display_name": naam,
             "added_by": "auto_opponent_discovery",
             "discovered_at": discovered_at,
         }
-        if club:
-            payload["club"] = club
+        if effectieve_club:
+            payload["club"] = effectieve_club
         try:
             fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
                 payload, merge=True
             )
             aangemaakt.append(str(player_id))
-            logger.info(f"[enrich] Profiel aangemaakt: {naam} ({player_id})")
+            club_log = f", club={effectieve_club}" if effectieve_club else ""
+            logger.info(f"[enrich] Profiel aangemaakt: {naam} ({player_id}{club_log})")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[enrich] Kon profiel {naam} ({player_id}) niet aanmaken: {e}")
     return aangemaakt
@@ -304,7 +448,6 @@ def _prioritize(candidates: list) -> list:
 # ---------------------------------------------------------------------------
 def _padelstat_is_stale(cached: Optional[dict], stale_after_days: int) -> bool:
     """PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16.
-
     True als er GEEN gecachete rating is, OF de rating ouder is dan
     stale_after_days. Kan geen leeftijd bepaald worden (geen scraped_at-veld
     -- bv. een heel oude, van vóór deze fix), dan wordt die conservatief ook
@@ -348,6 +491,15 @@ def run_padelstat_for_players(
     afkappen op max_players ALTIJD als eerste behandeld worden - zo kan een
     expliciet aangevraagde speler nooit door een gedeeld run-budget verdrongen
     worden door pas ontdekte ghost-profielen.
+
+    PADEL_ANALYSIS_OPPONENT_CLUB_CAPTURE_2026-09-19: gebruikt hieronder nog
+    steeds `profiel.get("club")` om aan padelstats.be een club mee te geven
+    bij het zoeken (ps.search_and_fetch_padelstat_rating(naam, club=...)) --
+    dat stond hier al, maar was tot nu toe zelden gevuld voor NIEUW ontdekte
+    tegenstanders omdat ensure_profiles() nooit een club kreeg. Nu
+    discover_opponent_players()/ensure_profiles() een best-effort club
+    invullen bij het AANMAKEN van het profiel, is die club hier voortaan ook
+    effectief beschikbaar voor gloednieuwe tegenstander-profielen.
 
     Returns: {"opgehaald": n, "cache": n, "niet_gevonden": n, "fout": n,
     "overgeslagen_limiet": n}.
@@ -585,9 +737,10 @@ def enrich(
     if do_discover:
         ontbrekend = discover_opponent_players(player_ids, interclub_only=interclub_only)
         if ontbrekend:
+            met_club = sum(1 for info in ontbrekend.values() if info.get("club"))
             logger.info(
                 f"[enrich] {len(ontbrekend)} tegenstander(s)/partner(s) zonder profiel gevonden "
-                f"(interclub_only={interclub_only})."
+                f"(interclub_only={interclub_only}), waarvan {met_club} met een afgeleide club."
             )
             resultaat["nieuwe_profielen"] = ensure_profiles(ontbrekend)
         else:
@@ -652,7 +805,6 @@ if __name__ == "__main__":
     import argparse
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
-
     parser = argparse.ArgumentParser(
         description="Tegenstanders als speler aanmaken + padelstats/klassement ophalen."
     )
@@ -699,8 +851,9 @@ if __name__ == "__main__":
     if args.dry_run:
         ontbrekend = discover_opponent_players(ids, interclub_only=not args.include_tournament)
         print(f"\n{len(ontbrekend)} speler(s) zonder profiel:\n")
-        for pid, naam in sorted(ontbrekend.items(), key=lambda kv: kv[1]):
-            print(f"  {pid:<12} {naam}")
+        for pid, info in sorted(ontbrekend.items(), key=lambda kv: kv[1].get("name") or ""):
+            club_txt = info.get("club") or "-"
+            print(f"  {pid:<12} {info.get('name') or '':<30} club={club_txt}")
         sys.exit(0)
 
     res = enrich(
