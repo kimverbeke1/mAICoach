@@ -969,3 +969,17 @@ def render_scout_block(
         key_prefix=f"scout_team_{sel_player_id}",
     )
     return bundle, opp
+
+
+# PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 (Fase D1, op verzoek van Kim:
+# "Het zou ook handig zijn dat er een mogelijkheid is om al meteen ook
+# andere ploegen van je poule al eens te bekijken. eventueel via apart
+# tabblad."):
+# Publieke naam voor _render_unified_team_sync_trigger() (Fase C), zodat de
+# nieuwe poule_teams_ui.py dit kan HERGEBRUIKEN voor WILLEKEURIGE ploegen in
+# de poule — niet enkel de eerstvolgende tegenstander. Dezelfde "ontbrekende
+# gegevens ophalen"-logica (matchdata + klassement + playing strength, 1
+# knop die zichzelf aanpast aan wat er nog ontbreekt) hoort exact hetzelfde
+# te werken voor een willekeurige poule-ploeg als voor de eerstvolgende
+# tegenstander — geen duplicatie van die logica.
+render_unified_team_sync_trigger = _render_unified_team_sync_trigger

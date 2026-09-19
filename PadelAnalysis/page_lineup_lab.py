@@ -192,6 +192,18 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         own_ploeg_id = _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches)
         if not own_ploeg_id:
             return None
+        # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 (Fase D1, op verzoek van
+        # Kim: "Het zou ook handig zijn dat er een mogelijkheid is om al
+        # meteen ook andere ploegen van je poule al eens te bekijken.
+        # eventueel via apart tabblad."): bewaart het reeds opgeloste
+        # fixtures/own_ploeg_id-paar in sessie-state, zodat de nieuwe tab
+        # "🌐 Andere ploegen" (zie poule_teams_ui.py, aangeroepen vanuit
+        # page_lineup_lab() hieronder) dit kan HERGEBRUIKEN zonder de poule
+        # opnieuw te moeten laden of de eigen-ploeg-herkenning te moeten
+        # herhalen — puur een cache van reeds beschikbare data, geen nieuwe
+        # scrape/berekening.
+        st.session_state[f"vm_fixtures_{sel_player_id}"] = fixtures
+        st.session_state[f"vm_own_ploeg_id_{sel_player_id}"] = own_ploeg_id
         header_result = osu.render_scout_header(sel_player_id=str(sel_player_id), fixtures=fixtures, own_ploeg_id=own_ploeg_id)
         if not header_result:
             return None
@@ -2624,7 +2636,10 @@ def page_lineup_lab():
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
     labels = list(profile_map.keys())
     default_idx = labels.index(home_label) if home_label in labels else 0
-    tab_analyse, tab_saved = st.tabs(["🔍 Analyseren", "💾 Opgeslagen analyses"])
+    # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 (Fase D1, op verzoek van Kim):
+    # nieuw tabblad "🌐 Andere ploegen" tussen "Analyseren" en "Opgeslagen
+    # analyses" — zie poule_teams_ui.py voor de volledige implementatie.
+    tab_analyse, tab_poule, tab_saved = st.tabs(["🔍 Analyseren", "🌐 Andere ploegen", "💾 Opgeslagen analyses"])
     with tab_analyse:
         sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx, key="lineup_lab_sel_player")
         sel_profile = profile_map[sel_label]
@@ -2644,5 +2659,11 @@ def page_lineup_lab():
             if report_for_ai is not None:
                 st.divider()
                 oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
+    with tab_poule:
+        try:
+            import poule_teams_ui as ptu
+            ptu.render_poule_teams_tab(str(sel_player_id), name_lookup_global, go_to_player_fn=_go_to_player)
+        except Exception as exc:
+            st.warning(f"Kon dit tabblad niet laden: {exc}")
     with tab_saved:
         _render_saved_lineup_analyses(name_lookup_global)
