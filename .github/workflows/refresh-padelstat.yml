@@ -1,6 +1,9 @@
 # .github/workflows/refresh-padelstat.yml
 #
-# Dagelijkse, VOLLEDIG GEÏSOLEERDE controle/herstel van padelstats.be
+# Dagelijkse... nee: SINDS PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19
+# (op verzoek van Kim: "Padelstat cijfers zouden wel scheduled moeten
+# updaten. Ik wil dat wel 1 keer per week op maandag"), VOORTAAN
+# WEKELIJKSE, VOLLEDIG GEÏSOLEERDE controle/herstel van padelstats.be
 # playing strength voor alle spelers (eigen team + tegenstanders).
 #
 # Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata):
@@ -12,11 +15,24 @@
 #     staande oplossing daarvoor, om onafhankelijk van de bredere
 #     timeout-fix al te kunnen draaien.
 #
-# Verwerkt STANDAARD max 40 spelers per run (zie PADELSTAT_MAX hieronder) -
-# ruim binnen de tijdslimiet van deze workflow. Wie deze run niet aan bod
-# komt, wordt de VOLGENDE dagelijkse run opgepikt; na een paar dagen is
-# iedereen bijgewerkt (inclusief een eenmalige hercontrole van spelers wiens
-# waarde van vóór de scraper-bugfixes dateert), en blijft de run daarna kort.
+# PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19: de cron liep
+# voorheen DAGELIJKS ("7 4 * * *"). Kim wil dit expliciet nog maar 1x per
+# week (maandag) - padelstat-cijfers veranderen frequenter dan het
+# officiële klassement (dat maar 2x/jaar verandert, zie refresh-klassement-
+# biannual.yml), maar een dagelijkse controle van de VOLLEDIGE spelerslijst
+# was overkill. Verwerkt STANDAARD max 55 spelers per run (verhoogd t.o.v.
+# de vroegere 40, om ondanks de wekelijkse i.p.v. dagelijkse cadans nog
+# steeds de hele lijst snel te doorlopen) - zie PADELSTAT_MAX hieronder.
+# Wie deze run niet aan bod komt, wordt de VOLGENDE wekelijkse run
+# opgepikt.
+#
+# LET OP: naast deze wekelijkse achtergrondtaak wordt padelstat ook
+# AUTOMATISCH geforceerd ververst telkens Kim op "Tegenstander
+# analyseren"/"Verversen" klikt in de Team-analyse (zie
+# opponent_scout_ui.py: _run_scout_and_scrape() en opponent_analysis.py:
+# render_team_header()) - dat garandeert de meest actuele waarde exact op
+# het moment dat de analyse gebeurt, i.p.v. te moeten wachten op de
+# eerstvolgende maandag.
 #
 # Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
@@ -25,14 +41,16 @@
 # Handmatig testen/forceren: Actions -> Refresh padelstat -> Run workflow,
 # met desgewenst een aangepaste 'max' of 'force_all' input.
 name: Refresh padelstat (padelstats.be)
-
 on:
   schedule:
-    # Dagelijks om 04:07 UTC. Bewust NIET op scrape-padel.yml se eigen
-    # cron-tijdstip, en bewust NIET op het volle uur (zie de bekende
-    # GitHub Actions schedule-onbetrouwbaarheid rond :00). Een gemiste dag
-    # is hier onschuldig: de volgende dag pikt gewoon verder op.
-    - cron: "7 4 * * *"
+    # PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19: wekelijks, enkel
+    # op MAANDAG (cron day-of-week: 1 = maandag), om 04:07 UTC. Bewust NIET
+    # op scrape-padel.yml se eigen cron-tijdstip, en bewust NIET op het
+    # volle uur (zie de bekende GitHub Actions schedule-onbetrouwbaarheid
+    # rond :00). Een gemiste week is onschuldig: de volgende maandag pikt
+    # gewoon verder op - en elke "Tegenstander analyseren"-klik ververst
+    # ondertussen sowieso al gericht de relevante spelers (zie hierboven).
+    - cron: "7 4 * * 1"
   workflow_dispatch:
     inputs:
       max:
@@ -47,47 +65,41 @@ on:
         description: "Enkel dit ene player_id controleren (optioneel, laat leeg voor normale werking)"
         required: false
         default: ""
-
 concurrency:
   group: refresh-padelstat
   cancel-in-progress: false
-
 jobs:
   refresh:
     runs-on: ubuntu-latest
     # Ruim onder de 30-minuten-limiet die scrape-padel.yml deed vastlopen:
-    # bij PADELSTAT_MAX=40 en ~15-30s per speler blijft dit ruim binnen 20
+    # bij PADELSTAT_MAX=55 en ~15-30s per speler blijft dit ruim binnen 25
     # minuten. Expliciet begrensd zodat een onverwacht trage run wordt
-    # afgebroken i.p.v. de volgende dagelijkse run te blokkeren.
+    # afgebroken i.p.v. de volgende wekelijkse run te blokkeren.
     timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: PadelAnalysis/scraper/requirements-scraper.txt
-
       - name: Installeer dependencies
         working-directory: PadelAnalysis
         run: |
           python -m pip install --upgrade pip
           pip install -r ../requirements.txt
           pip install -r scraper/requirements-scraper.txt
-
       - name: Installeer Playwright Chromium
         working-directory: PadelAnalysis
         run: |
           python -m playwright install --with-deps chromium
-
       - name: Padelstat-controle uitvoeren
         working-directory: PadelAnalysis/scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-          PADELSTAT_MAX: ${{ github.event.inputs.max || '40' }}
+          PADELSTAT_MAX: ${{ github.event.inputs.max || '55' }}
         run: |
           ARGS="--max ${PADELSTAT_MAX}"
           if [ "${{ github.event.inputs.force_all }}" = "true" ]; then

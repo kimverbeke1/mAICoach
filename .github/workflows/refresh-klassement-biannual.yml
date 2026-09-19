@@ -1,0 +1,136 @@
+# .github/workflows/refresh-klassement-biannual.yml
+#
+# PADEL_ANALYSIS_KLASSEMENT_BIANNUAL_SCHEDULE_2026-09-19 (op verzoek van
+# Kim): het OFFICIËLE TVL-klassement verandert maar 2 keer per jaar (bij de
+# start van het zomer- en winterklassement, resp. maandag van ISO-week 27
+# en ISO-week 49). Deze workflow controleert/ververst het officiële
+# klassement van ALLE spelers met bestaande profieldata (eigen team +
+# tegenstanders), maar ENKEL rond die twee momenten - niet dagelijks, en
+# NIET bij een gewone 1-speler-refresh (zie cloud_helpers.py:
+# render_full_player_scrape_button(), waar de klassement-trigger voor een
+# losse speler-refresh bewust is weggehaald, precies omdat DEZE workflow
+# die taak nu overneemt).
+#
+# Bewust een APARTE workflow, losgekoppeld van refresh-klassement.yml (die
+# blijft dagelijks draaien voor NIEUWE spelers / zelfherstel van kapotte
+# historieken - zie de docstring van refresh_klassement_only.py en van
+# scraper/refresh_klassement_biannual.py voor de volledige toelichting over
+# hoe deze twee workflows zich tot elkaar verhouden).
+#
+# HOE HET SCHEMA WERKT (zie scraper/refresh_klassement_biannual.py voor de
+# volledige, geverifieerde datumwiskunde):
+#   - Zomerklassement-maandag (ISO-week 27) valt altijd tussen 27 juni en
+#     3 juli, afhankelijk van het jaar.
+#   - Winterklassement-maandag (ISO-week 49) valt altijd tussen 30
+#     november en 6 december, afhankelijk van het jaar.
+# Omdat GitHub Actions cron geen "N-de week van het jaar" ondersteunt, en
+# omdat deze exacte datum elk jaar verschuift, draait deze workflow
+# DAGELIJKS gedurende een RUIME veiligheidsmarge rond BEIDE mogelijke
+# datumbereiken (zie de cron-regels hieronder) - het Python-script zelf
+# berekent de EXACTE maandag voor het huidige jaar en doet op alle andere
+# dagen binnen die marge NIETS (geen enkele scrape, zie
+# refresh_klassement_biannual.current_period_id()). Dit is dus een
+# "belt-and-suspenders"-aanpak: de cron-marge vangt eventuele afwijkingen
+# op, het script zelf bepaalt de PRECIEZE activatie.
+#
+# Binnen zo'n venster wordt de volledige spelerslijst in kleine dagelijkse
+# batches verwerkt (KLASSEMENT_BIANNUAL_MAX, standaard 20/dag) - een
+# reeds-verwerkte speler wordt de volgende dag binnen hetzelfde venster
+# automatisch overgeslagen (periode-marker), dus een langere spelerslijst
+# wordt gewoon over de dagen van het venster gespreid zonder ooit dubbel
+# werk te doen of de workflow-tijdslimiet te raken.
+#
+# Vereiste repo secret (Settings -> Secrets and variables -> Actions):
+#   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als de
+#                                   andere refresh-*.yml-workflows)
+#
+# Handmatig testen/forceren: Actions -> Refresh klassement (2x/jaar) ->
+# Run workflow, met desgewenst een aangepaste 'max', 'force' of
+# 'simulate_date' input (dat laatste enkel voor testen, doet alsof
+# "vandaag" een andere datum is, zonder iets te scrapen tenzij ook
+# 'dry_run' op false staat).
+name: Refresh officieel klassement (2x per jaar - zomer/winter)
+on:
+  schedule:
+    # Zomerklassement-venster: dekt ALLE mogelijke zomer-maandagen (27
+    # juni - 3 juli) plus de veiligheidsmarge (-1 dag / +9 dagen) van het
+    # Python-script, ruim afgerond naar 26 juni t/m 14 juli.
+    - cron: "17 5 26-30 6 *"
+    - cron: "17 5 1-14 7 *"
+    # Winterklassement-venster: dekt ALLE mogelijke winter-maandagen (30
+    # november - 6 december) plus dezelfde veiligheidsmarge, ruim afgerond
+    # naar 27 november t/m 15 december.
+    - cron: "17 5 27-30 11 *"
+    - cron: "17 5 1-15 12 *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Max aantal spelers deze run"
+        required: false
+        default: "20"
+      force:
+        description: "Negeer het datumvenster EN de periode-marker (enkel voor handmatig testen/herstel, true/false)"
+        required: false
+        default: "false"
+      simulate_date:
+        description: "Doe alsof 'vandaag' deze datum is, formaat YYYY-MM-DD (enkel voor testen, laat leeg voor echte datum)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Toon enkel wie verwerkt zou worden, scrape niets (true/false)"
+        required: false
+        default: "false"
+      player:
+        description: "Enkel dit ene player_id (of komma-gescheiden lijst) controleren (optioneel, laat leeg voor normale werking)"
+        required: false
+        default: ""
+concurrency:
+  group: refresh-klassement-biannual
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Zelfde marge-redenering als refresh-klassement.yml: bij max=20 en
+    # meerdere periodes per speler (~20-40s per speler) blijft dit ruim
+    # binnen 25 minuten, ook op de dagen dat het venster actief is.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: PadelAnalysis/scraper/requirements-scraper.txt
+      - name: Installeer dependencies
+        working-directory: PadelAnalysis
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ../requirements.txt
+          pip install -r scraper/requirements-scraper.txt
+      - name: Installeer Playwright Chromium
+        working-directory: PadelAnalysis
+        run: |
+          python -m playwright install --with-deps chromium
+      - name: Officieel klassement controleren (2x/jaar-venster)
+        working-directory: PadelAnalysis/scraper
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          KLASSEMENT_BIANNUAL_MAX: ${{ github.event.inputs.max || '20' }}
+        run: |
+          ARGS="--max ${KLASSEMENT_BIANNUAL_MAX}"
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ github.event.inputs.simulate_date }}" ]; then
+            ARGS="$ARGS --simulate-date ${{ github.event.inputs.simulate_date }}"
+          fi
+          if [ -n "${{ github.event.inputs.player }}" ]; then
+            ARGS="$ARGS --player ${{ github.event.inputs.player }}"
+          fi
+          echo "Uitvoeren: python refresh_klassement_biannual.py $ARGS"
+          python refresh_klassement_biannual.py $ARGS

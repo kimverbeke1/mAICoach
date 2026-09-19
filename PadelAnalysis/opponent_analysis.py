@@ -1,5 +1,5 @@
 """
-opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v12).
+opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v13).
 
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De overzichtstabel toont per speler ZOWEL de huidige poule als de historiek
@@ -32,7 +32,6 @@ deze versie de losse functies rechtstreeks, in de NIEUWE volgorde.
 
 PADEL_ANALYSIS_REMOVE_JUMP_BUTTON_2026-09-14:
 De "👁️ Volledige spelerpagina"-knop bij Detail-per-speler is verwijderd.
-
 Verder in v9: "board" hernoemd naar "dubbel"; bordpositie-heuristiek
 volledig verwijderd.
 
@@ -54,7 +53,6 @@ ROOT CAUSE (bevestigd in team_ai_advisor.py): elke "Vraag AI"-klik startte
 een volledig nieuwe, contextloze OpenAI-conversatie - er werd nergens een
 gespreksgeschiedenis bijgehouden of meegestuurd, dus een vervolgvraag werd
 behandeld alsof het de EERSTE vraag was.
-
 FIX: render_ai_section() is herschreven tot een ECHTE chat:
   - st.session_state houdt nu een `{key_prefix}_chat_history_v12_{ploeg_id}`-
     lijst bij van {"role": "user"/"assistant", "content": str}-dicts, in
@@ -74,6 +72,36 @@ FIX: render_ai_section() is herschreven tot een ECHTE chat:
     Kim bewust opnieuw wil beginnen (bv. na een sterk gewijzigde tegenstander-
     analyse) i.p.v. impliciet door te blijven bouwen op een inmiddels
     irrelevant gesprek.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (v13, op verzoek
+van Kim: "Padelstat cijfers zouden wel scheduled moeten updaten. Ik wil dat
+wel 1 keer per week op maandag maar ook als je op analyse ploeg drukt om
+zeker de laatste waarde te hebben wanneer je dat doet.")
+--------------------------------------------------------------------------
+De "🔄 Verversen"-knop in render_team_header() herbouwde voorheen ENKEL het
+rapport uit REEDS GECACHETE Firestore-waarden (build_player_summary() leest
+gewoon de bestaande padelstat_rating/klassement_history uit) - er gebeurde
+GEEN nieuwe scrape/verversing. Dat is precies wat Kim's melding "ook als je
+op analyse ploeg drukt om zeker de laatste waarde te hebben" aankaart: een
+klik op "Verversen" gaf geen enkele garantie dat de onderliggende padelstat-
+waarde zelf recent was, enkel dat het RAPPORT de (mogelijk verouderde)
+cache opnieuw inlas.
+
+FIX: render_team_header() vraagt nu, bij elke klik op "🔄 Verversen", ook
+EXPLICIET een geforceerde padelstat-verversing aan voor de volledige
+tegenploeg-roster (via cloud_helpers.trigger_github_actions_scrape(),
+force_all="true") - VOOR het rapport herbouwd wordt. Op Cloud (Kim's
+gebruikelijke omgeving) is dit een ASYNCHRONE GitHub Actions-trigger (dus
+met de gebruikelijke 1-3 minuten vertraging van workflow_dispatch, een
+technische grens van GitHub Actions zelf, geen keuze) - het rapport dat
+DIRECT na deze klik verschijnt gebruikt dus nog de vorige waarde, maar
+_underlying_data_is_fresher() (zie hieronder, ongewijzigd) zorgt dat het
+rapport zichzelf automatisch herbouwt zodra de verse waarde binnenkomt, bij
+een volgende render van deze pagina. Dit is dezelfde asynchrone aanpak als
+_ensure_fresh_padelstat_for_roster() in opponent_scout_ui.py (bij
+"🔍 Tegenstander analyseren") - beide knoppen garanderen nu consistent een
+verse-waarde-aanvraag.
 """
 from __future__ import annotations
 
@@ -93,8 +121,18 @@ try:
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 
+try:  # cloud_helpers is optioneel aanwezig; nooit hard falen op import
+    from cloud_helpers import is_scraping_available, trigger_github_actions_scrape
+except Exception:  # pragma: no cover
+    def is_scraping_available() -> bool:
+        return False
+
+    def trigger_github_actions_scrape(**_kwargs):
+        return False, "cloud_helpers ontbreekt"
+
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v12
+REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v13
+PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 
 
 def _now_iso() -> str:
@@ -250,6 +288,40 @@ def get_team_report(
     return report
 
 
+def _trigger_fresh_padelstat_for_team(bundle: dict) -> None:
+    """PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (op verzoek
+    van Kim: "ook als je op analyse ploeg drukt om zeker de laatste waarde
+    te hebben wanneer je dat doet"): vraagt een GEFORCEERDE padelstat-
+    verversing aan voor de volledige tegenploeg-roster, ONGEACHT bestaande
+    cache. Op Cloud (gebruikelijke situatie) is dit een ASYNCHRONE GitHub
+    Actions-trigger (workflow_dispatch, 1-3 minuten vertraging - een
+    technische grens van GitHub Actions zelf); _underlying_data_is_fresher()
+    zorgt dat het rapport zichzelf automatisch herbouwt zodra de verse
+    waarde binnenkomt. Faalt dit stil (geen token geconfigureerd, workflow
+    niet herkend, ...), dan wordt enkel een korte caption getoond - dit mag
+    de rest van de 'Verversen'-actie nooit blokkeren."""
+    players = bundle.get("unique_players", []) or []
+    if not players:
+        return
+    if is_scraping_available():
+        # Lokaal: laat de bestaande, uitgebreidere lokale ververs-flows
+        # (opponent_scout_ui.py: "🔄 Ververs alles voor deze ploeg") dit
+        # afhandelen - hier enkel een korte melding, geen dubbele scrape.
+        st.caption("ℹ️ Lokaal: gebruik '🔄 Ververs alles voor deze ploeg' voor een volledige, synchrone verversing.")
+        return
+    player_ids_csv = ",".join(str(p["user_id"]) for p in players if p.get("user_id"))
+    if not player_ids_csv:
+        return
+    ok, msg = trigger_github_actions_scrape(
+        workflow_file=PADELSTAT_WORKFLOW_FILE,
+        inputs={"player": player_ids_csv, "max": str(len(players)), "force_all": "true"},
+    )
+    if ok:
+        st.caption(f"🎯 Padelstat-verversing gestart voor {len(players)} speler(s) (meestal 1-3 min).")
+    else:
+        st.caption(f"⚠️ Padelstat-verversing kon niet gestart worden: {msg}")
+
+
 def render_team_header(
     report: dict,
     bundle: dict,
@@ -261,7 +333,12 @@ def render_team_header(
     key_prefix: str = "team_analysis",
 ) -> dict:
     """Titel + 'Verversen'-knop. Geeft het (evt. na verversen NIEUWE) rapport
-    terug."""
+    terug.
+
+    PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19: vraagt nu ook
+    EXPLICIET een geforceerde padelstat-verversing aan (zie
+    _trigger_fresh_padelstat_for_team()), vóór het rapport herbouwd wordt -
+    zie module-docstring voor de volledige toelichting."""
     ploeg_id = opp.get("ploeg_id")
     state_key = f"{key_prefix}_report_v8_{ploeg_id}"
     header_col, refresh_col = st.columns([4, 1])
@@ -273,6 +350,7 @@ def render_team_header(
         )
     with refresh_col:
         if st.button("🔄 Verversen", key=f"{key_prefix}_refresh_v8_{ploeg_id}", use_container_width=True):
+            _trigger_fresh_padelstat_for_team(bundle)
             fcache.invalidate_all()
             report = _build_report(bundle, opp, all_docs, current_reeks_url, current_spelgroep_id, global_docs)
             _save_report(report)
@@ -339,7 +417,7 @@ def render_overview_and_detail(
     if missing_padelstat:
         st.caption(
             f"🎯 'Playing strength' komt van padelstats.be. Voor {missing_padelstat} speler(s) hier nog "
-            "niet opgehaald ('-' in de tabel) - dit wordt automatisch aangevuld door de dagelijkse "
+            "niet opgehaald ('-' in de tabel) - dit wordt automatisch aangevuld door de wekelijkse "
             "achtergrondtaak, of forceer het meteen via '🔄 Verversen' hierboven."
         )
     played_now = sum(p.get("matches_relevant", 0) for p in players)
@@ -404,7 +482,6 @@ def get_own_player_rating(player_id: str) -> tuple[float, str]:
 def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analysis") -> None:
     """PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14: was _render_ai_section, nu
     PUBLIEK zodat dashboard.py dit apart en HOGER op de pagina kan tonen.
-
     PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 (op verzoek van Kim: "zorg
     dat ik kan doorvragen"): houdt nu een chatgeschiedenis bij in
     st.session_state en stuurt die BIJ ELKE nieuwe vraag volledig mee naar
@@ -416,12 +493,10 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
     if taa is None:
         st.caption("AI-module niet beschikbaar (team_ai_advisor kon niet geladen worden).")
         return
-
     history_key = f"{key_prefix}_chat_history_v12_{ploeg_id}"
     if history_key not in st.session_state:
         st.session_state[history_key] = []
     history: list = st.session_state[history_key]
-
     col_start, col_clear = st.columns([3, 1])
     with col_start:
         start_label = "💡 Genereer inzichten" if not history else "💡 Genereer inzichten (nieuw gesprek)"
@@ -440,7 +515,6 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
         if history and st.button("🗑️ Nieuw gesprek", key=f"{key_prefix}_clear_chat_v12_{ploeg_id}"):
             st.session_state[history_key] = []
             st.rerun()
-
     # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: toon het VOLLEDIGE gesprek,
     # niet enkel het laatste antwoord - zo is meteen duidelijk waarop een
     # doorvraag verder bouwt.
@@ -451,7 +525,6 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
             with st.container(border=True):
                 st.markdown(f"**{role_label}**")
                 st.markdown(msg["content"])
-
     st.caption("Stel een vraag of vraag door op het antwoord hierboven:")
     question = st.text_area(
         "Jouw vraag", key=f"{key_prefix}_question_v12_{ploeg_id}", height=70,

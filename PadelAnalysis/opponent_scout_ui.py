@@ -85,7 +85,6 @@ respectievelijk foute/verouderde padelstat-waarden en de "Huidige pagina"-
 lege klassement-noodgreep uit de cookiebanner-bug in scrape_klassement.py).
 Op Cloud was er echter geen DIRECTE manier om die workflows voor een
 specifieke ploeg te triggeren zonder op de dagelijkse cron te wachten.
-
 Fix, drie onderdelen:
   1. cloud_helpers.render_cloud_scrape_trigger()/trigger_github_actions_
      scrape() zijn generiek gemaakt (workflow_file/inputs-parameters, zie
@@ -101,11 +100,41 @@ Fix, drie onderdelen:
   3. _ensure_klassement() toont nu, i.p.v. stil niets te doen, een
      expliciete caption die uitlegt dat klassement op Cloud via de
      dagelijkse achtergrondtaak (of de directe knop hierboven) binnenkomt.
-
 Beide nieuwe scripts (refresh_klassement_only.py, refresh_padelstat_only.py)
 ondersteunen sinds deze fix een KOMMA-GESCHEIDEN --player-lijst, zodat één
 workflow-run exact de gevraagde tegenstander-roster target, ongeacht de
 normale --max-batchgrootte-cap.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (op verzoek van
+Kim: "Padelstat cijfers zouden wel scheduled moeten updaten. Ik wil dat wel
+1 keer per week op maandag maar ook als je op analyse ploeg drukt om zeker
+de laatste waarde te hebben wanneer je dat doet.")
+--------------------------------------------------------------------------
+BELANGRIJK, want vroeger deed _run_scout_and_scrape() dit NOOIT: de
+padelstats.be playing strength werd bij "🔍 Tegenstander analyseren" enkel
+opgehaald als de speler nog GEEN gecachete rating had (_ensure_padelstat()
+zonder force, en enkel via de aparte "🔄 Ververs alles"-knop) - een klik op
+"Tegenstander analyseren" gaf dus GEEN garantie dat je de meest RECENTE
+waarde zag, enkel dat er OOIT ooit een waarde was opgehaald.
+
+FIX: _run_scout_and_scrape() roept nu, ONVOORWAARDELIJK en ALTIJD (niet
+enkel voor nog-onbekende spelers), een GEFORCEERDE padelstat-verversing aan
+voor de volledige tegenstander-roster, zodra die gekend is:
+  - Lokaal (can_scrape/auto_scrape True): synchroon via _ensure_padelstat(
+    ..., force=True) - dus VOOR de rest van de analyse verdergaat, dus
+    gegarandeerd de nieuwste waarde in dit scherm.
+  - Op Cloud (can_scrape False, Kim's gebruikelijke omgeving): een
+    ASYNCHRONE trigger_github_actions_scrape()-aanroep naar refresh-
+    padelstat.yml met force_all="true" voor exact deze roster. Dit is
+    NIET instant (workflow_dispatch duurt normaliter 1-3 minuten, een
+    technische grens van GitHub Actions zelf) - de trigger garandeert wel
+    dat een verse waarde ONDERWEG is, en het bestaande team-rapport
+    herbouwt zichzelf automatisch zodra die waarde binnen is (zie
+    opponent_analysis._underlying_data_is_fresher()).
+Dit vult de nieuwe WEKELIJKSE (maandag) cron van refresh-padelstat.yml aan
+(zie dat workflow-bestand) - samen dekken deze twee mechanismen zowel "op
+de achtergrond, geregeld" als "expliciet, net vóór een analyse" af.
 """
 from __future__ import annotations
 
@@ -121,13 +150,20 @@ import opponent_scout as osc
 import schedule_scraper as ss
 
 try:  # cloud_helpers is optioneel aanwezig; nooit hard falen op import
-    from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
+    from cloud_helpers import (
+        is_scraping_available,
+        render_cloud_scrape_trigger,
+        trigger_github_actions_scrape,
+    )
 except Exception:  # pragma: no cover
     def is_scraping_available() -> bool:
         return False
 
     def render_cloud_scrape_trigger(**_kwargs) -> None:
         st.caption("Cloud-trigger niet beschikbaar (cloud_helpers ontbreekt).")
+
+    def trigger_github_actions_scrape(**_kwargs):
+        return False, "cloud_helpers ontbreekt"
 
 # PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16: optionele import, zodat dit
 # bestand blijft werken ook als padelstats_scraper (Playwright-afhankelijk)
@@ -136,6 +172,10 @@ try:
     import padelstats_scraper as pss
 except Exception:  # pragma: no cover
     pss = None
+
+# PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19: naam van de
+# padelstat-workflow, zelfde als in cloud_helpers.py.
+PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -222,9 +262,14 @@ def _ensure_klassement(player_ids: list[str], progress_label: str = "Klassement"
     i.p.v. STIL niets te doen op Cloud, een expliciete caption die uitlegt
     dat klassement daar via de dagelijkse achtergrondtaak (refresh-
     klassement.yml) of de directe knop in render_scout_header() binnenkomt.
-    Dit was voorheen de ENIGE plek in dit bestand die op Cloud he-le-maal
-    niets liet blijken — zelfs _ensure_padelstat() toonde al langer een
-    caption in datzelfde geval."""
+
+    LET OP (PADEL_ANALYSIS_KLASSEMENT_BIANNUAL_SCHEDULE_2026-09-19): deze
+    functie blijft ONGEWIJZIGD gedrag vertonen (klassement ophalen voor
+    spelers die het nog NOOIT hadden - dus vooral NIEUWE spelers). Het
+    OFFICIËLE klassement van een reeds bekende speler wordt sinds deze
+    versie NIET meer hier of via een losse-speler-refresh ververst, maar
+    apart, 2x per jaar, voor de VOLLEDIGE spelerslijst (zie
+    scraper/refresh_klassement_biannual.py)."""
     if not is_scraping_available():
         st.caption(
             "📈 Klassementshistoriek wordt op deze omgeving niet lokaal opgehaald (vereist een "
@@ -289,7 +334,7 @@ def _ensure_padelstat(
     if not is_scraping_available() or pss is None:
         st.caption(
             "Padelstat automatisch ophalen niet beschikbaar in deze omgeving (vereist een lokale "
-            "browser). Dit gebeurt automatisch via de dagelijkse achtergrondtaak, of forceer het "
+            "browser). Dit gebeurt automatisch via de wekelijkse achtergrondtaak, of forceer het "
             "meteen met de knop '🎯 Playing strength nu ophalen voor deze ploeg' hierboven."
         )
         return result
@@ -345,6 +390,38 @@ def _ensure_padelstat(
     return result
 
 
+def _ensure_fresh_padelstat_for_roster(unique_players: list[dict], auto_scrape: bool) -> None:
+    """PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (op verzoek
+    van Kim: "ook als je op analyse ploeg drukt om zeker de laatste waarde
+    te hebben wanneer je dat doet"): garandeert dat elke "Tegenstander
+    analyseren"-klik een GEFORCEERDE padelstat-verversing aanvraagt voor de
+    volledige tegenstander-roster, bovenop de wekelijkse achtergrondtaak.
+
+    Lokaal (auto_scrape True): synchroon, dus de rest van dit scherm toont
+    meteen de nieuwste waarde. Op Cloud (auto_scrape False): een asynchrone
+    GitHub Actions-trigger (workflow_dispatch, 1-3 minuten vertraging - een
+    technische grens van GitHub Actions, geen keuze). In beide gevallen
+    wordt dit STIL geprobeerd (geen blokkerende foutmelding) zodat een
+    mislukte trigger de rest van de analyse niet verstoort."""
+    if not unique_players:
+        return
+    if auto_scrape:
+        st.write("Padelstat playing strength verversen (garandeert de meest recente waarde)...")
+        _ensure_padelstat(unique_players, progress_label="Padelstat", force=True)
+        return
+    player_ids_csv = ",".join(str(p["user_id"]) for p in unique_players if p.get("user_id"))
+    if not player_ids_csv:
+        return
+    ok, msg = trigger_github_actions_scrape(
+        workflow_file=PADELSTAT_WORKFLOW_FILE,
+        inputs={"player": player_ids_csv, "max": str(len(unique_players)), "force_all": "true"},
+    )
+    if ok:
+        st.write(f"🎯 Padelstat-verversing gestart voor {len(unique_players)} speler(s) (meestal 1-3 min): {msg}")
+    else:
+        st.write(f"⚠️ Padelstat-verversing kon niet gestart worden: {msg}")
+
+
 def _run_scout_and_scrape(
     fixtures: list[dict],
     opp: dict,
@@ -355,10 +432,16 @@ def _run_scout_and_scrape(
 ) -> dict:
     """Zoekt de opstelling op, scrapet meteen de onbekende spelers en haalt
     optioneel ook de klassementshistoriek op.
+
     Dit blijft het SNELLE standaardpad (enkel nieuwe/onbekende spelers,
     1 periode terug). Voor een ploeg die de eerste keer onvolledig
     binnenkwam, gebruik i.p.v. dit de aparte "Ververs alles"-knop
-    (render_team_refresh_button / _run_full_team_refresh)."""
+    (render_team_refresh_button / _run_full_team_refresh).
+
+    PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19: ververst nu
+    ALTIJD (geforceerd) de padelstat playing strength voor de volledige
+    tegenstander-roster, zodra die gekend is - zie
+    _ensure_fresh_padelstat_for_roster()."""
     with st.status("Tegenstander analyseren...", expanded=True) as status:
         st.write("Vorige wedstrijd(en) van de tegenstander opzoeken...")
         bundle = osc.scout_opponent(
@@ -405,9 +488,15 @@ def _run_scout_and_scrape(
         else:
             st.write("Alle spelers zijn al gekend qua matchdata.")
         if fetch_klassement:
-            st.write("Klassementshistoriek controleren/ophalen...")
+            st.write("Klassementshistoriek controleren/ophalen (enkel voor NOG NIET gekende spelers)...")
             all_ids = [p["user_id"] for p in bundle.get("unique_players", []) or []]
             _ensure_klassement(all_ids, progress_label="Klassement")
+        # PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19: ALTIJD,
+        # ongeacht of spelers al gekend zijn - garandeert de nieuwste
+        # padelstat-waarde exact op het moment van deze analyse.
+        _ensure_fresh_padelstat_for_roster(
+            bundle.get("unique_players", []) or [], auto_scrape=auto_scrape,
+        )
         status.update(label="Analyse afgerond", state="complete")
         return bundle
 
@@ -421,7 +510,10 @@ def _run_full_team_refresh(
     Voor ELKE speler in unique_players (ongeacht een reeds bestaand profiel):
       1. matchdata (her)scrapen met `lookback_periods` periodes;
       2. padelstat playing strength ophalen/vernieuwen;
-      3. klassementshistoriek ophalen/vernieuwen.
+      3. klassementshistoriek ophalen/vernieuwen (enkel indien nog NIET
+         gekend - zie PADEL_ANALYSIS_KLASSEMENT_BIANNUAL_SCHEDULE_2026-09-19
+         hierboven: het OFFICIËLE klassement van een reeds bekende speler
+         wordt niet meer hier ververst, maar 2x/jaar voor de volledige lijst).
     Dit is de "trage maar volledige" tegenhanger van
     osc.scrape_new_opponent_players(), specifiek om spelers te herstellen die
     al een (onvolledig) profiel hebben -- exact het scenario dat de gewone
@@ -463,7 +555,7 @@ def _run_full_team_refresh(
     progress.progress(1.0, text="Matchdata: klaar.")
     st.write("Padelstat playing strength ophalen/vernieuwen...")
     result["padelstat"] = _ensure_padelstat(unique_players, progress_label="Padelstat", force=force)
-    st.write("Klassementshistoriek ophalen/vernieuwen...")
+    st.write("Klassementshistoriek ophalen/vernieuwen (enkel voor nog niet gekende spelers)...")
     all_ids = [p["user_id"] for p in unique_players]
     _ensure_klassement(all_ids, progress_label="Klassement")
     result["klassement_gestart"] = True
@@ -472,14 +564,20 @@ def _run_full_team_refresh(
 
 def _render_cloud_klassement_padelstat_triggers(unique_players: list[dict]) -> None:
     """PADEL_ANALYSIS_CLOUD_KLASSEMENT_PADELSTAT_TRIGGER_2026-09-17.
-
     Toont, enkel wanneer scraping hier niet lokaal beschikbaar is (dus op
     Cloud) EN er al een tegenstander-roster gekend is, twee directe
     trigger-knoppen om refresh-klassement.yml en refresh-padelstat.yml
     ONMIDDELLIJK te starten voor EXACT deze ploeg — i.p.v. te moeten wachten
-    op de eerstvolgende dagelijkse cron-run. Verschijnt enkel als er een
-    GitHub-token geconfigureerd is (render_cloud_scrape_trigger regelt dat
-    zelf, toont anders gewoon niets)."""
+    op de eerstvolgende dagelijkse/wekelijkse cron-run. Verschijnt enkel als
+    er een GitHub-token geconfigureerd is (render_cloud_scrape_trigger
+    regelt dat zelf, toont anders gewoon niets).
+
+    LET OP (PADEL_ANALYSIS_KLASSEMENT_BIANNUAL_SCHEDULE_2026-09-19): de
+    klassement-knop hieronder blijft bestaan voor het GERICHT ophalen van
+    klassement voor NIEUWE/nog onvolledige spelers in deze ploeg (dat is
+    een ander doel dan de nieuwe 2x/jaar-taak voor de VOLLEDIGE
+    spelerslijst, zie refresh_klassement_biannual.py) - deze knop blijft
+    dus nuttig en is bewust NIET verwijderd."""
     if not unique_players:
         return
     player_ids_csv = ",".join(str(p["user_id"]) for p in unique_players if p.get("user_id"))
@@ -494,17 +592,20 @@ def _render_cloud_klassement_padelstat_triggers(unique_players: list[dict]) -> N
             label="📈 Klassement nu ophalen voor deze ploeg",
             help_text=(
                 "Start refresh-klassement.yml op GitHub Actions voor exact deze tegenstander-spelers "
-                "(duurt meestal enkele minuten, i.p.v. te wachten op de dagelijkse run)."
+                "(duurt meestal enkele minuten, i.p.v. te wachten op de dagelijkse run). Gebruik dit "
+                "voor NIEUWE/onvolledige spelers - het reeds bekende officiële klassement van bestaande "
+                "spelers wordt apart, 2x per jaar, voor de volledige lijst ververst."
             ),
         )
     with col_padelstat:
         render_cloud_scrape_trigger(
             key_prefix="scout_padelstat_trigger",
             workflow_file="refresh-padelstat.yml",
-            inputs={"player": player_ids_csv, "max": str(len(unique_players)), "force_all": "false"},
+            inputs={"player": player_ids_csv, "max": str(len(unique_players)), "force_all": "true"},
             label="🎯 Playing strength nu ophalen voor deze ploeg",
             help_text=(
-                "Start refresh-padelstat.yml op GitHub Actions voor exact deze tegenstander-spelers."
+                "Start refresh-padelstat.yml op GitHub Actions voor exact deze tegenstander-spelers "
+                "(force_all=true, dus altijd een verse waarde, ongeacht cache)."
             ),
         )
 
@@ -533,27 +634,25 @@ def render_scout_header(
         return None
     opp = ss.opponent_of(next_match, own_ploeg_id)
     opp["spelgroep_id"] = next_match.get("spelgroep_id")
-
     st.markdown(
         f"**{next_match['date_text']}** - tegen **{opp['name']}** "
         f"({next_match.get('poule_label', '')})"
     )
-
     scout_key = f"scout_{opp['ploeg_id']}_{next_match['date_text']}"
     can_scrape = is_scraping_available()
     fetch_klassement = False
     if not can_scrape:
         st.caption(
-            "Deze omgeving kan zelf niet scrapen. Nieuwe spelers, playing strength en klassement "
-            "worden opgehaald via de dagelijkse achtergrondtaken op GitHub Actions, of forceer dat "
-            "hieronder direct voor deze ploeg."
+            "Deze omgeving kan zelf niet scrapen. Nieuwe spelers en klassement worden opgehaald via "
+            "de dagelijkse achtergrondtaken op GitHub Actions, of forceer dat hieronder direct voor "
+            "deze ploeg. Padelstat playing strength wordt bij elke analyse ALTIJD automatisch "
+            "geforceerd ververst (zie caption hieronder na de analyse)."
         )
     else:
         fetch_klassement = st.checkbox(
-            "📈 Ook klassementshistoriek ophalen (lokaal, ±30-60s per nog onbekende speler)",
+            "📈 Ook klassementshistoriek ophalen voor nog onbekende spelers (lokaal, ±30-60s per speler)",
             value=True, key=f"fetch_klassement_{sel_player_id}",
         )
-
     col_scout, col_refresh = st.columns([2, 2])
     with col_scout:
         if st.button("🔍 Tegenstander analyseren", key=f"btn_scout_{sel_player_id}", type="primary"):
@@ -561,9 +660,7 @@ def render_scout_header(
                 fixtures, opp, next_match, lookback,
                 auto_scrape=can_scrape, fetch_klassement=fetch_klassement,
             )
-
     bundle = st.session_state.get(scout_key)
-
     # PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16: enkel tonen zodra er al
     # een bundle is (we moeten weten wie de spelers zijn) en enkel lokaal.
     with col_refresh:
@@ -572,10 +669,9 @@ def render_scout_header(
                 "🔄 Ververs alles voor deze ploeg",
                 key=f"btn_full_refresh_{sel_player_id}",
                 help=(
-                    "Herhaalt matchdata (meerdere periodes), padelstat en "
-                    "klassement voor ALLE spelers van deze ploeg, ook wie al "
-                    "een (onvolledig) profiel heeft. Trager dan 'Tegenstander "
-                    "analyseren', maar slaat niemand over."
+                    "Herhaalt matchdata (meerdere periodes) en padelstat voor ALLE spelers van deze "
+                    "ploeg, ook wie al een (onvolledig) profiel heeft. Klassement enkel voor wie dat "
+                    "nog nooit had. Trager dan 'Tegenstander analyseren', maar slaat niemand over."
                 ),
             ):
                 with st.status("Volledige ploeg verversen...", expanded=True) as status:
@@ -596,7 +692,6 @@ def render_scout_header(
                     status.update(label="Volledige ploeg ververst", state="complete")
                 _load_all_player_docs.clear()
                 st.rerun()
-
     if not bundle:
         return None
     if bundle.get("note"):
@@ -605,14 +700,12 @@ def render_scout_header(
             "Zonder historische tegenstander-data kan enkel de eigen ploeg-sterkte "
             "getoond worden, niet die van hen."
         )
-
     # PADEL_ANALYSIS_CLOUD_KLASSEMENT_PADELSTAT_TRIGGER_2026-09-17: op Cloud
     # (can_scrape False) tonen we hier de directe GitHub Actions-triggers
     # i.p.v. de lokale "Ververs alles"-knop hierboven, die op Cloud nooit
     # verschijnt.
     if bundle.get("unique_players") and not can_scrape:
         _render_cloud_klassement_padelstat_triggers(bundle["unique_players"])
-
     # PADEL_ANALYSIS_TEAM_FULL_REFRESH_2026-09-16: signaleer expliciet als
     # er, ondanks een bestaande bundle, nog spelers met onvolledige data
     # tussen zitten -- dit is precies het signaal dat "Ververs alles" nodig
@@ -632,9 +725,9 @@ def render_scout_header(
                 else:
                     st.caption(
                         "Gebruik de knoppen '📈 Klassement nu ophalen' / '🎯 Playing strength nu ophalen' "
-                        "hierboven om dit direct op te lossen, of wacht op de dagelijkse achtergrondtaak."
+                        "hierboven om dit direct op te lossen, of wacht op de dagelijkse/wekelijkse "
+                        "achtergrondtaak."
                     )
-
     return bundle, opp
 
 
