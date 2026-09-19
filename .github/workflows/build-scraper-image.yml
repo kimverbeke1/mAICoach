@@ -1,0 +1,68 @@
+# .github/workflows/build-scraper-image.yml
+#
+# PADEL_ANALYSIS_PREBUILT_DOCKER_IMAGE_2026-09-19 (op verzoek van Kim: "docker
+# image" - performance-item uit de roadmap, prioriteit E).
+#
+# Bouwt en publiceert het vooraf-gebouwde scraper-image (zie
+# PadelAnalysis/scraper/Dockerfile) naar GitHub Container Registry (GHCR).
+# Draait automatisch zodra de dependencies of het Dockerfile zelf wijzigen,
+# en kan altijd ook handmatig herbouwd worden (bv. na een Playwright-upgrade).
+#
+# De 4 scrape/refresh-workflows (scrape-padel.yml, refresh-padelstat.yml,
+# refresh-klassement.yml, refresh-klassement-biannual.yml) gebruiken het
+# resultaat via `container: image: ghcr.io/kimverbeke1/padelanalysis-scraper`
+# - zij installeren zelf NIETS meer, enkel `actions/checkout` + het
+# scraper-script draaien.
+#
+# Vereist GEEN extra repo secret: gebruikt de ingebouwde GITHUB_TOKEN, die
+# standaard "packages: write"-rechten krijgt zodra dat expliciet hieronder
+# wordt aangevraagd (zie "permissions:").
+name: Build padel scraper image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "requirements.txt"
+      - "PadelAnalysis/scraper/requirements-scraper.txt"
+      - "PadelAnalysis/scraper/Dockerfile"
+      - ".github/workflows/build-scraper-image.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/kimverbeke1/padelanalysis-scraper
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in bij GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build en push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: PadelAnalysis/scraper/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # GitHub Actions-eigen build-cache (gratis, sneller dan telkens
+          # elke laag opnieuw te bouwen bij een nieuwe requirements-wijziging).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

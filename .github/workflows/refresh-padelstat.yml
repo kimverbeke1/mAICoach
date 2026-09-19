@@ -1,10 +1,7 @@
 # .github/workflows/refresh-padelstat.yml
 #
-# Sinds PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19 (op verzoek van
-# Kim: "Padelstat cijfers zouden wel scheduled moeten updaten. Ik wil dat wel
-# 1 keer per week op maandag"), VOORTAAN WEKELIJKSE, VOLLEDIG GEÏSOLEERDE
-# controle/herstel van padelstats.be playing strength voor alle spelers
-# (eigen team + tegenstanders).
+# Wekelijkse (elke maandag), volledig geïsoleerde controle/herstel van
+# padelstats.be playing strength voor alle spelers (eigen team + tegenstanders).
 #
 # Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata):
 #   - scrape-padel.yml liep vast op de 30-minuten-limiet naarmate de
@@ -15,16 +12,8 @@
 #     staande oplossing daarvoor, om onafhankelijk van de bredere
 #     timeout-fix al te kunnen draaien.
 #
-# PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19: de cron liep
-# voorheen DAGELIJKS ("7 4 * * *"). Kim wil dit expliciet nog maar 1x per
-# week (maandag) - padelstat-cijfers veranderen frequenter dan het
-# officiële klassement (dat maar 2x/jaar verandert, zie refresh-klassement-
-# biannual.yml), maar een dagelijkse controle van de VOLLEDIGE spelerslijst
-# was overkill. Verwerkt STANDAARD max 55 spelers per run (verhoogd t.o.v.
-# de vroegere 40, om ondanks de wekelijkse i.p.v. dagelijkse cadans nog
-# steeds de hele lijst snel te doorlopen) - zie PADELSTAT_MAX hieronder.
-# Wie deze run niet aan bod komt, wordt de VOLGENDE wekelijkse run
-# opgepikt.
+# Verwerkt STANDAARD max 55 spelers per run (zie PADELSTAT_MAX hieronder).
+# Wie deze run niet aan bod komt, wordt de VOLGENDE wekelijkse run opgepikt.
 #
 # LET OP: naast deze wekelijkse achtergrondtaak wordt padelstat ook
 # AUTOMATISCH geforceerd ververst telkens Kim op "Tegenstander
@@ -35,30 +24,21 @@
 # eerstvolgende maandag.
 #
 # --------------------------------------------------------------------------
-# PADEL_ANALYSIS_WORKFLOW_SPEEDUP_2026-09-19 (Fase E, op verzoek van Kim:
-# "Bij het runnen via die actions op github moet hij eerst altijd python en
-# vanalles installeren. de scrape actie zelf is relatief kort. bestaat er
-# een mogelijkheid om al die installaties al dan niet over te slaan of al
-# dan niet klaar te zetten op voorhand. ik wil de scraping tijd verkorten.")
+# PADEL_ANALYSIS_PREBUILT_DOCKER_IMAGE_2026-09-19 (op verzoek van Kim: "docker
+# image" - performance-item)
 # --------------------------------------------------------------------------
-# BEVINDING: scrape-padel.yml had SINDS 2026-09-07 (v2) al een venv-/
-# Playwright-browsercache (zie de "Cache Python-venv"/"Cache Playwright-
-# browserbinaries"-stappen daar), maar DEZE workflow (en refresh-klassement.
-# yml / refresh-klassement-biannual.yml) waren daar NOOIT mee bijgewerkt -
-# elke run deed hier nog STEEDS een volledige "pip install" + een volledige
-# "playwright install --with-deps chromium" (de dominante tijdskost, ~150-
-# 300MB download), OOK als er sinds de vorige run niets aan de dependencies
-# gewijzigd was.
-# FIX: dezelfde venv-/Playwright-browsercache-stappen als scrape-padel.yml
-# EN search-player.yml, 1-op-1 overgenomen (zelfde cache-key-opbouw, zodat
-# alle vier de workflows dezelfde cache-entries kunnen HERGEBRUIKEN i.p.v.
-# elk hun eigen, aparte cache te onderhouden). Op een warme run (cache-hit,
-# het gangbare geval) wordt de dependency-installatie en de Chromium-
-# download VOLLEDIG overgeslagen - enkel de OS-libraries (snel, geen
-# download) worden nog gezet. Dit verkort de opstarttijd van deze workflow
-# tot ongeveer hetzelfde niveau als scrape-padel.yml.
+# ROOT CAUSE opgelost: deze workflow installeerde tot nu toe, bij ELKE run,
+# vanaf nul de Python-dependencies EN de Chromium-browserbinary via
+# `playwright install --with-deps chromium` - ZONDER enige cache (in
+# tegenstelling tot scrape-padel.yml, dat wel al een cache-laag had). Dat
+# kostte structureel 1-2 minuten pure setup-tijd, elke week opnieuw, los van
+# het eigenlijke padelstat-scrapen.
+# FIX: draait voortaan rechtstreeks in het vooraf-gebouwde image (zie
+# PadelAnalysis/scraper/Dockerfile + .github/workflows/build-scraper-image.yml),
+# waarin de Python-dependencies EN de Chromium-browserbinary AL geïnstalleerd
+# zitten. Geen enkele installatiestap meer nodig.
 #
-# Vereist repo secret (Settings -> Secrets and variables -> Actions):
+# Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
 #                                   scrape-padel.yml/sync-mAIcoach.yml)
 #
@@ -67,13 +47,13 @@
 name: Refresh padelstat (padelstats.be)
 on:
   schedule:
-    # PADEL_ANALYSIS_PADELSTAT_WEEKLY_SCHEDULE_2026-09-19: wekelijks, enkel
-    # op MAANDAG (cron day-of-week: 1 = maandag), om 04:07 UTC. Bewust NIET
-    # op scrape-padel.yml se eigen cron-tijdstip, en bewust NIET op het
-    # volle uur (zie de bekende GitHub Actions schedule-onbetrouwbaarheid
-    # rond :00). Een gemiste week is onschuldig: de volgende maandag pikt
-    # gewoon verder op - en elke "Tegenstander analyseren"-klik ververst
-    # ondertussen sowieso al gericht de relevante spelers (zie hierboven).
+    # Wekelijks, enkel op MAANDAG (cron day-of-week: 1 = maandag), om 04:07
+    # UTC. Bewust NIET op scrape-padel.yml se eigen cron-tijdstip, en bewust
+    # NIET op het volle uur (zie de bekende GitHub Actions
+    # schedule-onbetrouwbaarheid rond :00). Een gemiste week is onschuldig:
+    # de volgende maandag pikt gewoon verder op - en elke "Tegenstander
+    # analyseren"-klik ververst ondertussen sowieso al gericht de relevante
+    # spelers (zie hierboven).
     - cron: "7 4 * * 1"
   workflow_dispatch:
     inputs:
@@ -100,77 +80,20 @@ jobs:
     # minuten. Expliciet begrensd zodat een onverwacht trage run wordt
     # afgebroken i.p.v. de volgende wekelijkse run te blokkeren.
     timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: PadelAnalysis/scraper
+    container:
+      image: ghcr.io/kimverbeke1/padelanalysis-scraper:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: |
-            requirements.txt
-            PadelAnalysis/scraper/requirements-scraper.txt
-      # ── Volledige venv-cache (PADEL_ANALYSIS_WORKFLOW_SPEEDUP_2026-09-19:
-      # identiek aan scrape-padel.yml/search-player.yml, zelfde cache-key -
-      # hergebruikt dezelfde cache-entry over alle workflows heen). ────────
-      - name: Cache Python-venv (alle pip-packages + playwright)
-        id: cache-venv
-        uses: actions/cache@v4
-        with:
-          path: PadelAnalysis/scraper/.venv
-          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('requirements.txt', 'PadelAnalysis/scraper/requirements-scraper.txt') }}
-      - name: Bouw venv + installeer dependencies (alleen bij cache-miss)
-        if: steps.cache-venv.outputs.cache-hit != 'true'
-        run: |
-          python -m venv .venv
-          . .venv/bin/activate
-          python -m pip install --upgrade pip
-          pip install -r ../../requirements.txt
-          pip install -r requirements-scraper.txt
-      - name: Bevestig venv aanwezig (warme run)
-        if: steps.cache-venv.outputs.cache-hit == 'true'
-        run: |
-          echo "Venv-cache-hit: pip install volledig overgeslagen."
-          . .venv/bin/activate
-          python -c "import playwright, bs4, requests; print('deps OK uit cache')"
-      # ── Playwright-browsercache (identiek aan scrape-padel.yml) ─────────
-      - name: Bepaal Playwright-versie (voor cache-key)
-        id: playwright-version
-        run: |
-          . .venv/bin/activate
-          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright-browserbinaries
-        id: cache-playwright
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright browsers (Chromium binary + OS-libraries)
-        # Enkel bij een cache-miss: downloadt de Chromium-binary én zet de
-        # OS-libraries. Dit is de dominante tijdskost op een koude run.
-        if: steps.cache-playwright.outputs.cache-hit != 'true'
-        run: |
-          . .venv/bin/activate
-          python -m playwright install --with-deps chromium
-      - name: Installeer enkel OS-libraries (bij browser-cache-hit)
-        # Bij een cache-hit is de browserbinary al aanwezig (uit de cache),
-        # maar de OS-libraries staan niet in die map en zijn op een verse
-        # runner telkens opnieuw nodig. Deze stap zet enkel die system-deps
-        # (snel), zonder de browserbinary opnieuw te downloaden.
-        if: steps.cache-playwright.outputs.cache-hit == 'true'
-        run: |
-          . .venv/bin/activate
-          python -m playwright install-deps chromium
       - name: Padelstat-controle uitvoeren
+        working-directory: PadelAnalysis/scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           PADELSTAT_MAX: ${{ github.event.inputs.max || '55' }}
         run: |
-          . .venv/bin/activate
           ARGS="--max ${PADELSTAT_MAX}"
           if [ "${{ github.event.inputs.force_all }}" = "true" ]; then
             ARGS="$ARGS --force-all"
