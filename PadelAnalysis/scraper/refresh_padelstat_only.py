@@ -2,7 +2,7 @@
 """
 refresh_padelstat_only.py — geïsoleerd script dat UITSLUITEND de
 padelstats.be playing strength van alle spelers (eigen team + tegenstanders)
-controleert/herstelt. Doet NIETS met matchdata, klassement of poule-schema's.
+controleert/herstelt. Doet NIETS met matchdata of poule-schema's.
 Locatie: PadelAnalysis/scraper/refresh_padelstat_only.py
 (naast enrich_opponents.py / ci_scrape_all.py, zelfde path-setup patroon)
 --------------------------------------------------------------------------
@@ -141,12 +141,19 @@ FIX: een speler zonder GEKENDE club (existing_club leeg EN geen
 club_override actief voor deze speler) wordt NIET meer opgezocht op
 padelstats.be. In plaats daarvan komt die speler in een aparte
 "club_onbekend"-lijst in de samenvatting terecht, met een duidelijke
-log-regel die vraagt om de club/ploeg voor deze speler in te stellen (bv.
-via de nieuwe club-invoer bij de per-speler-knop in cloud_helpers.py, of
-handmatig in de Spelers-pagina). Dit telt NIET mee als "fout" of "niet
-gevonden" (dat zijn andere, bestaande statussen) — het is een expliciet
-DERDE resultaat: "we hebben het bewust niet geprobeerd, want te riskant
-zonder club".
+log-regel die vraagt om de club/ploeg voor deze speler in te stellen.
+Dit telt NIET mee als "fout" of "niet gevonden" (dat zijn andere,
+bestaande statussen) — het is een expliciet DERDE resultaat: "we hebben
+het bewust niet geprobeerd, want te riskant zonder club".
+LET OP (PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20, zie dashboard_common.py
+voor de UI-kant van deze fix): tot voor kort bestond er NERGENS in de app
+een plek om dit "club"-veld voor een EIGEN speler te bekijken of te
+wijzigen - waardoor bv. Kim's eigen playing strength/officieel klassement
+NOOIT ververst werd zolang zijn eigen profiel geen club had, ZONDER dat dit
+ergens zichtbaar/oplosbaar was buiten deze log-regel. Dat is nu opgelost
+via dashboard_common._render_club_editor() (zichtbaar op "🔍 Spelers" EN
+"👤 Mijn profiel") en _maybe_autodetect_own_club() (automatische afleiding
+uit de herkende teamnaam in een poule).
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20 (op verzoek van Kim: "bij
 veel scrapen riskeer ik blokkeren en ook te lange tijd. Periodiek mag mss
@@ -173,57 +180,48 @@ FIX, twee onderdelen:
      bekend (nieuw), (d) rating ouder dan de staleness-drempel (periodiek
      herhalen). Dit garandeert dat een nieuw ontdekte tegenstander sneller
      aan bod komt dan het "gewoon opnieuw verversen"-quotum.
-"STOP DIRECT ALS DE DATA AL ACTUEEL IS": dit was Kim's expliciete vraag.
-De juiste plek hiervoor is VÓÓR de scrape, niet erna — needs_check()
-hierboven bepaalt dit: een speler die noch verouderd qua logic-version,
-noch zonder rating, noch ouder dan de staleness-drempel is, wordt NOOIT in
-`te_verwerken` opgenomen en er wordt dus ook NOOIT een Playwright-sessie
-voor hem/haar gestart. Dat is de meest doeltreffende invulling van "stop
-direct" — geen scrape ooit beginnen die niet nodig is, in plaats van een
-lopende scrape halverwege af te breken.
 Dit script wordt nu bedoeld om ELK UUR te draaien (zie de bijgewerkte
-refresh-padelstat.yml), met een STANDAARD max van 2 spelers per run — een
-bewust kleine batch om nooit als een plotse vlaag van verkeer op te vallen
-en de looptijd ruim binnen enkele minuten te houden. Bij bv. 150 gekende
-spelers en een 14-dagen-cyclus betekent dit dat elke speler gemiddeld om de
-~50 uur (~2 dagen) opnieuw gecontroleerd wordt, ruim vaak genoeg voor een
-playing-strength-waarde die niet elk uur verandert.
-_all_profiles() las AL, ongewijzigd, de VOLLEDIGE player_profiles-collectie
-(eigen team + alle reeds ingestelde tegenstanders) — "rekening houden met
-alle spelers van mijn tegenstanders die al ingesteld zijn" was dus al
-gedekt, geen aanpassing nodig.
+refresh-padelstat.yml), met een STANDAARD max van 2 spelers per run.
 --------------------------------------------------------------------------
-GEBRUIK
+PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_REFRESH_SCRIPT_FIX_2026-09-20
+(op verzoek van Kim: "de refresh padelstat update niet mijn officieel
+klassement. bekijk dat aub.")
 --------------------------------------------------------------------------
-    python refresh_padelstat_only.py --dry-run
-    python refresh_padelstat_only.py
-    python refresh_padelstat_only.py --max 2                       (uurlijkse batch-grootte)
-    python refresh_padelstat_only.py --max 60
-    python refresh_padelstat_only.py --player 1759548              (1 speler, altijd)
-    python refresh_padelstat_only.py --player 111,222,333          (meerdere spelers, altijd)
-    python refresh_padelstat_only.py --force-all --max 20          (iedereen herzien)
-    python refresh_padelstat_only.py --player 111,222,333 --club "T.C. VOORBEELD"  (ploeg met gekende club)
-    python refresh_padelstat_only.py --stale-days 30               (periodieke cyclus vertragen)
+ROOT CAUSE (bevestigd, en dit is een aparte, eerder gemiste plek): op
+2026-09-20 werd firebase_service.save_official_klassement_from_padelstat()
+toegevoegd, en enrich_opponents.run_padelstat_for_players() (gebruikt door
+de BULK-workflow ci_scrape_all.py) riep die functie sindsdien al aan. MAAR
+dit bestand - refresh_padelstat_only.py, het bestand dat DAADWERKELIJK door
+refresh-padelstat.yml (de aparte, elk-uur/wekelijkse padelstat-workflow)
+wordt uitgevoerd - is een VOLLEDIG ONAFHANKELIJK script (zie de module-
+docstring hierboven: "bewust losgekoppeld van ci_scrape_all.py") en riep
+enrich_opponents.py NERGENS aan. De eerdere fix (in enrich_opponents.py)
+had dus GEEN enkel effect op de reguliere, geplande padelstat-verversing -
+enkel op een eventuele BULK-run via ci_scrape_all.py, die zelden/nooit de
+weg is waarlangs playing strength in de praktijk ververst wordt.
+FIX: refresh_one() hieronder roept, ONMIDDELLIJK na een geslaagde
+fb.save_padelstat_rating()-aanroep, ALS de padelstats.be-zoekresultaatkaart
+een "matched_klassement" bevatte (het officiële TVL-klassement, bv. "P200"
+in "P200 • PADEL FACTORY" - zie padelstats_scraper.py), ook
+fb.save_official_klassement_from_padelstat() aan. Dit betekent dat VANAF
+NU elke reguliere/geplande padelstat-verversing (dus ook de uurlijkse
+trickle-refresh) het officiële klassement mee actueel houdt - niet enkel
+een eventuele, zelden gebruikte bulk-run.
 """
 from __future__ import annotations
-
 import logging
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
 for _p in [str(_HERE), str(_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
 import firebase_service as fb  # noqa: E402
-
 logger = logging.getLogger(__name__)
-
 # Verhogen bij een volgende fix in padelstats_scraper.py die een nieuwe,
 # algehele hercontrole van ALLE spelers rechtvaardigt (zelfherstel-trigger).
 PADELSTAT_LOGIC_VERSION = "v2-clubwordmatch-consentretry-2026-09-16"
@@ -235,19 +233,13 @@ DEFAULT_PAUSE_SECONDS = 1.5
 # i.p.v. een eenmalige zelfherstel-actie. Zelfde default als het analoge
 # mechanisme in enrich_opponents.PADELSTAT_STALE_AFTER_DAYS.
 DEFAULT_STALE_AFTER_DAYS = 14
-
-
 def _norm_id(value) -> str:
     text = str(value or "").strip()
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
     return text
-
-
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
 def _parse_iso(value) -> Optional[datetime]:
     if not value:
         return None
@@ -259,16 +251,12 @@ def _parse_iso(value) -> Optional[datetime]:
         return dt
     except Exception:  # noqa: BLE001
         return None
-
-
 def _all_profiles() -> list:
     try:
         return fb.search_player_profiles("", limit=10_000) or []
     except Exception as e:  # noqa: BLE001
         logger.error(f"Kon profielen niet lezen: {e}")
         return []
-
-
 def _rating_age_days(player_id: str) -> Optional[float]:
     """PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20: leeftijd (in dagen)
     van de bestaande padelstat-rating, op basis van "fetched_at"
@@ -285,8 +273,6 @@ def _rating_age_days(player_id: str) -> Optional[float]:
     if fetched_at is None:
         return None
     return (datetime.now(timezone.utc) - fetched_at).total_seconds() / 86400
-
-
 def needs_check(
     profile: dict, force_all: bool = False, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
 ) -> tuple[bool, str]:
@@ -320,8 +306,6 @@ def needs_check(
         if age_days is None or age_days > stale_after_days:
             return True, "periodiek te verversen (rating ouder dan drempel)"
     return False, "al gecontroleerd met huidige scraper-versie, nog actueel"
-
-
 def select_players_to_process(
     profiles: list,
     max_per_run: int,
@@ -358,12 +342,20 @@ def select_players_to_process(
     }
     kandidaten.sort(key=lambda item: prioriteit.get(item[1], 9))
     return [p for p, _ in kandidaten[:max_per_run]]
-
-
 def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> dict:
     """Voert de effectieve padelstats.be-opzoeking uit voor 1 speler en
     stempelt het resultaat met PADELSTAT_LOGIC_VERSION (zelfherstel-marker),
     ONGEACHT of er al eerder een (mogelijk foute) waarde stond.
+    PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_REFRESH_SCRIPT_FIX_
+    2026-09-20 (op verzoek van Kim: "de refresh padelstat update niet mijn
+    officieel klassement"): naast de playing-strength-cache (rating) wordt
+    nu ook, ALS de zoekresultaatkaart een officieel klassement bevatte
+    (gevonden["matched_klassement"], bv. "P200" in "P200 • PADEL FACTORY"),
+    fb.save_official_klassement_from_padelstat() aangeroepen - dit was de
+    ONTBREKENDE schakel: dit bestand (niet enrich_opponents.py) is het
+    script dat de ECHTE, geplande padelstat-workflow uitvoert, en riep tot
+    nu toe enkel save_padelstat_rating() aan, nooit de klassement-upsert.
+    Zie de module-docstring voor de volledige root-cause-analyse.
     LET OP: de club-verplichting (PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_
     2026-09-20) wordt VOOR deze functie gecontroleerd (in run()), niet hier
     -- deze functie zelf gaat er dus van uit dat `club` al gevalideerd is
@@ -371,7 +363,10 @@ def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> 
     mag worden (nooit meer het geval sinds die fix, maar de functie blijft
     zelf herbruikbaar/testbaar zonder die aanname hard te coderen)."""
     import padelstats_scraper as pss  # lazy: enkel nodig als deze stap draait
-    result = {"player_id": player_id, "naam": naam, "status": None, "rating": None, "note": None}
+    result = {
+        "player_id": player_id, "naam": naam, "status": None, "rating": None,
+        "note": None, "official_klassement": None,
+    }
     try:
         gevonden = pss.search_and_fetch_padelstat_rating(naam, club=club or None)
     except Exception as e:  # noqa: BLE001
@@ -385,8 +380,9 @@ def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> 
         return result
     result["status"] = "opgehaald"
     result["rating"] = gevonden.get("rating")
-    if gevonden.get("club_disambiguation_note"):
-        result["note"] = gevonden["club_disambiguation_note"]
+    club_disambiguation_note = gevonden.get("club_disambiguation_note")
+    if club_disambiguation_note:
+        result["note"] = club_disambiguation_note
     if not dry_run:
         try:
             fb.save_padelstat_rating(
@@ -395,15 +391,27 @@ def refresh_one(player_id: str, naam: str, club: str, dry_run: bool = False) -> 
                 gevonden.get("rating"),
                 gevonden.get("rating_source", "none"),
                 gevonden.get("raw_text_snippet", ""),
+                matched_klassement=gevonden.get("matched_klassement"),
+                club_confirmed=not bool(club_disambiguation_note),
             )
         except Exception as e:  # noqa: BLE001
             result["status"] = "opslaan_mislukt"
             result["note"] = str(e)
             return result
+        # PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_REFRESH_SCRIPT_
+        # FIX_2026-09-20: de ONTBREKENDE schakel - zie functiedocstring.
+        matched_klassement = gevonden.get("matched_klassement")
+        if matched_klassement is not None:
+            try:
+                fb.save_official_klassement_from_padelstat(
+                    player_id, matched_klassement,
+                    club_confirmed=not bool(club_disambiguation_note),
+                )
+                result["official_klassement"] = matched_klassement
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[{player_id}] Kon officieel klassement niet opslaan: {e}")
         _stamp_checked(player_id, found=True)
     return result
-
-
 def _stamp_checked(player_id: str, found: bool) -> None:
     """Zet de versie-marker + tijdstempel, ONGEACHT of er een waarde
     gevonden werd -- ook 'niet gevonden' is een geldig, bewust resultaat dat
@@ -421,8 +429,6 @@ def _stamp_checked(player_id: str, found: bool) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[{player_id}] Kon versie-stempel niet wegschrijven: {e}")
-
-
 def _backfill_club(player_id: str, club: str) -> None:
     """PADEL_ANALYSIS_CLUB_OVERRIDE_2026-09-19: schrijft de via --club/CLUB
     meegegeven waarde WEG naar het player_profiles-document, maar ENKEL voor
@@ -437,8 +443,6 @@ def _backfill_club(player_id: str, club: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[{player_id}] Kon club niet backfillen: {e}")
-
-
 def run(
     max_per_run: int = DEFAULT_MAX_PER_RUN,
     pause_seconds: float = DEFAULT_PAUSE_SECONDS,
@@ -456,10 +460,17 @@ def run(
     toepassen van een eventuele club_override, ALSNOG geen club gekend voor
     een speler, dan wordt die speler NIET opgezocht op padelstats.be — te
     riskant bij gelijknamige spelers (zie module-docstring). Zulke spelers
-    komen in de nieuwe "club_onbekend"-lijst in de samenvatting terecht.
+    komen in de nieuwe "club_onbekend"-lijst in de samenvatting terecht -
+    zie ook dashboard_common._render_club_editor()/_maybe_autodetect_own_
+    club() voor de nieuwe UI-plek waar dit voor een eigen speler opgelost
+    kan worden.
     PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20: `stale_after_days`
     bepaalt na hoeveel dagen een reeds actuele rating ALSNOG periodiek
-    opnieuw gecontroleerd wordt (zie needs_check())."""
+    opnieuw gecontroleerd wordt (zie needs_check()).
+    PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_REFRESH_SCRIPT_FIX_
+    2026-09-20: de samenvatting bevat nu ook "officieel_klassement_
+    opgehaald" - het aantal spelers waarvoor deze run ook het officiële
+    TVL-klassement kon bijwerken (zie refresh_one())."""
     profiles = _all_profiles()
     # Telling van ALLE kandidaten (voor rapportage), los van de max-cap.
     # Zelfde filter als select_players_to_process (player_id + display_name
@@ -516,8 +527,8 @@ def run(
             club_onbekend.append({"player_id": pid, "naam": naam})
             logger.warning(
                 f"({i}/{len(te_verwerken)}) {naam} ({pid}) -> club onbekend, NIET opgezocht op "
-                "padelstats.be. Stel de club/ploeg in voor deze speler (bv. via de per-speler-"
-                "verversknop) en probeer opnieuw."
+                "padelstats.be. Stel de club/ploeg in voor deze speler (via '🏟️ Club/ploeg' op "
+                "'🔍 Spelers' of '👤 Mijn profiel' in de app) en probeer opnieuw."
             )
             continue
         used_override = bool(club_override and not existing_club)
@@ -529,7 +540,8 @@ def run(
         resultaten.append(r)
         if r["status"] == "opgehaald":
             note = f" — {r['note']}" if r.get("note") else ""
-            logger.info(f"  -> P{r['rating']}{note}")
+            klass_txt = f", officieel P{r['official_klassement']}" if r.get("official_klassement") is not None else ""
+            logger.info(f"  -> P{r['rating']}{klass_txt}{note}")
         elif r["status"] == "niet_gevonden":
             logger.info("  -> niet gevonden op padelstats.be")
         else:
@@ -540,7 +552,8 @@ def run(
         namen = ", ".join(f"{x['naam']} ({x['player_id']})" for x in club_onbekend)
         logger.warning(
             f"{len(club_onbekend)} speler(s) overgeslagen wegens onbekende club: {namen}. "
-            "Stel de club/ploeg in voor deze speler(s) om playing strength alsnog te kunnen ophalen."
+            "Stel de club/ploeg in voor deze speler(s) om playing strength/officieel klassement "
+            "alsnog te kunnen ophalen."
         )
     samenvatting = {
         "totaal_profielen": len(profiles),
@@ -549,21 +562,19 @@ def run(
         "opgehaald": sum(1 for r in resultaten if r["status"] == "opgehaald"),
         "niet_gevonden": sum(1 for r in resultaten if r["status"] == "niet_gevonden"),
         "fout": sum(1 for r in resultaten if r["status"] in ("fout", "opslaan_mislukt")),
+        "officieel_klassement_opgehaald": sum(1 for r in resultaten if r.get("official_klassement") is not None),
         "club_onbekend": club_onbekend,
         "resterend_na_deze_run": max(0, len(alle_kandidaten) - len(te_verwerken) - len(club_onbekend)),
         "resultaten": resultaten,
     }
     return samenvatting
-
-
 if __name__ == "__main__":
     import argparse
     import os
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     parser = argparse.ArgumentParser(
-        description="Controleert/herstelt de padelstats.be playing strength van alle spelers, "
-                    "los van matchdata- of poule-scraping."
+        description="Controleert/herstelt de padelstats.be playing strength (+ officieel klassement) "
+                    "van alle spelers, los van matchdata- of poule-scraping."
     )
     parser.add_argument("--max", type=int, default=int(os.environ.get("PADELSTAT_MAX", DEFAULT_MAX_PER_RUN)),
                         help=f"Max aantal spelers deze run (standaard {DEFAULT_MAX_PER_RUN}, of env PADELSTAT_MAX).")
@@ -607,6 +618,7 @@ if __name__ == "__main__":
     print(f"Verwerkt deze run        : {resultaat['deze_run']}")
     if not args.dry_run:
         print(f"  Opgehaald              : {resultaat.get('opgehaald', 0)}")
+        print(f"  Officieel klassement   : {resultaat.get('officieel_klassement_opgehaald', 0)}")
         print(f"  Niet gevonden          : {resultaat.get('niet_gevonden', 0)}")
         print(f"  Fout                   : {resultaat.get('fout', 0)}")
         club_onbekend = resultaat.get("club_onbekend") or []
