@@ -67,10 +67,11 @@ variant van _build_url(), voor UI-modules die enkel een LINK naar de
 officiële TVL-klassementberekeningspagina willen tonen (niet zelf scrapen).
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19 (op verzoek van
-Kim, chat 2026-09-19: "ik merk nu plots bij mijn profiel dat ik P100 zou
-zijn. dat klopt niet, ik ben P200. Ik wel virtueel P100 op dit moment.
-bekijk of je dit goed ophaalt. andres is dat verkeerd vooralle spelers")
+PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19 (v1, op
+verzoek van Kim, chat 2026-09-19: "ik merk nu plots bij mijn profiel dat ik
+P100 zou zijn. dat klopt niet, ik ben P200. Ik wel virtueel P100 op dit
+moment. bekijk of je dit goed ophaalt. andres is dat verkeerd vooralle
+spelers")
 --------------------------------------------------------------------------
 ROOT CAUSE (bevestigd, incl. via de officiële TVL-FAQ "virtueel klassement"):
 Tennis en Padel Vlaanderen onderscheidt EXPLICIET drie aparte cijfers per
@@ -81,56 +82,55 @@ berekening zal ontvangen [...] dit is een voorspelling op basis van de
 huidige parameters, het kan zijn dat het klassement bij de definitieve
 berekening afwijkt" - https://www.tennisenpadelvlaanderen.be/padel/
 klassementen-virtueel).
-
 klassement_to_history_summary() gebruikte voor de MEEST RECENTE (huidige)
 periode tot nu toe _dominant_level(p) als EERSTE keuze - een cijfer afgeleid
 uit de "niveau_data"-tabel (per niveau: winstratio + aantal_matchen). Die
 tabel is EXPLICIET GEEN klassement-veld, maar een ruwe WEDSTRIJDENTELLING
-per niveau - en is bovendien AANTOONBAAR VERTEKEND richting lagere niveaus,
-want de officiële berekeningsmethode (https://www.tennisenpadelvlaanderen.be/
-padel/klassementen-berekening) bevestigt: "Winstmatchen op hogere niveaus
-dan je klassement worden mee als winstmatch opgenomen op het niveau van je
-eigen klassement EN hogere niveaus" - een speler op P200 die wint van P300-
-tegenstanders krijgt dus AUTOMATISCH ook tabelrijen op P200, P250, P300,
-terwijl zijn VERLIESmatchen op zijn eigen niveau ENKEL op dat eigen niveau
-tellen. Bij een speler met wisselend niveau van tegenstanders kan het
-"dominante" (meest voorkomende) niveau in die tabel dus compleet AFWIJKEN
-van het daadwerkelijke, officiële klassement - exact wat Kim meldde (P100
-i.p.v. het officiële P200).
+per niveau - en is bovendien AANTOONBAAR VERTEKEND richting lagere niveaus
+(zie de officiële berekeningsmethode-pagina).
+Dit is een STRUCTURELE bug die voor ELKE speler gold, niet enkel voor Kim's
+eigen profiel.
 
-Dit is een STRUCTURELE bug die voor ELKE speler gold (bevestigd door Kim se
-eigen vraag "andres is dat verkeerd vooralle spelers" - JA, dat klopt), niet
-enkel voor Kim's eigen profiel: elke speler wiens "dominante niveau" in de
-tabel toevallig niet overeenkwam met hun echte, officiële klassement toonde
-een fout cijfer als "Huidig klassement" door de hele app heen (Team-analyse,
-Opstelling-analyse, Mijn profiel, Spelers-pagina - render_player_summary_
-inline() is de ENE, centrale plek die dit toont, zie opponent_dossier.py).
-
-FIX, twee onderdelen:
-  1. klassement_to_history_summary(): voor de HUIDIGE periode (i==0) is de
-     prioriteitsvolgorde nu VOLLEDIG OMGEDRAAID t.o.v. de vorige versie:
-     EERST de EXPLICIETE, uit tekst geparsede klassement-velden
-     (selected_period_klassement, dan vorig_klassement, dan
-     berekend_klassement), en _dominant_level() nu ENKEL als ALLERLAATSTE
-     fallback (wanneer GEEN ENKEL expliciet veld iets opleverde - beter een
-     onzekere proxy dan helemaal geen cijfer). vorig_klassement ("Klassement
-     vorige periode" op de TVL-pagina) is het klassement waarmee de HUIDIGE
-     periode begon en dus, zolang de eerstvolgende officiële berekening nog
-     niet heeft plaatsgevonden, het officiële, ACTUEEL GELDIGE klassement -
-     exact wat Kim's P200 vertegenwoordigt.
-  2. NIEUW, transparant "virtueel"-veld: elke periode-rij in de output krijgt
-     nu ook "virtueel_klassement" mee (= berekend_klassement, de "Nieuw
-     klassement"-tekst op de TVL-pagina - de projectie voor de eerstvolgende
-     berekening). Dit cijfer wordt NIET meer verzwegen (het simpelweg
-     wegfilteren zou net zo'n black-box-probleem zijn als het per ongeluk
-     als "huidig" tonen) - opponent_dossier.py toont dit voortaan APART en
-     duidelijk gelabeld, naast (niet in plaats van) het officiële "Huidig
-     klassement". Zie PADEL_ANALYSIS_LINEUP_TRANSPARENCY_2026-09-19 (ander
-     bestand) voor hetzelfde transparantieprincipe: nooit een berekend
-     cijfer verstoppen, altijd het exacte, brongegeven expliciet tonen.
-Enkel de MEEST RECENTE periode (i==0) heeft een zinvol "virtueel" cijfer -
-oudere, reeds afgesloten periodes hebben geen op-til-zijnde berekening meer,
-dus "virtueel_klassement" is voor i>0 bewust altijd None.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-20 (v2, CORRECTIE
+OP DE V1-FIX HIERBOVEN — op verzoek van Kim, chat 2026-09-20: "mijn profiel
+geupdate maar ik zie nog steeds P100. moet P200 zijn")
+--------------------------------------------------------------------------
+BUG IN DE V1-FIX (opgelost, met excuses): de v1-fix zette de prioriteit
+voor de huidige periode op:
+    selected_period_klassement -> vorig_klassement -> begin_klassement
+    -> berekend_klassement -> _dominant_level(p)
+Na hertesten (Kim herverserste zijn profiel, bleef toch P100 tonen) bleek
+dat "selected_period_klassement" (geparsed uit "Klassement van de
+geselecteerde periode" / "Huidig klassement"-tekst op de TVL-pagina) ZELF
+OOK het VIRTUELE/voorlopige cijfer kan weergeven wanneer de GESELECTEERDE
+periode de HUIDIGE, nog LOPENDE periode is - de TVL-pagina herberekent dat
+"huidig klassement"-label kennelijk LIVE op basis van de tot-nu-toe-
+behaalde resultaten binnen die lopende periode, exact zoals het virtuele
+klassement gedefinieerd is. Dit verklaart waarom de v1-fix het probleem
+niet volledig oploste: de nieuwe EERSTE keuze (selected_period_klassement)
+kon dus, voor de HUIDIGE periode, evengoed de virtuele P100 bevatten in
+plaats van de officiële P200.
+"vorig_klassement" ("Klassement vorige periode" op de TVL-pagina) is
+daarentegen het klassement waarmee de HUIDIGE periode BEGON (dus het
+resultaat van de VORIGE, reeds AFGESLOTEN officiële berekening) - dit
+cijfer verandert NIET zolang de eerstvolgende officiële berekening niet
+heeft plaatsgevonden, en is dus het enige veld dat GARANDEERD het
+OFFICIEEL GELDIGE klassement weergeeft. Dit is bovendien EXACT hetzelfde
+veld/dezelfde betekenis als al werd gebruikt voor OUDERE periodes (i>0):
+`newer.get("vorig_klassement")` daar geeft precies de klassement-waarde
+van de OUDERE periode weer (= het klassement gedurende de nieuwere periode
+carried over) - de v2-fix hieronder maakt de i==0-logica hiermee
+consistent: periode 0's EIGEN vorig_klassement representeert nu, op
+dezelfde manier, het klassement dat gedurende periode 0 gold/geldt.
+FIX v2: prioriteitsvolgorde voor de huidige periode (i==0) is nu:
+    vorig_klassement (EERST, GEGARANDEERD officieel/geldig)
+    -> selected_period_klassement (kan virtueel zijn, dus enkel fallback)
+    -> begin_klassement
+    -> berekend_klassement
+    -> _dominant_level(p) (allerlaatste, minst betrouwbare fallback)
+"virtueel_klassement" (= berekend_klassement) blijft ongewijzigd apart
+bewaard en getoond (zie opponent_dossier.py), voor volledige transparantie.
 """
 from __future__ import annotations
 import argparse, json, logging, re, time
@@ -341,6 +341,11 @@ def _extract_selected_period_klassement_from_text(text: str) -> str | None:
     Haalt het klassement van de GESELECTEERDE periode uit de padel-form.
     Belangrijk: niet 'vorig klassement' en niet willekeurige P-waarden uit winrate-rijen nemen.
     We zoeken expliciet naar labels rond 'geselecteerde periode'.
+    LET OP (PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-20):
+    dit veld kan, wanneer de GESELECTEERDE periode de huidige/lopende
+    periode is, het VIRTUELE (voorlopige) cijfer bevatten i.p.v. het
+    officiële - zie module-docstring. klassement_to_history_summary()
+    gebruikt dit daarom NIET meer als eerste keuze voor de huidige periode.
     """
     clean = _clean(text)
     patterns = [
@@ -456,27 +461,28 @@ def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_per
 def klassement_to_history_summary(periods):
     """
     Compacte historiek voor dashboard.py.
-    PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19 (op verzoek
-    van Kim: "ik merk nu plots bij mijn profiel dat ik P100 zou zijn. dat
-    klopt niet, ik ben P200. Ik wel virtueel P100 op dit moment. [...] andres
-    is dat verkeerd vooralle spelers"): ZIE MODULE-DOCSTRING voor de
-    volledige root-cause-analyse (TVL onderscheidt expliciet "vorig",
-    "huidig" en "virtueel" klassement; _dominant_level() weerspiegelde
-    het VIRTUELE/vertekende cijfer, niet het officiële).
+    PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19/20 (v2, op
+    verzoek van Kim, chat 2026-09-20: "mijn profiel geupdate maar ik zie
+    nog steeds P100. moet P200 zijn"): ZIE MODULE-DOCSTRING voor de
+    volledige, TWEEDE root-cause-analyse (de v1-fix zette per ongeluk
+    selected_period_klassement als eerste keuze, maar dat veld kan ZELF
+    ook het virtuele cijfer bevatten wanneer de huidige/lopende periode
+    geselecteerd is).
 
     Reconstructie op basis van TVL-output:
-    - De nieuwste (huidige) periode krijgt voortaan het OFFICIËLE, expliciet
-      geparsede klassement (selected_period_klassement -> vorig_klassement
-      -> berekend_klassement, in die volgorde) - _dominant_level() is nu
-      ENKEL de ALLERLAATSTE fallback (nooit meer de EERSTE keuze).
+    - De nieuwste (huidige) periode krijgt voortaan EERST het EIGEN
+      vorig_klassement (GEGARANDEERD het officieel geldige klassement,
+      want dit is het cijfer waarmee de periode BEGON en dat niet wijzigt
+      tot de eerstvolgende officiële berekening) - pas daarna, als
+      fallback, selected_period_klassement/begin_klassement/
+      berekend_klassement, en _dominant_level() ALLERLAATST.
     - Oudere periodes krijgen ONGEWIJZIGD het vorig_klassement van de
-      eerstvolgende nieuwere periode.
-    - NIEUW: elke periode-rij krijgt ook "virtueel_klassement" mee
-      (= berekend_klassement, enkel gevuld voor de HUIDIGE/meest recente
-      periode - oudere, afgesloten periodes hebben geen op-til-zijnde
-      berekening meer) - zodat de voorspelling/projectie APART en
-      transparant zichtbaar blijft, i.p.v. verward te worden met het
-      officiële klassement.
+      eerstvolgende nieuwere periode (dit was al correct en blijft
+      identiek - de v2-fix maakt periode 0 nu consistent met dezelfde,
+      reeds bewezen juiste logica).
+    - "virtueel_klassement" (= berekend_klassement, enkel gevuld voor de
+      HUIDIGE/meest recente periode) blijft ongewijzigd apart bewaard,
+      voor volledige transparantie (zie opponent_dossier.py).
     """
     def _dominant_level(period):
         scores = {}
@@ -502,15 +508,15 @@ def klassement_to_history_summary(periods):
         # AFGESLOTEN periode (i>0) heeft geen op-til-zijnde berekening meer.
         virtueel_klassement = p.get("berekend_klassement") if i == 0 else None
         if i == 0:
-            # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19:
-            # prioriteit VOLLEDIG omgedraaid t.o.v. de vorige versie - de
-            # EXPLICIETE, uit tekst geparsede klassement-velden komen nu
-            # EERST; _dominant_level() (de vertekende, niveau_data-
-            # gebaseerde proxy) is nu de ALLERLAATSTE fallback, nooit meer
-            # de eerste keuze.
+            # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-20
+            # (v2, CORRECTIE): vorig_klassement is nu de EERSTE keuze - dit
+            # is het enige veld dat GEGARANDEERD het officiële, geldige
+            # klassement weergeeft (zie module-docstring). selected_period_
+            # klassement staat nu LAGER, want dat kan zelf ook virtueel
+            # blijken te zijn voor de lopende periode.
             klassement = (
-                p.get("selected_period_klassement")
-                or p.get("vorig_klassement")
+                p.get("vorig_klassement")
+                or p.get("selected_period_klassement")
                 or p.get("begin_klassement")
                 or p.get("berekend_klassement")
                 or _dominant_level(p)
