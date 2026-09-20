@@ -2,51 +2,41 @@
 ci_scrape_all.py — GitHub Actions entrypoint voor het (op aanvraag) verversen
 van PadelAnalysis-spelers via Firestore, zonder Streamlit en zonder lokaal
 firebase-key.json bestand.
-
 Locatie: PadelAnalysis/scraper/ci_scrape_all.py (naast scrape_player.py,
 zelfde path-setup patroon).
-
 Firebase-credentials komen uit de environment variable
 FIREBASE_SERVICE_ACCOUNT_JSON (GitHub Actions secret), ingelezen via
 firebase_service._load_env_credentials(). Lokaal blijft firebase-key.json
 gewoon werken (fallback), en op Streamlit Cloud blijft st.secrets werken.
-
 Welke spelers scrapen (env var PLAYER_IDS):
     - Leeg (standaard)       -> alle spelers uit player_profiles.
     - Komma-gescheiden lijst -> enkel die player_id's, bv. "214435,198221".
-
 Welke periodes/spelers effectief gescraped worden (env var MODE):
     - "missing" (standaard) -> ENKEL periodes die nog nooit gescraped zijn.
     - "new_users"           -> scrape ENKEL spelers die nog nooit eerder
       gescraped zijn (geen bestaand document in de 'players'-collectie).
     - "full"                -> forceer een volledige herscrape van alle
       periodes voor de opgegeven spelers (traag, normaal niet nodig).
-
 PADEL_ANALYSIS_AUTO_POULE_UPDATE_2026-09-14:
 NA de matchdata-scrape wordt voor diezelfde lijst spelers ook
 poule_playwright.update_player_poule() aangeroepen. Zie ENABLE_POULE_UPDATE
 / POULE_FORCE.
-
 PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15:
 update_player_poule() slaat naast de voorronde-fixtures ook de
 EINDRONDE-bracket op, en scopet de voorronde op de eigen pouleId.
 Zie POULE_EINDRONDE.
-
 PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15:
 Na de matchdata-scrape worden tegenstanders/partners zonder profiel
 ontdekt (discover_opponent_players), krijgen ze een profiel, en wordt hun
 padelstats.be playing strength opgehaald — automatisch, in dezelfde run.
-
 PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16:
 Idem, maar dan voor de TVL-klassementshistoriek (aparte, lagere limiet
 KLASSEMENT_MAX omdat elke speler een volledige Playwright-sessie kost).
-
 PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 ("worst case"):
 discover_opponent_players() beperkt zich standaard tot interclub-matches
 (ENABLE_ENRICH/interclub_only), en spelers MET bestaande matchdata krijgen
 voorrang op ghost-profielen wanneer een *_MAX-limiet spelers moet laten
 wachten.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -54,13 +44,11 @@ BUG (opgelost): "het padelstat getal zal voortdurend wijzigen. moet dus
 regelmatig geupdate worden. checken als dat werkt". Dat werkte NIET: een
 speler met eenmaal een gecachete padelstat-rating werd voor ALTIJD
 overgeslagen in elke volgende run, ongeacht hoe oud die waarde was.
-
 Fix (kern zit in enrich_opponents.py): run_padelstat_for_players() ververst
 nu automatisch ook ratings die ouder zijn dan PADELSTAT_STALE_DAYS, niet
 enkel volledig ontbrekende. Nieuwe env var:
     - PADELSTAT_STALE_DAYS (getal, standaard 14): na hoeveel dagen een
       bestaande padelstat-rating automatisch opnieuw wordt opgehaald.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -69,7 +57,6 @@ zie dat de scraper heel wat spelers aan het verversen is (en niet Stijn
 Mortier wegens beperking in aantal). [...] ik zie nu weer een heleboel
 nieuwe spelers in mijn spelerslijst. [...] bedoeling is dat enkel die
 speler ververst wordt (id speler meegeven)."
-
 ROOT CAUSE: de knop "Scrape deze speler nu" (cloud_helpers.py) triggert
 deze workflow met PLAYER_IDS=<1 speler>. main() riep tot nu toe ALTIJD
 run_enrichment(player_ids) aan (zodra ENABLE_ENRICH=true, standaard),
@@ -83,14 +70,12 @@ dingen voor een 1-speler-aanvraag:
      een (mogelijk foutieve/verouderde) klassement_history staan, dan werd
      die speler NOOIT opnieuw geprobeerd, terwijl de nieuw ontdekte ghost-
      profielen wél het gedeelde KLASSEMENT_MAX-budget opsouperen.
-
 FIX: wanneer PLAYER_IDS na filtering exact 1 speler bevat, wordt nu
 run_single_player_enrichment() aangeroepen i.p.v. run_enrichment(): dat
 ververst ENKEL en ALTIJD (cache genegeerd) padelstat + klassement voor
 die ene speler, zonder discovery/nieuwe profielen. Bij 2+ spelers (bv. de
 dagelijkse cron, of een bewuste bulk-refresh) blijft het bestaande gedrag
 (met discovery/enrichment) volledig ongewijzigd.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19 (Fase E, op verzoek van Kim,
 chat 2026-09-19: "check ci_scrape_all.py en de refresh_*_only.py-scripts
@@ -101,61 +86,91 @@ Fase E, deel 1 — de venv-/Playwright-cache in de workflow-yml's): dit
 bestand had, IN TEGENSTELLING TOT bijna elke andere instelling hier
 (PADELSTAT_MAX, KLASSEMENT_MAX, PADELSTAT_STALE_DAYS, ...), twee HARDCODED
 wachttijd-constanten (DELAY_BETWEEN_PLAYERS, DELAY_BETWEEN_POULE_UPDATES,
-elk 3.0s) die NIET via een environment variable aan te passen waren. Bij
-bv. 15 spelers in de nachtelijke poule-pre-scan (zie discover_poule_
-players.py/prescan-poule.yml, Fase D2) kost dat alleen al 15×3s + 15×3s =
-90s PURE wachttijd, zonder dat Kim dit ooit kon bijstellen zonder de code
-te wijzigen.
-
-Geen enkel bestand in de scraper (padelstats_scraper.py, scrape_player.py,
-fetch_period_playwright.py, enrich_opponents.py, refresh_padelstat_only.py,
-refresh_klassement_only.py, refresh_klassement_biannual.py) bevat een
-letterlijke "5 seconden"-sleep — de dichtstbijzijnde waarde is
-fetch_period_playwright.py's `select_option(..., timeout=5000)`, maar dat
-is een MAXIMALE wachttijd voor een Playwright-actie (hoe lang er hooguit
-op gewacht wordt), geen vaste sleep — een periode-wissel die normaal
-verloopt, duurt doorgaans veel korter dan die 5000ms-limiet.
-
+elk 3.0s) die NIET via een environment variable aan te passen waren.
 FIX: DELAY_BETWEEN_PLAYERS en DELAY_BETWEEN_POULE_UPDATES zijn nu
 overrideable via de nieuwe env vars DELAY_BETWEEN_PLAYERS_SECONDS /
-DELAY_BETWEEN_POULE_UPDATES_SECONDS (default ONGEWIJZIGD: 3.0s voor beide)
-— consistent met het bestaande configuratiepatroon van dit bestand. Dit
-verandert NIETS aan het standaardgedrag; het geeft enkel de mogelijkheid om
-dit per workflow-run te verlagen (bv. testen met 1.5s) ZONDER de code te
-moeten aanpassen.
-
-⚠️ BELANGRIJKE WAARSCHUWING (bewust NIET zomaar verlaagd als default): deze
-pauzes zijn een BEWUSTE beleefdheids-/rate-limiting-maatregel tegenover
-tennisenpadelvlaanderen.be, niet enkel "willekeurige vertraging". Een te
-lage waarde riskeert dat de site verzoeken als geautomatiseerd/verdacht
-herkent en (tijdelijk) blokkeert — wat de VOLLEDIGE scrape-pijplijn zou
-kunnen breken, een veel groter tijdverlies dan de paar seconden die je nu
-bespaart. Verlaag dit dus enkel bewust, bij voorkeur eerst getest met een
-kleine batch (bv. --player <1 id> of PLAYER_IDS met een paar spelers).
+DELAY_BETWEEN_POULE_UPDATES_SECONDS (default ONGEWIJZIGD: 3.0s voor beide).
+⚠️ Deze pauzes zijn een BEWUSTE beleefdheids-/rate-limiting-maatregel
+tegenover tennisenpadelvlaanderen.be — verlaag dit dus enkel bewust, bij
+voorkeur eerst getest met een kleine batch.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19 (op verzoek van Kim, chat
+2026-09-19: "weer veel profielen die aangemaakt worden :-( bekijk dat
+grondig dat dat niet meer gebeurt")
+--------------------------------------------------------------------------
+ROOT CAUSE (in enrich_opponents.py, zie de uitgebreide toelichting daar):
+discover_opponent_players() scande tot nu toe de VOLLEDIGE matchhistoriek
+van elke gescrapete speler (tot 2017 terug, 16 periodes) om tegenstanders
+te ontdekken — vandaar 141 nieuwe ghost-profielen na het verversen van
+slechts 4 spelers in Kim's log. Verwijderde ghost-profielen kwamen daardoor
+telkens terug zodra ook maar 1 speler die ooit tegen hen speelde opnieuw
+gescraped werd.
+FIX (destijds): enrich_opponents.discover_opponent_players() beperkt zich
+sindsdien tot de N meest recente periodes per speler (DISCOVERY_RECENT_
+PERIODS, standaard 2). Zie PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_
+2026-09-20 hieronder voor de vervolg-fix: dit bleek niet voldoende, omdat
+één period_label in de praktijk een heel interclubseizoen omvat.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20 (op verzoek van Kim,
+chat 2026-09-20: "bij de run padel scraper nog steeds probleem dat teveel
+profielen toegevoegd worden" — 279 nieuwe profielen na een run van 5
+spelers met amper +1/+2/+2/+1/+0 nieuwe matches)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd, zie enrich_opponents.py voor de volledige analyse):
+een period_label zoals "Resultaten van week 27/2026 tot en met week
+48/2026" omvat een VOLLEDIG interclubseizoen (22 weken) - de recency-limiet
+van 2026-09-19 beperkte discovery dus in de praktijk tot "vrijwel het
+volledige huidige+vorige seizoen", niet tot een paar recente wedstrijden.
+FIX: run_match_scrapes() verzamelt nu, per speler, de matchrecords die
+scrape_player() teruggeeft als "new_matches_this_run" (zie scrape_player.py
+PADEL_ANALYSIS_NEW_MATCHES_THIS_RUN_2026-09-20) en geeft die als
+new_matches_by_player mee aan run_enrichment()/eo.enrich(). Discovery scant
+voortaan UITSLUITEND die effectief nieuwe matches i.p.v. alles binnen een
+brede periode-naam - zie enrich_opponents.discover_opponent_players() voor
+de volledige toelichting. Met een TypeError-fallback (zelfde patroon als de
+bestaande discovery_recent_periods-fallback) voor het geval
+enrich_opponents.py toevallig niet mee bijgewerkt is.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 (op verzoek van
+Kim: "aangezien we toch al het padelstat klassement scrapen van padelstat.be
+zou ik willen voorstellen om het officieel klassement ook al meteen van
+daar te scrapen. Dan moet die scraping van 2 keer per jaar niet meer
+gebeuren aangezien padelstat toch regelmatig refresht.")
+--------------------------------------------------------------------------
+run_padelstat_for_players() (enrich_opponents.py) haalt sindsdien, als
+bijproduct van elke reguliere padelstat-ophaling, ook het officiële TVL-
+klassement op (zie daar). Daarom verandert hier de DEFAULT van
+ENABLE_KLASSEMENT van True naar False: de aparte, tragere TVL-klassement-
+scrape (scrape_klassement.py, een volledige Playwright-sessie per speler,
+en momenteel bovendien geblokkeerd door bot-detectie op
+tennisenpadelvlaanderen.be) is niet langer nodig in de REGULIERE/dagelijkse
+run. Deze blijft wél volledig beschikbaar en nuttig voor de MEERDERE-
+periodes-historiek-grafiek (die padelstat niet kan leveren) - zet
+ENABLE_KLASSEMENT=true expliciet in een incidentele/handmatige of 2x-per-
+jaar geplande workflow-run wanneer je die volledige historiek wil
+verversen. Dit is een BEWUSTE gedragswijziging (geen stille default-tweak
+"onder de motorkap"): ze is expliciet hier gedocumenteerd en zichtbaar in
+de log (zie main()) zodra ENABLE_KLASSEMENT niet expliciet is meegegeven.
 """
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-
 # --- path setup: zelfde patroon als scrape_player.py ---
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
 for _p in [str(_HERE), str(_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
 import firebase_service as fb
 from scrape_player import scrape_player
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("ci_scrape_all")
-
 # PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: dit zijn nog steeds de
 # DEFAULT-waarden (ongewijzigd, 3.0s) — zie get_delay_between_players()/
 # get_delay_between_poule_updates() hieronder voor de env-overrideable
@@ -164,8 +179,12 @@ DELAY_BETWEEN_PLAYERS = 3.0
 DELAY_BETWEEN_POULE_UPDATES = 3.0
 VALID_MODES = ("missing", "new_users", "full")
 DEFAULT_MODE = "missing"
-
-
+# PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: default hier BEWUST
+# gelijk gehouden aan enrich_opponents.DISCOVERY_RECENT_PERIODS_DEFAULT
+# (los gedefinieerd i.p.v. geïmporteerd, want deze module mag niet hard
+# falen als enrich_opponents.py toevallig ontbreekt/ouder is - zie de
+# bestaande lazy-import + TypeError-fallback-structuur in run_enrichment()).
+DEFAULT_DISCOVERY_RECENT_PERIODS = 2
 def get_all_player_ids() -> list:
     """Alle player_id's uit player_profiles."""
     docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()
@@ -176,8 +195,6 @@ def get_all_player_ids() -> list:
         if pid:
             ids.append(str(pid))
     return ids
-
-
 def get_requested_player_ids() -> list:
     """Bepaalt WELKE spelers deze run in aanmerking neemt."""
     raw = os.environ.get("PLAYER_IDS", "").strip()
@@ -188,23 +205,17 @@ def get_requested_player_ids() -> list:
         return get_all_player_ids()
     logger.info(f"Specifieke spelers aangevraagd via PLAYER_IDS: {requested}")
     return requested
-
-
 def get_mode() -> str:
     mode = os.environ.get("MODE", DEFAULT_MODE).strip().lower() or DEFAULT_MODE
     if mode not in VALID_MODES:
         logger.warning(f"Onbekende MODE '{mode}', val terug op '{DEFAULT_MODE}'.")
         return DEFAULT_MODE
     return mode
-
-
 def _get_bool_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
 def _get_int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -214,8 +225,6 @@ def _get_int_env(name: str, default: int) -> int:
     except ValueError:
         logger.warning(f"{name}='{raw}' is geen getal, val terug op {default}.")
         return default
-
-
 def _get_float_env(name: str, default: float) -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: analoog aan
     _get_int_env(), maar voor de nieuwe, floating-point wachttijd-env-vars."""
@@ -227,70 +236,56 @@ def _get_float_env(name: str, default: float) -> float:
     except ValueError:
         logger.warning(f"{name}='{raw}' is geen getal, val terug op {default}.")
         return default
-
-
 def get_poule_update_enabled() -> bool:
     return _get_bool_env("ENABLE_POULE_UPDATE", True)
-
-
 def get_poule_force() -> bool:
     return _get_bool_env("POULE_FORCE", False)
-
-
 def get_poule_eindronde() -> bool:
     return _get_bool_env("POULE_EINDRONDE", True)
-
-
 def get_enrich_enabled() -> bool:
     return _get_bool_env("ENABLE_ENRICH", True)
-
-
 def get_padelstat_enabled() -> bool:
     return _get_bool_env("ENABLE_PADELSTAT", True)
-
-
 def get_padelstat_refresh() -> bool:
     return _get_bool_env("PADELSTAT_REFRESH", False)
-
-
 def get_padelstat_max() -> int:
     return _get_int_env("PADELSTAT_MAX", 25)
-
-
 def get_padelstat_stale_days() -> int:
     """PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16."""
     return _get_int_env("PADELSTAT_STALE_DAYS", 14)
-
-
 def get_klassement_enabled() -> bool:
-    return _get_bool_env("ENABLE_KLASSEMENT", True)
-
-
+    """PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20: default
+    gewijzigd van True naar False. run_padelstat_for_players() haalt het
+    officiële klassement (snapshot) sindsdien al op als bijproduct van de
+    padelstat-verversing die hieronder (ENABLE_PADELSTAT) sowieso al
+    standaard aanstaat - de aparte, tragere TVL-scrape (volledige
+    meerdere-periodes-historiek, een hele Playwright-sessie per speler) is
+    daarom niet langer nodig in de REGULIERE run. Zet ENABLE_KLASSEMENT=true
+    expliciet voor een incidentele/2x-per-jaar-run die de volledige
+    historiek-grafiek wil verversen."""
+    return _get_bool_env("ENABLE_KLASSEMENT", False)
 def get_klassement_refresh() -> bool:
     return _get_bool_env("KLASSEMENT_REFRESH", False)
-
-
 def get_klassement_max() -> int:
     return _get_int_env("KLASSEMENT_MAX", 8)
-
-
 def get_enrich_scrape_new() -> bool:
     return _get_bool_env("ENRICH_SCRAPE_NEW", False)
-
-
 def get_delay_between_players() -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
     versie van DELAY_BETWEEN_PLAYERS (default ONGEWIJZIGD, 3.0s). Zie de
     module-docstring voor de waarschuwing tegen te agressief verlagen."""
     return _get_float_env("DELAY_BETWEEN_PLAYERS_SECONDS", DELAY_BETWEEN_PLAYERS)
-
-
 def get_delay_between_poule_updates() -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
     versie van DELAY_BETWEEN_POULE_UPDATES (default ONGEWIJZIGD, 3.0s)."""
     return _get_float_env("DELAY_BETWEEN_POULE_UPDATES_SECONDS", DELAY_BETWEEN_POULE_UPDATES)
-
-
+def get_discovery_recent_periods() -> int:
+    """PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: beperkt het
+    ontdekken van nieuwe tegenstander-profielen tot de N meest recente
+    periodes per speler (standaard 2), als AANVULLENDE cap op de nieuwe
+    new-matches-only-discovery (zie PADEL_ANALYSIS_NEW_MATCHES_ONLY_
+    DISCOVERY_2026-09-20). Zet op 0 voor het oude, onbeperkte gedrag."""
+    return _get_int_env("DISCOVERY_RECENT_PERIODS", DEFAULT_DISCOVERY_RECENT_PERIODS)
 def filter_by_mode(player_ids: list, mode: str) -> list:
     """Mode-specifieke voorselectie VOOR het scrapen begint."""
     if mode != "new_users":
@@ -308,27 +303,40 @@ def filter_by_mode(player_ids: list, mode: str) -> list:
     if skipped:
         logger.info(f"mode=new_users: {skipped} reeds-gekende speler(s) overgeslagen, {len(new_only)} nieuwe speler(s) te scrapen.")
     return new_only
-
-
 def scrape_kwargs_for_mode(mode: str) -> dict:
     if mode == "full":
         return {"force_full_refresh": True, "refresh_recent": 0, "strict_missing_only": False}
     return {"force_full_refresh": False, "refresh_recent": 0, "strict_missing_only": True}
-
-
-def run_match_scrapes(player_ids: list, mode: str, delay_seconds: float = DELAY_BETWEEN_PLAYERS) -> tuple[list, list, list]:
-    """Matchdata-scrape-stap. Returns (ok, failed, skipped_up_to_date).
+def run_match_scrapes(
+    player_ids: list, mode: str, delay_seconds: float = DELAY_BETWEEN_PLAYERS,
+) -> tuple[list, list, list, dict]:
+    """Matchdata-scrape-stap. Returns (ok, failed, skipped_up_to_date,
+    new_matches_by_player).
     PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: delay_seconds is nu een
     parameter (default ONGEWIJZIGD) i.p.v. de module-constante rechtstreeks
     te gebruiken — main() geeft de env-overrideable waarde door (zie
-    get_delay_between_players())."""
+    get_delay_between_players()).
+    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: verzamelt nu ook,
+    per speler, de matchrecords die scrape_player() teruggeeft als
+    "new_matches_this_run" (leeg indien "up_to_date", mislukt, of gewoon
+    geen nieuwe matches) - main() geeft dit door aan run_enrichment(), die
+    het op zijn beurt doorgeeft aan enrich_opponents.discover_opponent_
+    players() voor een veel gerichtere ghost-profiel-detectie. Zie
+    module-docstring."""
     kwargs = scrape_kwargs_for_mode(mode)
     logger.info(f"scrape_player kwargs: {kwargs}")
     ok, failed, skipped_up_to_date = [], [], []
+    new_matches_by_player: dict = {}
     for i, pid in enumerate(player_ids, start=1):
         logger.info(f"--- ({i}/{len(player_ids)}) Speler {pid}: matchdata ---")
         try:
             result = scrape_player(pid, save_to_firebase=True, headless=True, **kwargs)
+            # PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: altijd
+            # een entry zetten (ook leeg) zodat discover_opponent_players()
+            # deze speler expliciet herkent als "new_matches_by_player is
+            # bekend voor deze speler" i.p.v. terug te vallen op de
+            # volledige-historiek-scan.
+            new_matches_by_player[str(pid)] = result.get("new_matches_this_run") or []
             if result.get("error") or result.get("firebase_error"):
                 failed.append((pid, result.get("error") or result.get("firebase_error")))
                 logger.error(f"[{pid}] Mislukt: {result.get('error') or result.get('firebase_error')}")
@@ -345,28 +353,32 @@ def run_match_scrapes(player_ids: list, mode: str, delay_seconds: float = DELAY_
         except Exception as e:
             logger.exception(f"[{pid}] Onverwachte fout: {e}")
             failed.append((pid, str(e)))
+            new_matches_by_player[str(pid)] = []
         if i < len(player_ids):
             time.sleep(delay_seconds)
-    return ok, failed, skipped_up_to_date
-
-
-def run_enrichment(player_ids: list) -> dict:
+    return ok, failed, skipped_up_to_date, new_matches_by_player
+def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict:
     """PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 +
     PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16 +
-    PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16.
-
+    PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 +
+    PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19 +
+    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20.
     Ontdekt tegenstanders/partners zonder profiel, maakt die profielen aan,
-    haalt hun padelstats.be playing strength op (inclusief automatische
-    verversing van VEROUDERDE ratings, niet enkel ontbrekende), en hun
-    klassementshistoriek.
-
+    haalt hun padelstats.be playing strength (incl. officieel klassement) op
+    (inclusief automatische verversing van VEROUDERDE ratings, niet enkel
+    ontbrekende), en optioneel hun volledige TVL-klassementshistoriek.
+    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: geeft nu ook
+    new_matches_by_player door aan eo.enrich(), MET een extra TypeError-
+    fallback-laag (naast de al bestaande discovery_recent_periods-fallback)
+    voor het geval enrich_opponents.py nog niet bijgewerkt is - dan valt dit
+    terug op de voorgaande signatuur (zonder new_matches_by_player, dus het
+    gedrag van vóór deze fix) i.p.v. deze workflow te laten crashen.
     LET OP: dit is de BULK-variant (2+ spelers, bv. de dagelijkse cron of
     een bewuste multi-speler-refresh) — inclusief discovery/nieuwe ghost-
     profielen. Voor een 1-speler-aanvraag wordt in main() in plaats hiervan
     run_single_player_enrichment() gebruikt (zie PADEL_ANALYSIS_SINGLE_
     PLAYER_REFRESH_FIX_2026-09-19 hierboven) — GEEN discovery, gegarandeerde
     refresh van enkel die ene speler.
-
     Draait NA de matchdata-scrape en VOOR de poule-stap.
     """
     leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
@@ -381,10 +393,12 @@ def run_enrichment(player_ids: list) -> dict:
     do_padelstat = get_padelstat_enabled()
     do_klassement = get_klassement_enabled()
     stale_days = get_padelstat_stale_days()
+    discovery_recent_periods = get_discovery_recent_periods()
     logger.info(
         f"=== Tegenstanders verrijken (padelstats={do_padelstat}, "
         f"padelstat_max={get_padelstat_max()}, padelstat_stale_days={stale_days}, "
-        f"klassement={do_klassement}, klassement_max={get_klassement_max()}) ==="
+        f"klassement(TVL)={do_klassement}, klassement_max={get_klassement_max()}, "
+        f"discovery_recent_periods={discovery_recent_periods}) ==="
     )
     try:
         resultaat = eo.enrich(
@@ -397,14 +411,17 @@ def run_enrichment(player_ids: list) -> dict:
             do_klassement=do_klassement,
             klassement_refresh=get_klassement_refresh(),
             klassement_max=get_klassement_max(),
+            discovery_recent_periods=discovery_recent_periods,
+            new_matches_by_player=new_matches_by_player,
         )
     except TypeError:
-        # Val terug op een oudere enrich_opponents.py die de nieuwste
-        # parameters nog niet kent, zodat deze workflow niet crasht op een
-        # signatuur-mismatch tussen dit bestand en enrich_opponents.py.
+        # PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: eerste
+        # terugval-laag - probeer zonder new_matches_by_player, voor het
+        # geval enrich_opponents.py deze parameter nog niet kent.
         logger.warning(
-            "enrich_opponents.enrich() kent niet alle verwachte parameters — "
-            "werk scraper/enrich_opponents.py bij. Val terug op een basisaanroep."
+            "enrich_opponents.enrich() kent 'new_matches_by_player' nog niet — "
+            "werk scraper/enrich_opponents.py bij om de gerichte ghost-profiel-fix "
+            "te activeren. Val terug op de discovery_recent_periods-only-cap."
         )
         try:
             resultaat = eo.enrich(
@@ -413,19 +430,61 @@ def run_enrichment(player_ids: list) -> dict:
                 do_padelstat=do_padelstat,
                 padelstat_refresh=get_padelstat_refresh(),
                 padelstat_max=get_padelstat_max(),
+                padelstat_stale_after_days=stale_days,
                 do_klassement=do_klassement,
                 klassement_refresh=get_klassement_refresh(),
                 klassement_max=get_klassement_max(),
+                discovery_recent_periods=discovery_recent_periods,
             )
         except TypeError:
-            resultaat = eo.enrich(
-                player_ids,
-                do_discover=True,
-                do_padelstat=do_padelstat,
-                padelstat_refresh=get_padelstat_refresh(),
-                padelstat_max=get_padelstat_max(),
+            # PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: tweede
+            # terugval-laag - probeer zonder discovery_recent_periods, voor
+            # het geval enrich_opponents.py nog ouder is.
+            logger.warning(
+                "enrich_opponents.enrich() kent 'discovery_recent_periods' nog niet — "
+                "werk scraper/enrich_opponents.py bij. Val terug op het oude, "
+                "ONBEPERKTE discovery-gedrag."
             )
-            resultaat.setdefault("klassement", {})
+            try:
+                resultaat = eo.enrich(
+                    player_ids,
+                    do_discover=True,
+                    do_padelstat=do_padelstat,
+                    padelstat_refresh=get_padelstat_refresh(),
+                    padelstat_max=get_padelstat_max(),
+                    padelstat_stale_after_days=stale_days,
+                    do_klassement=do_klassement,
+                    klassement_refresh=get_klassement_refresh(),
+                    klassement_max=get_klassement_max(),
+                )
+            except TypeError:
+                # Val terug op een NOG oudere enrich_opponents.py die ook de
+                # overige nieuwste parameters nog niet kent, zodat deze
+                # workflow niet crasht op een signatuur-mismatch.
+                logger.warning(
+                    "enrich_opponents.enrich() kent niet alle verwachte parameters — "
+                    "werk scraper/enrich_opponents.py bij. Val terug op een basisaanroep."
+                )
+                try:
+                    resultaat = eo.enrich(
+                        player_ids,
+                        do_discover=True,
+                        do_padelstat=do_padelstat,
+                        padelstat_refresh=get_padelstat_refresh(),
+                        padelstat_max=get_padelstat_max(),
+                        do_klassement=do_klassement,
+                        klassement_refresh=get_klassement_refresh(),
+                        klassement_max=get_klassement_max(),
+                    )
+                except TypeError:
+                    resultaat = eo.enrich(
+                        player_ids,
+                        do_discover=True,
+                        do_padelstat=do_padelstat,
+                        padelstat_refresh=get_padelstat_refresh(),
+                        padelstat_max=get_padelstat_max(),
+                    )
+                    resultaat.setdefault("klassement", {})
     except Exception as e:  # noqa: BLE001
         logger.exception(f"Verrijkingsstap mislukt: {e}")
         return leeg
@@ -434,7 +493,7 @@ def run_enrichment(player_ids: list) -> dict:
         logger.info(f"{len(nieuwe)} nieuw(e) spelersprofiel(en) aangemaakt voor tegenstanders.")
         if get_enrich_scrape_new():
             logger.info(f"ENRICH_SCRAPE_NEW=true — matchdata ophalen voor {len(nieuwe)} nieuwe speler(s).")
-            ok_new, failed_new, _ = run_match_scrapes(nieuwe, "missing", delay_seconds=get_delay_between_players())
+            ok_new, failed_new, _, _ = run_match_scrapes(nieuwe, "missing", delay_seconds=get_delay_between_players())
             logger.info(f"Nieuwe spelers gescraped: {len(ok_new)} OK, {len(failed_new)} mislukt.")
         else:
             logger.info(
@@ -445,7 +504,8 @@ def run_enrichment(player_ids: list) -> dict:
     if p:
         logger.info(
             f"Padelstats: {p.get('opgehaald', 0)} opgehaald/ververst, {p.get('cache', 0)} nog actueel, "
-            f"{p.get('niet_gevonden', 0)} niet gevonden, {p.get('fout', 0)} fout."
+            f"{p.get('niet_gevonden', 0)} niet gevonden, {p.get('fout', 0)} fout "
+            f"(waarvan {p.get('klassement_opgehaald', 0)} met officieel klassement meegenomen)."
         )
         if p.get("overgeslagen_limiet"):
             logger.info(
@@ -455,8 +515,8 @@ def run_enrichment(player_ids: list) -> dict:
     k = resultaat.get("klassement") or {}
     if k:
         logger.info(
-            f"Klassement: {k.get('opgehaald', 0)} opgehaald, {k.get('cache', 0)} uit cache, "
-            f"{k.get('fout', 0)} fout."
+            f"Klassement (TVL, volledige historiek): {k.get('opgehaald', 0)} opgehaald, "
+            f"{k.get('cache', 0)} uit cache, {k.get('fout', 0)} fout."
         )
         if k.get("overgeslagen_limiet"):
             logger.info(
@@ -464,16 +524,14 @@ def run_enrichment(player_ids: list) -> dict:
                 f"(limiet KLASSEMENT_MAX={get_klassement_max()})."
             )
     return resultaat
-
-
 def run_single_player_enrichment(player_id: str) -> dict:
     """PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van
     Kim: "bedoeling is dat enkel die speler ververst wordt (id speler
     meegeven)").
-
     Roept enrich_opponents.run_single_player_refresh() aan: GEEN discovery,
     GEEN nieuwe ghost-profielen, en een GEFORCEERDE refresh (cache/
-    staleness genegeerd) van padelstat + klassement voor exact deze ene
+    staleness genegeerd) van padelstat (incl. officieel klassement) +
+    optioneel de volledige TVL-klassementshistoriek voor exact deze ene
     speler. Gebruikt door main() zodra er na filtering exact 1 speler
     overblijft (zie daar)."""
     leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
@@ -494,8 +552,6 @@ def run_single_player_enrichment(player_id: str) -> dict:
         "padelstat": result.get("padelstat", {}),
         "klassement": result.get("klassement", {}),
     }
-
-
 def run_poule_updates(
     player_ids: list, force: bool, include_eindronde: bool = True,
     delay_seconds: float = DELAY_BETWEEN_POULE_UPDATES,
@@ -550,8 +606,6 @@ def run_poule_updates(
         if i < total:
             time.sleep(delay_seconds)
     return updated, skipped_or_failed
-
-
 def main() -> int:
     mode = get_mode()
     player_ids = get_requested_player_ids()
@@ -571,11 +625,23 @@ def main() -> int:
             f"(standaard {DELAY_BETWEEN_POULE_UPDATES}s)."
         )
     logger.info(f"Mode: '{mode}' — {len(player_ids)} speler(s) worden verwerkt: {player_ids}")
-    ok, failed, skipped_up_to_date = run_match_scrapes(player_ids, mode, delay_seconds=delay_players)
+    if os.environ.get("ENABLE_KLASSEMENT", "").strip() == "":
+        logger.info(
+            "ENABLE_KLASSEMENT niet expliciet gezet — PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_"
+            "VIA_PADELSTAT_2026-09-20: default is nu False (was True). Het officiële "
+            "klassement wordt voortaan als snapshot meegenomen via de padelstat-verversing "
+            "hieronder. Zet ENABLE_KLASSEMENT=true voor een incidentele/2x-per-jaar-run die "
+            "de volledige TVL-historiek (meerdere periodes) wil verversen."
+        )
+    ok, failed, skipped_up_to_date, new_matches_by_player = run_match_scrapes(
+        player_ids, mode, delay_seconds=delay_players
+    )
     logger.info("=== Samenvatting matchdata ===")
     logger.info(f"Ververst: {len(ok)} — Al up-to-date: {len(skipped_up_to_date)} — Mislukt: {len(failed)}")
     for pid, err in failed:
         logger.error(f"  \u274c {pid}: {err}")
+    totaal_nieuwe_matches = sum(len(v) for v in new_matches_by_player.values())
+    logger.info(f"Netto nieuwe matches deze run (over alle spelers): {totaal_nieuwe_matches}")
     enrich_result = {}
     if get_enrich_enabled():
         # PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19: bij EXACT 1
@@ -592,12 +658,13 @@ def main() -> int:
             )
             enrich_result = run_single_player_enrichment(player_ids[0])
         else:
-            enrich_result = run_enrichment(player_ids)
+            enrich_result = run_enrichment(player_ids, new_matches_by_player=new_matches_by_player)
         logger.info("=== Samenvatting verrijking ===")
         logger.info(
             f"Nieuwe profielen: {len(enrich_result.get('nieuwe_profielen') or [])} — "
             f"padelstats opgehaald/ververst: {(enrich_result.get('padelstat') or {}).get('opgehaald', 0)} — "
-            f"klassement opgehaald: {(enrich_result.get('klassement') or {}).get('opgehaald', 0)}"
+            f"officieel klassement via padelstat: {(enrich_result.get('padelstat') or {}).get('klassement_opgehaald', 0)} — "
+            f"klassement (TVL, historiek) opgehaald: {(enrich_result.get('klassement') or {}).get('opgehaald', 0)}"
         )
     else:
         logger.info("Verrijkingsstap uitgeschakeld via ENABLE_ENRICH=false.")
@@ -621,7 +688,5 @@ def main() -> int:
     if ok or skipped_up_to_date or not player_ids:
         return 0
     return 1
-
-
 if __name__ == "__main__":
     sys.exit(main())
