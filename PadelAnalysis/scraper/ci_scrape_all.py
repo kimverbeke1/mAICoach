@@ -74,8 +74,10 @@ FIX: wanneer PLAYER_IDS na filtering exact 1 speler bevat, wordt nu
 run_single_player_enrichment() aangeroepen i.p.v. run_enrichment(): dat
 ververst ENKEL en ALTIJD (cache genegeerd) padelstat + klassement voor
 die ene speler, zonder discovery/nieuwe profielen. Bij 2+ spelers (bv. de
-dagelijkse cron, of een bewuste bulk-refresh) blijft het bestaande gedrag
-(met discovery/enrichment) volledig ongewijzigd.
+dagelijkse cron, of een bewuste bulk-refresh) gold voorheen het volledige
+discovery-gedrag (met nieuwe ghost-profielen) - zie de NIEUWSTE fix
+hieronder (PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20), die dit
+voor de REGULIERE/geplande bulk-run verder aanscherpt.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19 (Fase E, op verzoek van Kim,
 chat 2026-09-19: "check ci_scrape_all.py en de refresh_*_only.py-scripts
@@ -121,15 +123,57 @@ een period_label zoals "Resultaten van week 27/2026 tot en met week
 48/2026" omvat een VOLLEDIG interclubseizoen (22 weken) - de recency-limiet
 van 2026-09-19 beperkte discovery dus in de praktijk tot "vrijwel het
 volledige huidige+vorige seizoen", niet tot een paar recente wedstrijden.
-FIX: run_match_scrapes() verzamelt nu, per speler, de matchrecords die
-scrape_player() teruggeeft als "new_matches_this_run" (zie scrape_player.py
-PADEL_ANALYSIS_NEW_MATCHES_THIS_RUN_2026-09-20) en geeft die als
-new_matches_by_player mee aan run_enrichment()/eo.enrich(). Discovery scant
-voortaan UITSLUITEND die effectief nieuwe matches i.p.v. alles binnen een
-brede periode-naam - zie enrich_opponents.discover_opponent_players() voor
-de volledige toelichting. Met een TypeError-fallback (zelfde patroon als de
-bestaande discovery_recent_periods-fallback) voor het geval
-enrich_opponents.py toevallig niet mee bijgewerkt is.
+FIX (destijds, blijft bestaan als infrastructuur): run_match_scrapes()
+verzamelt, per speler, de matchrecords die scrape_player() teruggeeft als
+"new_matches_this_run" en geeft die als new_matches_by_player mee aan
+run_enrichment()/eo.enrich(). Discovery scant daarmee UITSLUITEND
+effectief nieuwe matches i.p.v. alles binnen een brede periode-naam.
+Zie PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 hieronder: deze
+fix alleen bleek in de praktijk NOG STEEDS te veel nieuwe profielen op te
+leveren bij een normale bulk-run (elke speler met ook maar 1 nieuwe match
+tegen een nog-onbekende tegenstander/partner levert alsnog een nieuw
+profiel op — en bij tientallen eigen spelers samen kan dat nog steeds een
+lange lijst worden). De infrastructuur (new_matches_by_player) blijft
+bestaan en nuttig (bv. voor ENABLE_DISCOVERY=true-uitzonderingen), maar is
+niet langer de primaire ghost-profiel-mitigatie.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 (op verzoek van Kim,
+chat 2026-09-20: "AUB: creeer enkel profielen van spelers die rechstreekste
+tegenspeler zijn van de persoon die ik selecteer bij ploeganalyse of mensen
+die ik zelf expliciet toevoeg bij toevoegen speler")
+--------------------------------------------------------------------------
+DEFINITIEVE FIX voor de herhaalde "lange lijst van nieuwe profielen"-
+meldingen (17-20 september, meerdere pogingen: interclub_only, recency-
+cap, new-matches-only - elk hielp, geen enkele loste het probleem
+FUNDAMENTEEL op). ROOT CAUSE, nu pas volledig scherp: elke poging tot nu
+toe probeerde de discovery-SCAN binnen de bulk-run te VERFIJNEN (minder
+periodes, enkel nieuwe matches, ...) - maar Kim's eigenlijke, expliciete
+wens is dat de GEPLANDE/BULK-run HELEMAAL GEEN nieuwe profielen mag
+aanmaken. Nieuwe profielen mogen ENKEL ontstaan via twee, al bestaande en
+correct gescoopte plekken in de APP zelf (niet in deze achtergrondtaak):
+  1. Team-analyse ("🔍 Tegenstander analyseren", opponent_scout_ui.py /
+     opponent_scout.py: scrape_new_opponent_players()) - deze scant
+     UITSLUITEND de roster van de ENE tegenstander-ploeg die je op dat
+     moment analyseert (bundle["unique_players"], via osc.scout_opponent())
+     - dus effectief "directe tegenspelers van de persoon die je
+     selecteert bij ploeganalyse". Dit pad blijft VOLLEDIG ONGEWIJZIGD.
+  2. Expliciet "speler toevoegen" (een bewuste, door Kim zelf getriggerde
+     actie) - blijft eveneens volledig ongewijzigd, dit bestand komt daar
+     niet aan.
+FIX (dit bestand): run_enrichment() roept eo.enrich() voortaan aan met
+do_discover=get_discovery_enabled() i.p.v. onvoorwaardelijk do_discover=
+True. get_discovery_enabled() leest de nieuwe env var ENABLE_DISCOVERY,
+met een NIEUWE DEFAULT VAN False — de geplande/bulk-scrape (scrape-
+padel.yml, alle spelers, geen specifieke tegenstander-context) maakt dus
+voortaan GEEN ENKEL nieuw spelersprofiel meer aan. Padelstat/klassement-
+verversing voor AL BESTAANDE profielen (eigen team + reeds gekende
+tegenstanders) blijft volledig ongewijzigd werken - enkel het aanmaken van
+NIEUWE profielen (ensure_profiles(), enkel bereikbaar via do_discover=True)
+is uitgeschakeld in dit pad.
+Zet ENABLE_DISCOVERY=true expliciet op een bewust, incidenteel getriggerde
+workflow-run (bv. een eenmalige "herbouw de volledige tegenstander-
+database"-actie) als je toch, bewust, de brede discovery wil laten lopen -
+dat is een uitzondering, geen regulier gedrag.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 (op verzoek van
 Kim: "aangezien we toch al het padelstat klassement scrapen van padelstat.be
@@ -148,9 +192,7 @@ run. Deze blijft wél volledig beschikbaar en nuttig voor de MEERDERE-
 periodes-historiek-grafiek (die padelstat niet kan leveren) - zet
 ENABLE_KLASSEMENT=true expliciet in een incidentele/handmatige of 2x-per-
 jaar geplande workflow-run wanneer je die volledige historiek wil
-verversen. Dit is een BEWUSTE gedragswijziging (geen stille default-tweak
-"onder de motorkap"): ze is expliciet hier gedocumenteerd en zichtbaar in
-de log (zie main()) zodra ENABLE_KLASSEMENT niet expliciet is meegegeven.
+verversen.
 """
 import logging
 import os
@@ -184,6 +226,8 @@ DEFAULT_MODE = "missing"
 # (los gedefinieerd i.p.v. geïmporteerd, want deze module mag niet hard
 # falen als enrich_opponents.py toevallig ontbreekt/ouder is - zie de
 # bestaande lazy-import + TypeError-fallback-structuur in run_enrichment()).
+# Blijft relevant als AANVULLENDE cap, ook wanneer discovery bewust via
+# ENABLE_DISCOVERY=true opnieuw aangezet wordt (zie hieronder).
 DEFAULT_DISCOVERY_RECENT_PERIODS = 2
 def get_all_player_ids() -> list:
     """Alle player_id's uit player_profiles."""
@@ -244,6 +288,20 @@ def get_poule_eindronde() -> bool:
     return _get_bool_env("POULE_EINDRONDE", True)
 def get_enrich_enabled() -> bool:
     return _get_bool_env("ENABLE_ENRICH", True)
+def get_discovery_enabled() -> bool:
+    """PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 (op verzoek van
+    Kim: "creeer enkel profielen van spelers die rechtstreekse tegenspeler
+    zijn van de persoon die ik selecteer bij ploeganalyse of mensen die ik
+    zelf expliciet toevoeg bij toevoegen speler"):
+    Nieuwe default: False. De geplande/bulk-scrape (deze workflow, voor
+    ALLE spelers) mag GEEN nieuwe spelersprofielen meer aanmaken - dat
+    gebeurt voortaan UITSLUITEND via de al bestaande, correct gescoopte
+    UI-paden (team-analyse voor 1 specifieke tegenstander-ploeg, en
+    expliciet "speler toevoegen"), niet via deze achtergrondtaak.
+    Zet ENABLE_DISCOVERY=true expliciet voor een bewuste, incidentele
+    uitzondering (bv. eenmalig de volledige tegenstander-database
+    herbouwen) - géén regulier gedrag."""
+    return _get_bool_env("ENABLE_DISCOVERY", False)
 def get_padelstat_enabled() -> bool:
     return _get_bool_env("ENABLE_PADELSTAT", True)
 def get_padelstat_refresh() -> bool:
@@ -282,9 +340,9 @@ def get_delay_between_poule_updates() -> float:
 def get_discovery_recent_periods() -> int:
     """PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: beperkt het
     ontdekken van nieuwe tegenstander-profielen tot de N meest recente
-    periodes per speler (standaard 2), als AANVULLENDE cap op de nieuwe
-    new-matches-only-discovery (zie PADEL_ANALYSIS_NEW_MATCHES_ONLY_
-    DISCOVERY_2026-09-20). Zet op 0 voor het oude, onbeperkte gedrag."""
+    periodes per speler (standaard 2), als AANVULLENDE cap - enkel nog
+    relevant wanneer ENABLE_DISCOVERY bewust op true gezet is (zie
+    get_discovery_enabled())."""
     return _get_int_env("DISCOVERY_RECENT_PERIODS", DEFAULT_DISCOVERY_RECENT_PERIODS)
 def filter_by_mode(player_ids: list, mode: str) -> list:
     """Mode-specifieke voorselectie VOOR het scrapen begint."""
@@ -316,13 +374,12 @@ def run_match_scrapes(
     parameter (default ONGEWIJZIGD) i.p.v. de module-constante rechtstreeks
     te gebruiken — main() geeft de env-overrideable waarde door (zie
     get_delay_between_players()).
-    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: verzamelt nu ook,
-    per speler, de matchrecords die scrape_player() teruggeeft als
-    "new_matches_this_run" (leeg indien "up_to_date", mislukt, of gewoon
-    geen nieuwe matches) - main() geeft dit door aan run_enrichment(), die
-    het op zijn beurt doorgeeft aan enrich_opponents.discover_opponent_
-    players() voor een veel gerichtere ghost-profiel-detectie. Zie
-    module-docstring."""
+    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: verzamelt nog
+    steeds, per speler, de matchrecords die scrape_player() teruggeeft als
+    "new_matches_this_run" - deze infrastructuur blijft bestaan (nuttig
+    voor een bewuste ENABLE_DISCOVERY=true-uitzondering), ook al is
+    discovery sinds PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20
+    standaard uitgeschakeld in de reguliere run."""
     kwargs = scrape_kwargs_for_mode(mode)
     logger.info(f"scrape_player kwargs: {kwargs}")
     ok, failed, skipped_up_to_date = [], [], []
@@ -331,11 +388,6 @@ def run_match_scrapes(
         logger.info(f"--- ({i}/{len(player_ids)}) Speler {pid}: matchdata ---")
         try:
             result = scrape_player(pid, save_to_firebase=True, headless=True, **kwargs)
-            # PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: altijd
-            # een entry zetten (ook leeg) zodat discover_opponent_players()
-            # deze speler expliciet herkent als "new_matches_by_player is
-            # bekend voor deze speler" i.p.v. terug te vallen op de
-            # volledige-historiek-scan.
             new_matches_by_player[str(pid)] = result.get("new_matches_this_run") or []
             if result.get("error") or result.get("firebase_error"):
                 failed.append((pid, result.get("error") or result.get("firebase_error")))
@@ -361,24 +413,22 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
     """PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 +
     PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16 +
     PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 +
-    PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19 +
-    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20.
-    Ontdekt tegenstanders/partners zonder profiel, maakt die profielen aan,
-    haalt hun padelstats.be playing strength (incl. officieel klassement) op
-    (inclusief automatische verversing van VEROUDERDE ratings, niet enkel
-    ontbrekende), en optioneel hun volledige TVL-klassementshistoriek.
-    PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: geeft nu ook
-    new_matches_by_player door aan eo.enrich(), MET een extra TypeError-
-    fallback-laag (naast de al bestaande discovery_recent_periods-fallback)
-    voor het geval enrich_opponents.py nog niet bijgewerkt is - dan valt dit
-    terug op de voorgaande signatuur (zonder new_matches_by_player, dus het
-    gedrag van vóór deze fix) i.p.v. deze workflow te laten crashen.
+    PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20.
+    Ververst padelstat (incl. officieel klassement) + optioneel de
+    volledige TVL-klassementshistoriek voor de opgegeven spelers.
+    PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20: do_discover
+    (nieuwe profielen aanmaken voor tegenstanders/partners zonder profiel)
+    staat nu STANDAARD UIT in deze functie (get_discovery_enabled(),
+    default False) - zie module-docstring voor de volledige toelichting.
+    Padelstat/klassement-verversing voor AL BESTAANDE profielen (eigen team
+    + reeds gekende tegenstanders) is hierdoor NIET beïnvloed - enkel het
+    aanmaken van NIEUWE profielen is uitgeschakeld in dit pad.
     LET OP: dit is de BULK-variant (2+ spelers, bv. de dagelijkse cron of
-    een bewuste multi-speler-refresh) — inclusief discovery/nieuwe ghost-
-    profielen. Voor een 1-speler-aanvraag wordt in main() in plaats hiervan
-    run_single_player_enrichment() gebruikt (zie PADEL_ANALYSIS_SINGLE_
-    PLAYER_REFRESH_FIX_2026-09-19 hierboven) — GEEN discovery, gegarandeerde
-    refresh van enkel die ene speler.
+    een bewuste multi-speler-refresh). Voor een 1-speler-aanvraag wordt in
+    main() in plaats hiervan run_single_player_enrichment() gebruikt (zie
+    PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 hierboven) — GEEN
+    discovery, gegarandeerde refresh van enkel die ene speler (dit was al
+    zo, ongewijzigd).
     Draait NA de matchdata-scrape en VOOR de poule-stap.
     """
     leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
@@ -390,20 +440,22 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
             "Plaats enrich_opponents.py naast dit bestand in de scraper-map."
         )
         return leeg
+    do_discover = get_discovery_enabled()
     do_padelstat = get_padelstat_enabled()
     do_klassement = get_klassement_enabled()
     stale_days = get_padelstat_stale_days()
     discovery_recent_periods = get_discovery_recent_periods()
     logger.info(
-        f"=== Tegenstanders verrijken (padelstats={do_padelstat}, "
-        f"padelstat_max={get_padelstat_max()}, padelstat_stale_days={stale_days}, "
-        f"klassement(TVL)={do_klassement}, klassement_max={get_klassement_max()}, "
-        f"discovery_recent_periods={discovery_recent_periods}) ==="
+        f"=== Tegenstanders verrijken (discovery={do_discover} "
+        f"[standaard UIT sinds 2026-09-20 - zie ENABLE_DISCOVERY], "
+        f"padelstats={do_padelstat}, padelstat_max={get_padelstat_max()}, "
+        f"padelstat_stale_days={stale_days}, klassement(TVL)={do_klassement}, "
+        f"klassement_max={get_klassement_max()}) ==="
     )
     try:
         resultaat = eo.enrich(
             player_ids,
-            do_discover=True,
+            do_discover=do_discover,
             do_padelstat=do_padelstat,
             padelstat_refresh=get_padelstat_refresh(),
             padelstat_max=get_padelstat_max(),
@@ -420,13 +472,12 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
         # geval enrich_opponents.py deze parameter nog niet kent.
         logger.warning(
             "enrich_opponents.enrich() kent 'new_matches_by_player' nog niet — "
-            "werk scraper/enrich_opponents.py bij om de gerichte ghost-profiel-fix "
-            "te activeren. Val terug op de discovery_recent_periods-only-cap."
+            "werk scraper/enrich_opponents.py bij. Val terug op de discovery_recent_periods-only-cap."
         )
         try:
             resultaat = eo.enrich(
                 player_ids,
-                do_discover=True,
+                do_discover=do_discover,
                 do_padelstat=do_padelstat,
                 padelstat_refresh=get_padelstat_refresh(),
                 padelstat_max=get_padelstat_max(),
@@ -443,12 +494,12 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
             logger.warning(
                 "enrich_opponents.enrich() kent 'discovery_recent_periods' nog niet — "
                 "werk scraper/enrich_opponents.py bij. Val terug op het oude, "
-                "ONBEPERKTE discovery-gedrag."
+                "ONBEPERKTE discovery-gedrag (indien do_discover=True)."
             )
             try:
                 resultaat = eo.enrich(
                     player_ids,
-                    do_discover=True,
+                    do_discover=do_discover,
                     do_padelstat=do_padelstat,
                     padelstat_refresh=get_padelstat_refresh(),
                     padelstat_max=get_padelstat_max(),
@@ -468,7 +519,7 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
                 try:
                     resultaat = eo.enrich(
                         player_ids,
-                        do_discover=True,
+                        do_discover=do_discover,
                         do_padelstat=do_padelstat,
                         padelstat_refresh=get_padelstat_refresh(),
                         padelstat_max=get_padelstat_max(),
@@ -479,7 +530,7 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
                 except TypeError:
                     resultaat = eo.enrich(
                         player_ids,
-                        do_discover=True,
+                        do_discover=do_discover,
                         do_padelstat=do_padelstat,
                         padelstat_refresh=get_padelstat_refresh(),
                         padelstat_max=get_padelstat_max(),
@@ -490,7 +541,11 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
         return leeg
     nieuwe = resultaat.get("nieuwe_profielen") or []
     if nieuwe:
-        logger.info(f"{len(nieuwe)} nieuw(e) spelersprofiel(en) aangemaakt voor tegenstanders.")
+        # PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20: dit pad kan
+        # in de REGULIERE run enkel nog bereikt worden als iemand bewust
+        # ENABLE_DISCOVERY=true zette - anders is do_discover=False en geeft
+        # eo.enrich() hier altijd een lege lijst terug.
+        logger.info(f"{len(nieuwe)} nieuw(e) spelersprofiel(en) aangemaakt voor tegenstanders (ENABLE_DISCOVERY=true actief).")
         if get_enrich_scrape_new():
             logger.info(f"ENRICH_SCRAPE_NEW=true — matchdata ophalen voor {len(nieuwe)} nieuwe speler(s).")
             ok_new, failed_new, _, _ = run_match_scrapes(nieuwe, "missing", delay_seconds=get_delay_between_players())
@@ -625,6 +680,13 @@ def main() -> int:
             f"(standaard {DELAY_BETWEEN_POULE_UPDATES}s)."
         )
     logger.info(f"Mode: '{mode}' — {len(player_ids)} speler(s) worden verwerkt: {player_ids}")
+    if os.environ.get("ENABLE_DISCOVERY", "").strip() == "":
+        logger.info(
+            "ENABLE_DISCOVERY niet expliciet gezet — PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_"
+            "ONLY_2026-09-20: default is nu False. Deze bulk-run maakt dus GEEN nieuwe "
+            "spelersprofielen aan - dat gebeurt voortaan enkel via team-analyse (per specifieke "
+            "tegenstander-ploeg) of expliciet 'speler toevoegen' in de app zelf."
+        )
     if os.environ.get("ENABLE_KLASSEMENT", "").strip() == "":
         logger.info(
             "ENABLE_KLASSEMENT niet expliciet gezet — PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_"
