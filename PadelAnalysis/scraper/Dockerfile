@@ -46,9 +46,47 @@
 # dus GEEN aparte FROM-tag-aanpassing meer, enkel een nieuwe image-build
 # (zie .github/workflows/build-scraper-image.yml, triggert automatisch bij
 # een wijziging aan dit Dockerfile of requirements-scraper.txt).
+#
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_PLAYWRIGHT_HOME_MISMATCH_FIX_2026-09-21 (op verzoek van Kim,
+# na een echte, foutmelding-bevestigde run: "BrowserType.launch: Executable
+# doesn't exist at /github/home/.cache/ms-playwright/chromium_headless_
+# shell-.../chrome-headless-shell")
+# --------------------------------------------------------------------------
+# ROOT CAUSE (bevestigd, GEEN versie-mismatch zoals eerder vermoed):
+# `playwright install --with-deps chromium` hieronder draait tijdens de
+# IMAGE-BUILD als root, zonder expliciete PLAYWRIGHT_BROWSERS_PATH - de
+# browser wordt dan standaard weggeschreven naar Playwright's eigen default,
+# $HOME/.cache/ms-playwright/... Op dat moment (docker build) is HOME=/root,
+# dus de browser komt terecht in /root/.cache/ms-playwright/...
+# MAAR: GitHub Actions overschrijft bij ELKE `container:`-job automatisch de
+# HOME-omgevingsvariabele naar /github/home (een per-run, tijdelijke, door de
+# runner gemounte map) - dit is vast, gedocumenteerd gedrag van Actions'
+# container-jobs, volledig ONAFHANKELIJK van wat dit Dockerfile zelf instelt
+# of van welke user de RUN-instructies als draaiden. Bij het UITVOEREN van
+# scrape-padel.yml/refresh-padelstat.yml/enz. zoekt Playwright de browser dus
+# in /github/home/.cache/ms-playwright/... - een pad waar tijdens de build
+# NOOIT iets naartoe geschreven werd. Vandaar de foutmelding, consistent bij
+# ELKE run/speler (niet incidenteel), ongeacht hoe vaak de image al herbouwd
+# werd met een correcte playwright-versie.
+# FIX: PLAYWRIGHT_BROWSERS_PATH wordt hieronder expliciet gezet naar een VAST,
+# van HOME onafhankelijk pad (/ms-playwright), VOOR de installatie-RUN. Omdat
+# dit een image-level ENV is (niet HOME), blijft deze waarde ONGEWIJZIGD
+# behouden bij het runtime-uitvoeren van de container - GitHub Actions
+# overschrijft enkel HOME, niet andere door het image gedefinieerde ENV-
+# variabelen. Build-tijd en run-tijd wijzen dus voortaan naar HETZELFDE,
+# vaste pad, ongeacht welke HOME-waarde op dat moment geldt.
+# Vereist een NIEUWE image-build (build-scraper-image.yml) om effect te
+# hebben - een bestaande, reeds gepushte image met de oude paden blijft de
+# oude fout geven tot de image opnieuw gebouwd en gepubliceerd is.
 FROM python:3.12-slim-bookworm
 
 WORKDIR /app
+
+# PADEL_ANALYSIS_PLAYWRIGHT_HOME_MISMATCH_FIX_2026-09-21: vast, HOME-
+# onafhankelijk installatiepad - zie de uitgebreide toelichting hierboven.
+# Moet VOOR de `playwright install`-RUN staan zodat die er rekening mee houdt.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Enkel de requirements-bestanden eerst kopiëren (betere Docker-layer-cache
 # tijdens het BOUWEN van het image zelf - niet te verwarren met de
@@ -69,7 +107,8 @@ COPY PadelAnalysis/scraper/requirements-scraper.txt /app/requirements-scraper.tx
 # (via apt-get, vandaar dat dit als root binnen de container draait) -
 # BEWUST ENKEL chromium, NIET firefox/webkit (die gebruiken we nergens),
 # wat de grootste besparing t.o.v. het vorige mcr.microsoft.com-basisimage
-# oplevert.
+# oplevert. Dankzij PLAYWRIGHT_BROWSERS_PATH hierboven komt dit nu in
+# /ms-playwright terecht i.p.v. het HOME-afhankelijke default-pad.
 RUN pip install --no-cache-dir -r /app/requirements.txt -r /app/requirements-scraper.txt \
     && playwright install --with-deps chromium \
     && apt-get clean \
