@@ -1,7 +1,6 @@
 """
 dashboard_common.py — gedeelde helpers, imports en state voor alle
 PadelAnalysis-paginamodules.
-
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14 (op verzoek van Kim):
 dashboard.py was gegroeid tot ~1800 regels, wat elke wijziging traag en
 foutgevoelig maakte (een volledige herschrijving was nodig per aanpassing).
@@ -9,7 +8,6 @@ Dit bestand bevat alle logica die door MEERDERE paginamodules gedeeld wordt:
   - alle externe module-imports (firebase_service, lineup_lab, enz.);
   - kleine, generieke helperfuncties (datum-parsing, naam-opzoek, tabellen);
   - profiel-/schedule-opzoekfuncties.
-
 De paginamodules zelf:
   - page_add_player.py      : "➕ Speler toevoegen"
   - page_lineup_lab.py      : "🧩 Opstelling-analyse" (incl. rotatieplanner)
@@ -18,15 +16,12 @@ De paginamodules zelf:
     HERGEBRUIKT door zowel "👤 Mijn profiel" als "🔍 Spelers".
   - page_my_profile.py      : "👤 Mijn profiel"
   - page_players.py         : "🔍 Spelers"
-
 dashboard.py zelf is nu enkel nog de dunne entrypoint: st.set_page_config,
 CSS, navigatie, en de routing naar page_xxx().
-
 BELANGRIJK: dit bestand doet ZELF geen st.set_page_config()/CSS-injectie -
 dat blijft in dashboard.py (het echte entrypoint-script), zodat het maar
 één keer per app-run gebeurt, ongeacht welke pagina-modules geïmporteerd
 worden.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -36,14 +31,12 @@ lokaal in page_my_profile.py als _render_profile_ranking_summary()
 (PADEL_ANALYSIS_MYPROFILE_RANKING_SUMMARY_2026-09-14) - dus zichtbaar op
 "👤 Mijn profiel", maar NIET op "🔍 Spelers", waar je elke andere speler
 bekijkt.
-
 Fix: de functie is hierheen verplaatst (algemener bruikbaar, dus hernoemd
 naar _render_player_ranking_summary(), zonder "profile" in de naam) zodat
 BEIDE pagina's dezelfde, duidelijke weergave (st.metric, twee kolommen)
 kunnen tonen zonder de logica te dupliceren. page_my_profile.py roept deze
 gedeelde versie nu aan i.p.v. zijn eigen kopie; page_players.py roept ze
 voor het eerst aan.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -55,7 +48,6 @@ AUTOMATISCH op voor elke speler in de run, inclusief eigen spelers. De tekst
 legt dat nu uit i.p.v. een lokale actie te vragen, en biedt (enkel zichtbaar
 als een GitHub-token geconfigureerd staat) een knop om dit voor DEZE speler
 onmiddellijk te forceren.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -67,7 +59,6 @@ degelijk een geldige poule-URL hadden (de TVL-poule-tabel is een
 client-side gerenderde SPA; een kale requests.get() ziet de tabel niet),
 en (2) zelfs bij een gelukte fetch moest er bij ELKE herstart van de app
 opnieuw geklikt worden, want er werd niets bewaard.
-
 Fix: _load_poule_schedule_robust(player_id, reeks_url) hieronder. Is lokaal
 scrapen beschikbaar (is_scraping_available()), dan wordt volledig
 gedelegeerd aan poule_playwright.update_player_poule(player_id) — DEZELFDE
@@ -79,7 +70,6 @@ in dit pad NIET gebruikt; die parameter dient uitsluitend voor de
 KALE-fallback hieronder. Slaagt de robuuste weg, dan staat het resultaat al
 in Firestore (interclub_schedule enz.) en wordt het via _get_saved_schedule()
 teruggelezen.
-
 Is lokaal scrapen NIET beschikbaar (Streamlit Community Cloud) of faalt de
 Playwright-weg onverwacht, dan valt deze functie terug op de oude, kale
 _load_poule_fixtures(reeks_url) — geen persistentie, geen pouleId-scoping,
@@ -87,23 +77,59 @@ enkel een beste-poging live-fetch. page_lineup_lab.py herkent dit onderscheid
 aan `meta`: None bij de kale fallback, een dict bij de geslaagde robuuste weg
 (en herlaadt de pagina dan meteen, zodat een volgende sessie niet opnieuw
 hoeft te klikken).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20 (op verzoek van Kim: "Die scrape
+moet weten in welke ploeg ik speel. ik kan dat niet instellen. ik zie daar
+geen veld voor. dat moet zichtbaar en wijzigbaar zijn. bijkomend zou je
+normaal dat veld moeten kunnen automatisch detecteren als je weet dat
+iemand voor een bepaalde ploeg speelt.")
+--------------------------------------------------------------------------
+ACHTERGROND: het "club"-veld op een player_profiles-document (bv. "PADEL
+FACTORY") is GEEN cosmetisch detail - scraper/refresh_padelstat_only.py
+WEIGERT sinds PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20 een speler
+zonder gekende club zelfs maar op te zoeken op padelstats.be (te riskant
+bij gelijknamige spelers), en enrich_opponents.run_padelstat_for_players()
+gebruikt hetzelfde veld als disambiguatie-hint. Tot nu toe bestond er
+ECHTER GEEN plek in de app om dit veld voor een EIGEN speler te bekijken
+of te wijzigen - het werd enkel impliciet gezet bij het automatisch
+ontdekken van TEGENSTANDERS (enrich_opponents.discover_opponent_players(),
+via het "encounter"-veld). Een eigen speler zonder club (bv. Kim zelf, als
+dat veld om welke reden dan ook leeg staat) werd daardoor STRUCTUREEL
+overgeslagen bij elke padelstat/officieel-klassement-verversing, zonder
+enige zichtbare oorzaak of manier om dit zelf te herstellen.
+FIX, twee onderdelen:
+  1. _render_club_editor() - een klein, herbruikbaar UI-blok (huidige club
+     tonen + tekstveld + "Opslaan"-knop) - toegevoegd aan zowel "🔍
+     Spelers" (page_players.py) als "👤 Mijn profiel" (page_my_profile.py),
+     vlak onder de naam. Dit maakt het veld voor het eerst ZICHTBAAR EN
+     WIJZIGBAAR voor elke speler, inclusief jezelf.
+  2. _maybe_autodetect_own_club() - bedoeld om aangeroepen te worden vanuit
+     page_lineup_lab.py zodra een speler se EIGEN ploeg in een specifieke
+     poule herkend is (own_ploeg_id, via schedule_scraper.
+     identify_own_ploeg_id() of de handmatige team-picker). Leidt de
+     clubnaam af uit de herkende teamnaam (bv. "PADEL FACTORY A" ->
+     "PADEL FACTORY", team-letter weggeknipt - zelfde heuristiek als
+     enrich_opponents._strip_team_letter_suffix() voor tegenstanders,
+     hier lokaal herimplementeerd zodat dashboard_common.py geen
+     afhankelijkheid van de scraper-map/Playwright hoeft te krijgen).
+     Slaat dit ENKEL automatisch op als de speler nog HELEMAAL GEEN club
+     had (nooit een reeds bestaande, mogelijk bewust andere club
+     overschrijven) - net als de analoge club-override-logica in
+     refresh_padelstat_only.py/enrich_opponents.py.
 """
 import re
 import sys
 from pathlib import Path
 from typing import Optional
-
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-
 # --- Path setup: idempotent, mag door elke module die dit importeert
 # opnieuw uitgevoerd worden (de if-check voorkomt duplicaten in sys.path). ---
 _ROOT = Path(__file__).parent
 for _p in [str(_ROOT), str(_ROOT / "scraper")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
 import firebase_service as fb
 import lineup_lab as ll
 import schedule_scraper as ss
@@ -113,22 +139,16 @@ import opponent_analysis as oa
 import lineup_quick as lq
 import player_inline_actions as pia
 import opponent_dossier as od
-
 try:
     import team_ai_advisor as taa
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
-
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
-
-
 # ─────────────────────────────────────────────
 # Datum-/tekst-helpers
 # ─────────────────────────────────────────────
 def _clean(text) -> str:
     return " ".join(str(text or "").split()).strip()
-
-
 # PADEL_ANALYSIS_PERIOD_SORT_FIX
 _SEASON_START_MONTH = {
     "winter": 9,
@@ -144,8 +164,6 @@ _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
 }
-
-
 def _parse_match_date(text) -> Optional[tuple]:
     if not text:
         return None
@@ -163,8 +181,6 @@ def _parse_match_date(text) -> Optional[tuple]:
         if mo:
             return (int(m.group(3)), mo, int(m.group(1)))
     return None
-
-
 def _format_scraped_at(value):
     if not value:
         return "onbekend"
@@ -178,12 +194,8 @@ def _format_scraped_at(value):
         return str(value)
     except Exception:
         return str(value)
-
-
 def _short_period_label(label: str) -> str:
     return str(label or "").replace("Resultaten van ", "").strip()
-
-
 def _period_sort_key(label: str):
     text = str(label or "").lower()
     year_m = re.search(r"(20\d{2})", text)
@@ -192,8 +204,6 @@ def _period_sort_key(label: str):
     if month is None:
         month = next((m for kw, m in _MONTH_RANK.items() if kw in text), 6)
     return (year, month)
-
-
 def _display_name(profile_or_id, name_lookup: Optional[dict] = None) -> str:
     if isinstance(profile_or_id, dict):
         return profile_or_id.get("display_name") or f"Onbekende speler ({profile_or_id.get('player_id','?')})"
@@ -203,17 +213,12 @@ def _display_name(profile_or_id, name_lookup: Optional[dict] = None) -> str:
         if name:
             return name
     return f"Onbekende speler ({pid})"
-
-
 def _go_to_player(player_id: str):
     st.session_state["jump_to_player_id"] = str(player_id)
     st.session_state["page"] = "🔍 Spelers"
     st.rerun()
-
-
 def _scrape_progress_widget(label_prefix: str = ""):
     bar = st.progress(0.0, text=f"{label_prefix}Starten...")
-
     def _cb(i, total, label, status):
         if total > 0:
             frac = min(1.0, i / total)
@@ -226,10 +231,7 @@ def _scrape_progress_widget(label_prefix: str = ""):
         }.get(status, status)
         suffix = f" ({i}/{total})" if total else ""
         bar.progress(frac, text=f"{label_prefix}{status_txt}{suffix} — {label[:50]}")
-
     return bar, _cb
-
-
 def _matches_to_df(matches: list) -> pd.DataFrame:
     if not matches:
         return pd.DataFrame()
@@ -261,8 +263,6 @@ def _matches_to_df(matches: list) -> pd.DataFrame:
             "uitslagenblad":   m.get("uitslagenblad_url") or "",
         })
     return pd.DataFrame(rows)
-
-
 # PADEL_ANALYSIS_STATS_FROM_MATCHES_FIX_2026-09-07
 def _calc_stats_from_matches(matches: list) -> dict:
     matches = matches or []
@@ -279,8 +279,6 @@ def _calc_stats_from_matches(matches: list) -> dict:
         "tournament_matches": sum(1 for m in matches if m.get("match_type") == "tornooi"),
         "interclub_matches": sum(1 for m in matches if m.get("match_type") == "interclub"),
     }
-
-
 def _persist_stats_if_needed(player_id: str, player_doc: dict, live_stats: dict) -> None:
     """PADEL_ANALYSIS_STATS_SELFHEAL_2026-09-07."""
     stored = (player_doc or {}).get("stats", {}) or {}
@@ -292,15 +290,11 @@ def _persist_stats_if_needed(player_id: str, player_doc: dict, live_stats: dict)
         )
     except Exception:
         pass
-
-
 def _winrate_str(wins, losses) -> str:
     known = wins + losses
     if known == 0:
         return "–"
     return f"{round(wins / known * 100, 1)}%"
-
-
 def _render_metrics(total, wins, losses, t_matches, ic_matches):
     cols = st.columns(5)
     cols[0].metric("Totaal matches", total)
@@ -308,8 +302,6 @@ def _render_metrics(total, wins, losses, t_matches, ic_matches):
     cols[2].metric("Verlies", losses)
     cols[3].metric("Winrate", _winrate_str(wins, losses))
     cols[4].metric("Tornooi / Interclub", f"{t_matches} / {ic_matches}")
-
-
 def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -332,8 +324,6 @@ def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
     result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
     return result
-
-
 def _render_table(df: pd.DataFrame, name_col: str, height=400):
     if df.empty:
         st.info("Geen data beschikbaar.")
@@ -371,8 +361,6 @@ def _render_table(df: pd.DataFrame, name_col: str, height=400):
             "winrate": st.column_config.TextColumn("WR", width="small"),
         },
     )
-
-
 # ─────────────────────────────────────────────
 # State/profiel-helpers
 # ─────────────────────────────────────────────
@@ -389,14 +377,10 @@ def _load_poule_fixtures(reeks_url: str):
         return fixtures, None
     except Exception as e:
         return [], str(e)
-
-
 def _load_poule_schedule_robust(player_id: str, reeks_url: str):
     """PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16.
-
     Robuuste, persisterende manier om het wedstrijdschema van een speler op
     te halen wanneer de gebruiker op '📅 Volgende match laden' klikt.
-
     Is lokaal scrapen beschikbaar, dan wordt volledig gedelegeerd aan
     poule_playwright.update_player_poule(player_id) — dezelfde functie die
     de GitHub Actions-workflow en manual_poule_input.py al gebruiken. Die
@@ -405,11 +389,9 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
     uitslagenblad), scopet op pouleId, en schrijft het resultaat naar
     Firestore. De meegegeven `reeks_url` wordt in dit pad NIET gebruikt —
     die dient uitsluitend voor de kale fallback hieronder.
-
     Is lokaal scrapen niet beschikbaar (cloud) of faalt de Playwright-weg
     onverwacht, dan valt dit terug op de oude _load_poule_fixtures(reeks_url)
     (geen persistentie, geen pouleId-scoping).
-
     Returns (fixtures, fetch_error, meta):
         fixtures    : lijst fixture-dicts, of [] bij een fout.
         fetch_error : None, of een leesbare foutmelding.
@@ -423,7 +405,6 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
     if not is_scraping_available():
         fixtures, error = _load_poule_fixtures(reeks_url)
         return fixtures, error, None
-
     try:
         import poule_playwright as pp
     except Exception:
@@ -431,7 +412,6 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
         # te importeren -> val terug op de kale weg i.p.v. hard te crashen.
         fixtures, error = _load_poule_fixtures(reeks_url)
         return fixtures, error, None
-
     try:
         result = pp.update_player_poule(str(player_id), headless=True)
     except Exception as e:
@@ -441,10 +421,8 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
         if fixtures:
             return fixtures, None, None
         return [], str(e), None
-
     if result.get("error"):
         return [], result["error"], None
-
     fixtures, _sched_at = _get_saved_schedule(player_id)
     meta = {
         "poule_id": result.get("poule_id"),
@@ -453,12 +431,8 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
         "source": result.get("source"),
     }
     return fixtures, None, meta
-
-
 def _clean_name(text: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
-
-
 def _get_all_profiles() -> list:
     """PADEL_ANALYSIS_GHOST_PROFILE_FILTER_2026-09-12:
     Filtert documenten zonder display_name/player_id uit de Spelers-lijst."""
@@ -471,16 +445,12 @@ def _get_all_profiles() -> list:
         ]
     except Exception:
         return []
-
-
 def _get_saved_poule_url(player_id: str) -> Optional[str]:
     try:
         prof = fb.get_player_profile(player_id) or {}
         return prof.get("poule_reeks_url") or None
     except Exception:
         return None
-
-
 def _save_poule_url(player_id: str, url: str) -> None:
     try:
         fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
@@ -488,8 +458,6 @@ def _save_poule_url(player_id: str, url: str) -> None:
         )
     except Exception:
         pass
-
-
 def _get_saved_schedule(player_id: str):
     try:
         prof = fb.get_player_profile(player_id) or {}
@@ -499,8 +467,6 @@ def _get_saved_schedule(player_id: str):
     if not isinstance(fixtures, list):
         fixtures = []
     return fixtures, prof.get("interclub_schedule_scraped_at")
-
-
 def _official_current_rank(player_id: str) -> Optional[float]:
     """PADEL_ANALYSIS_MATCH1_STRONGEST_RULE_2026-09-14:
     Geeft het OFFICIËLE, HUIDIGE TVL-klassement terug voor een eigen speler -
@@ -520,13 +486,10 @@ def _official_current_rank(player_id: str) -> Optional[float]:
     ranking_doc = doc if doc.get("klassement_history") else profile_doc
     rows = od._history_rows(ranking_doc)
     return float(rows[0]["rank"]) if rows else None
-
-
 def _render_player_ranking_summary(player_id: str) -> None:
     """PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
     Toont het officiële TVL-klassement en de padelstats.be playing strength
     DUIDELIJK (st.metric, twee kolommen) voor een gegeven speler.
-
     PADEL_ANALYSIS_PADELSTAT_AUTOMATIC_CAPTION_2026-09-16: ontbreekt de
     playing strength, dan legt de caption uit dat dit AUTOMATISCH gebeurt via
     de reguliere sync, met (enkel zichtbaar als een GitHub-token
@@ -557,3 +520,98 @@ def _render_player_ranking_summary(player_id: str) -> None:
             mode="missing",
             label="🔄 Playing strength nu ophalen",
         )
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20: zie module-docstring hierboven
+# voor de volledige achtergrond/root-cause-analyse.
+# ─────────────────────────────────────────────
+_TEAM_LETTER_SUFFIX_RE = re.compile(r"\s+[A-Za-z]$")
+def _strip_team_letter_suffix(text: str) -> str:
+    """Knipt een losse team-letter aan het einde weg ("Padel Factory A" ->
+    "Padel Factory"). Lokale kopie van dezelfde heuristiek als
+    scraper/enrich_opponents.py (daar voor TEGENSTANDERS, hier voor de
+    EIGEN speler) - bewust hier gedupliceerd i.p.v. geïmporteerd, zodat dit
+    UI-bestand geen afhankelijkheid van de Playwright-scraper-map krijgt."""
+    return _TEAM_LETTER_SUFFIX_RE.sub("", (text or "").strip()).strip()
+def _get_club(player_id: str) -> Optional[str]:
+    """Geeft de huidige, opgeslagen club/ploeg van deze speler terug (of
+    None als nog niet ingesteld)."""
+    try:
+        prof = fb.get_player_profile(player_id) or {}
+    except Exception:
+        prof = {}
+    club = (prof.get("club") or "").strip()
+    return club or None
+def _save_club(player_id: str, club: str) -> None:
+    """Slaat de club/ploeg van deze speler op (merge=True, raakt geen
+    andere velden van het profiel)."""
+    try:
+        fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
+            {"club": (club or "").strip()}, merge=True,
+        )
+    except Exception:
+        pass
+def _render_club_editor(player_id: str, profile: dict, key_prefix: str) -> None:
+    """PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20 (op verzoek van Kim: "Die
+    scrape moet weten in welke ploeg ik speel. ik kan dat niet instellen. ik
+    zie daar geen veld voor. dat moet zichtbaar en wijzigbaar zijn."):
+    Toont het huidige club/ploeg-veld van deze speler, ZICHTBAAR EN
+    WIJZIGBAAR. Dit veld bepaalt of scraper/refresh_padelstat_only.py deze
+    speler OVERHAUPT opzoekt op padelstats.be (zie PADEL_ANALYSIS_CLUB_
+    REQUIRED_TO_SCRAPE_2026-09-20 aldaar - een speler zonder gekende club
+    wordt daar NIET opgezocht, uit voorzorg tegen gelijknamige spelers bij
+    andere clubs) en wordt ook gebruikt als disambiguatie-hint door
+    padelstats_scraper.py/enrich_opponents.py.
+    Ingeklapt getoond (expanded=False) zodra er al een club gekend is (dan
+    is dit vooral een correctie-mogelijkheid), maar UITGEKLAPT (expanded=
+    True) zodra er nog GEEN club gekend is - net op de plek waar dit het
+    meest opvalt en het meest nodig is om in te vullen."""
+    current = _get_club(player_id) or (profile.get("club") or "").strip() or None
+    header = f"🏟️ Club/ploeg: {current}" if current else "🏟️ Club/ploeg (nog niet ingesteld ⚠️)"
+    with st.expander(header, expanded=not bool(current)):
+        st.caption(
+            "Bepaalt bij welke club/ploeg deze speler gezocht wordt op padelstats.be (playing "
+            "strength + officieel klassement, zie 'Officieel klassement' hieronder). Zonder "
+            "gekende club wordt deze speler NIET automatisch ververst, om verwarring met "
+            "gelijknamige spelers bij andere clubs te vermijden."
+        )
+        new_value = st.text_input(
+            "Club/ploeg", value=current or "", key=f"{key_prefix}_club_input_{player_id}",
+            placeholder="Bv. Padel Factory",
+        )
+        if st.button("💾 Club opslaan", key=f"{key_prefix}_club_save_{player_id}"):
+            _save_club(player_id, new_value)
+            st.success("Club opgeslagen.")
+            st.rerun()
+def _maybe_autodetect_own_club(player_id: str, fixtures: list, own_ploeg_id: Optional[str]) -> None:
+    """PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20 (op verzoek van Kim:
+    "bijkomend zou je normaal dat veld moeten kunnen automatisch
+    detecteren als je weet dat iemand voor een bepaalde ploeg speelt"):
+    Leidt, zodra de EIGEN ploeg in een specifieke poule herkend is
+    (own_ploeg_id, via schedule_scraper.identify_own_ploeg_id() of de
+    handmatige team-picker in page_lineup_lab.py._resolve_own_ploeg_id()),
+    een club-naam af uit de bijhorende teamnaam (bv. "PADEL FACTORY A" ->
+    "PADEL FACTORY") en slaat die ENKEL op als de speler nog GEEN club
+    had. Overschrijft NOOIT een reeds ingestelde club (die kan bewust
+    anders zijn, bv. bij dubbel-clublidmaatschap) - in dat geval gebeurt
+    hier stilzwijgend niets. Bedoeld om aangeroepen te worden vanuit
+    page_lineup_lab.py, waar fixtures/own_ploeg_id al gekend zijn zodra
+    het wedstrijdschema geladen is."""
+    if not own_ploeg_id or not fixtures:
+        return
+    if _get_club(player_id):
+        return  # al gekend - nooit overschrijven.
+    team_name = None
+    for f in fixtures:
+        if str(f.get("home_ploeg_id")) == str(own_ploeg_id):
+            team_name = f.get("home_name")
+            break
+        if str(f.get("away_ploeg_id")) == str(own_ploeg_id):
+            team_name = f.get("away_name")
+            break
+    if not team_name:
+        return
+    derived = _strip_team_letter_suffix(team_name)
+    if not derived:
+        return
+    _save_club(player_id, derived)
+    st.caption(f"ℹ️ Club automatisch ingesteld op '{derived}' (afgeleid van je teamnaam in deze poule).")
