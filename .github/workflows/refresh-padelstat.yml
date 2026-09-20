@@ -1,85 +1,117 @@
 # .github/workflows/refresh-padelstat.yml
 #
-# Wekelijkse (elke maandag), volledig geïsoleerde controle/herstel van
-# padelstats.be playing strength voor alle spelers (eigen team + tegenstanders).
+# UURLIJKSE, kleine-batch controle/herstel van padelstats.be playing
+# strength voor alle spelers (eigen team + alle reeds ingestelde
+# tegenstanders — player_profiles bevat ze allemaal, ongeacht team).
 #
-# Bewust een APARTE workflow, losgekoppeld van scrape-padel.yml (matchdata):
-#   - scrape-padel.yml liep vast op de 30-minuten-limiet naarmate de
-#     spelerslijst groeide; dit script mag daar niet opnieuw tegenaan lopen.
-#   - "een speler verversen" loste padelstat-problemen tot nu toe niet op
-#     (zie refresh_padelstat_only.py se moduledocstring: PADELSTAT_LOGIC_
-#     VERSION-zelfherstel-mechanisme). Dit is de gerichte, op zichzelf
-#     staande oplossing daarvoor, om onafhankelijk van de bredere
-#     timeout-fix al te kunnen draaien.
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20 (op verzoek van Kim: "bij
+# veel scrapen riskeer ik blokkeren en ook te lange tijd. Periodiek mag mss
+# gewoon per uur 2 spelers ofzo van mijn ganse lijst? [...] Wel belangrijk om
+# scrape direct te stoppen als de data al actueel is")
+# --------------------------------------------------------------------------
+# WAAROM een kleine, uurlijkse batch i.p.v. de vorige wekelijkse batch van 55:
+#   - Kleinere, regelmatige vlagen vallen minder op / risico op blokkering
+#     door padelstats.be is lager dan één grote wekelijkse burst.
+#   - De looptijd per run blijft triviaal kort (2 spelers x ~10-30s), ruim
+#     onder elke timeout — geen enkele reden meer om te wachten tot maandag.
+#   - refresh_padelstat_only.py heeft nu een TIJDSGEBASEERDE staleness-check
+#     (PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20, standaard 14 dagen):
+#     een speler die al actueel is, wordt NOOIT als kandidaat geselecteerd —
+#     dit is de concrete invulling van "stop direct als de data al actueel
+#     is": er wordt nooit een scrape GESTART voor een speler die dat niet
+#     nodig heeft, in plaats van een lopende scrape af te breken.
+#   - Bij bv. 150 gekende spelers en een 14-dagen-cyclus betekent dit dat elke
+#     speler gemiddeld om de ~50 uur (~2 dagen) opnieuw gecontroleerd wordt —
+#     ruim vaak genoeg voor een waarde die niet elk uur verandert.
 #
-# Verwerkt STANDAARD max 55 spelers per run (zie PADELSTAT_MAX hieronder).
-# Wie deze run niet aan bod komt, wordt de VOLGENDE wekelijkse run opgepikt.
-#
-# LET OP: naast deze wekelijkse achtergrondtaak wordt padelstat ook
+# LET OP: naast deze uurlijkse achtergrondtaak wordt padelstat ook
 # AUTOMATISCH geforceerd ververst telkens Kim op "Tegenstander
 # analyseren"/"Verversen" klikt in de Team-analyse (zie
 # opponent_scout_ui.py: _run_scout_and_scrape() en opponent_analysis.py:
-# render_team_header()) - dat garandeert de meest actuele waarde exact op
-# het moment dat de analyse gebeurt, i.p.v. te moeten wachten op de
-# eerstvolgende maandag.
+# render_team_header()), en via de per-speler-verversknop (cloud_helpers.py:
+# render_full_player_scrape_button()) - dat garandeert de meest actuele
+# waarde exact op het moment dat je ernaar kijkt, i.p.v. te moeten wachten
+# op het eerstvolgende uurlijkse moment.
 #
 # --------------------------------------------------------------------------
 # PADEL_ANALYSIS_PREBUILT_DOCKER_IMAGE_2026-09-19 (op verzoek van Kim: "docker
 # image" - performance-item)
 # --------------------------------------------------------------------------
-# ROOT CAUSE opgelost: deze workflow installeerde tot nu toe, bij ELKE run,
-# vanaf nul de Python-dependencies EN de Chromium-browserbinary via
-# `playwright install --with-deps chromium` - ZONDER enige cache (in
-# tegenstelling tot scrape-padel.yml, dat wel al een cache-laag had). Dat
-# kostte structureel 1-2 minuten pure setup-tijd, elke week opnieuw, los van
-# het eigenlijke padelstat-scrapen.
-# FIX: draait voortaan rechtstreeks in het vooraf-gebouwde image (zie
-# PadelAnalysis/scraper/Dockerfile + .github/workflows/build-scraper-image.yml),
-# waarin de Python-dependencies EN de Chromium-browserbinary AL geïnstalleerd
-# zitten. Geen enkele installatiestap meer nodig.
+# Draait in het vooraf-gebouwde image (zie PadelAnalysis/scraper/Dockerfile +
+# .github/workflows/build-scraper-image.yml) - Python-dependencies EN de
+# Chromium-browserbinary zitten daar al in, geen installatiestap meer nodig.
+#
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_CLUB_OVERRIDE_2026-09-19 (op verzoek van Kim, chat
+# 2026-09-19, zie refresh_padelstat_only.py se module-docstring voor de
+# volledige toelichting/het exacte log-fragment)
+# --------------------------------------------------------------------------
+# Optionele "club"-input: wordt doorgegeven als CLUB env var aan
+# refresh_padelstat_only.py, gebruikt als disambiguatie-hint voor spelers in
+# deze run die zelf nog geen club hebben (bv. bij het gericht verversen van
+# een specifieke, gekende tegenstander-ploeg via de "player"-input
+# hierboven). Laat leeg voor het normale, per-profiel-club gedrag.
+#
+# PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20 (op verzoek van Kim: "als
+# ik dat run dan weet die niet welke club de speler toe behoort [...]
+# gelieve dan playing strength leeg te laten en te vragen om bij de speler
+# de ploeg op te geven"): een speler ZONDER gekende club (en zonder "club"-
+# input hierboven) wordt sinds deze fix NIET meer blind opgezocht - die
+# wordt overgeslagen en apart gerapporteerd in de run-log ("club onbekend").
+# Gebruik de per-speler-verversknop in de app om voor zo'n speler eenmalig
+# de club/ploeg in te vullen; daarna pikt zowel die knop als deze uurlijkse
+# achtergrondtaak die speler gewoon weer op.
 #
 # Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
 #                                   scrape-padel.yml/sync-mAIcoach.yml)
 #
 # Handmatig testen/forceren: Actions -> Refresh padelstat -> Run workflow,
-# met desgewenst een aangepaste 'max' of 'force_all' input.
+# met desgewenst een aangepaste 'max', 'force_all', 'player', 'club' of
+# 'stale_days' input.
 name: Refresh padelstat (padelstats.be)
 on:
   schedule:
-    # Wekelijks, enkel op MAANDAG (cron day-of-week: 1 = maandag), om 04:07
-    # UTC. Bewust NIET op scrape-padel.yml se eigen cron-tijdstip, en bewust
-    # NIET op het volle uur (zie de bekende GitHub Actions
-    # schedule-onbetrouwbaarheid rond :00). Een gemiste week is onschuldig:
-    # de volgende maandag pikt gewoon verder op - en elke "Tegenstander
-    # analyseren"-klik ververst ondertussen sowieso al gericht de relevante
-    # spelers (zie hierboven).
-    - cron: "7 4 * * 1"
+    # PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20: elk uur, 13 minuten
+    # na het volle uur (bewust NIET op :00, zie de bekende GitHub Actions
+    # schedule-onbetrouwbaarheid rond het volle uur). Een gemiste run is
+    # onschuldig: het volgende uur pikt gewoon verder op, en elke
+    # "Tegenstander analyseren"-klik / per-speler-knop ververst ondertussen
+    # sowieso al gericht de relevante spelers (zie hierboven).
+    - cron: "13 * * * *"
   workflow_dispatch:
     inputs:
       max:
-        description: "Max aantal spelers deze run"
+        description: "Max aantal spelers deze run (standaard 2 voor de uurlijkse trickle-refresh)"
         required: false
-        default: "55"
+        default: "2"
       force_all:
-        description: "Iedereen opnieuw controleren, ongeacht versie-marker (true/false)"
+        description: "Iedereen opnieuw controleren, ongeacht versie-marker/staleness (true/false)"
         required: false
         default: "false"
       player:
-        description: "Enkel dit ene player_id controleren (optioneel, laat leeg voor normale werking)"
+        description: "Enkel dit ene player_id (of komma-gescheiden lijst) controleren (optioneel, laat leeg voor normale werking)"
         required: false
         default: ""
+      club:
+        description: "Club-naam als disambiguatie-hint voor spelers (in 'player') die zelf nog geen club hebben (optioneel)"
+        required: false
+        default: ""
+      stale_days:
+        description: "Na hoeveel dagen een actuele rating opnieuw ververst wordt (standaard 14, 0 = uitschakelen)"
+        required: false
+        default: "14"
 concurrency:
   group: refresh-padelstat
   cancel-in-progress: false
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Ruim onder de 30-minuten-limiet die scrape-padel.yml deed vastlopen:
-    # bij PADELSTAT_MAX=55 en ~15-30s per speler blijft dit ruim binnen 25
-    # minuten. Expliciet begrensd zodat een onverwacht trage run wordt
-    # afgebroken i.p.v. de volgende wekelijkse run te blokkeren.
-    timeout-minutes: 25
+    # Ruim volstaand voor een kleine batch (max=2, ~15-60s totaal); blijft
+    # begrensd zodat een onverwacht vastgelopen run de VOLGENDE uurlijkse
+    # run niet blokkeert (concurrency.group hierboven wacht anders op deze).
+    timeout-minutes: 10
     container:
       image: ghcr.io/kimverbeke1/padelanalysis-scraper:latest
       credentials:
@@ -92,14 +124,22 @@ jobs:
         working-directory: PadelAnalysis/scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-          PADELSTAT_MAX: ${{ github.event.inputs.max || '55' }}
+          PADELSTAT_MAX: ${{ github.event.inputs.max || '2' }}
+          PADELSTAT_STALE_DAYS: ${{ github.event.inputs.stale_days || '14' }}
+          # PADEL_ANALYSIS_CLUB_OVERRIDE_2026-09-19: doorgegeven als env var
+          # (zelfde patroon als PADELSTAT_MAX) i.p.v. als bash --club-arg,
+          # zodat spaties/aanhalingstekens in clubnamen nooit een
+          # quoting-probleem in de shell-ARGS-opbouw kunnen veroorzaken -
+          # refresh_padelstat_only.py leest CLUB al rechtstreeks als default
+          # voor --club (zie argparse daar).
+          CLUB: ${{ github.event.inputs.club }}
         run: |
-          ARGS="--max ${PADELSTAT_MAX}"
+          ARGS="--max ${PADELSTAT_MAX} --stale-days ${PADELSTAT_STALE_DAYS}"
           if [ "${{ github.event.inputs.force_all }}" = "true" ]; then
             ARGS="$ARGS --force-all"
           fi
           if [ -n "${{ github.event.inputs.player }}" ]; then
             ARGS="$ARGS --player ${{ github.event.inputs.player }}"
           fi
-          echo "Uitvoeren: python refresh_padelstat_only.py $ARGS"
+          echo "Uitvoeren: python refresh_padelstat_only.py $ARGS (CLUB env: '${CLUB}')"
           python refresh_padelstat_only.py $ARGS
