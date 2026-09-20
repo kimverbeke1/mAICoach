@@ -3,7 +3,6 @@ player_dashboard_shared.py — render_player_dashboard(): de volledige
 spelersprofiel-weergave (Overzicht/Match Explorer/Partners/Tegenstanders/
 Klassement/Debug-tabs), HERGEBRUIKT door zowel "👤 Mijn profiel" als
 "🔍 Spelers".
-
 PADEL_ANALYSIS_SPLIT_DASHBOARD_2026-09-14: losgemaakt uit dashboard.py.
 Was voorheen _render_player_dashboard() (met underscore-prefix, "privé"
 binnen dashboard.py); nu PUBLIEK (render_player_dashboard, geen underscore)
@@ -13,11 +12,30 @@ functies destijds publiek werden gemaakt toen dashboard.py ze rechtstreeks
 ging aanroepen.
 _render_refresh_controls en _render_padelstat_section blijven wel
 "privé" (underscore) - die worden ENKEL binnen dit bestand gebruikt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21 (op verzoek van Kim: "waar zou
+ik die refresh knop per speler moeten zien. [...] Die refresh mag dan
+alles refreshen. padelstat playing strength, officieel klassement en
+matchen (slim, enkel laatste checken als al gescrapet)")
+--------------------------------------------------------------------------
+BUG (opgelost): _render_refresh_controls() (het HOOFD-refreshknop-scherm
+bovenaan "👤 Mijn profiel" en "🔍 Spelers") triggerde op Cloud voorheen
+UITSLUITEND render_cloud_scrape_trigger(mode="missing") — dat ververst
+enkel de matchdata, NOOIT playing strength of officieel klassement.
+FIX: gebruikt nu cloud_helpers.render_full_player_scrape_button() — de
+gecombineerde, slimme trigger (matchdata "missing" + playing strength +
+officieel klassement, met club-verplichting) die ook elders in de app
+gebruikt wordt (Team-analyse, Detail-per-speler, player_inline_actions.py),
+zodat dit scherm consistent hetzelfde gedrag toont als overal elders.
+Lokaal is een NIEUWE sectie toegevoegd (_render_local_padelstat_klassement_
+refresh() uit player_inline_actions.py, hergebruikt i.p.v. gedupliceerd)
+die playing strength + officieel klassement synchroon ververst — SLIM: als
+de bestaande waarde nog vers is (< 14 dagen oud), gebeurt er NIETS, geen
+enkele padelstats.be-aanroep.
 """
 import datetime as _datetime_module
 import streamlit as st
 import pandas as pd
-
 import dashboard_common as dc
 from dashboard_common import (
     fb, ll, lq, pia, is_scraping_available, render_cloud_scrape_trigger,
@@ -25,16 +43,24 @@ from dashboard_common import (
     _persist_stats_if_needed, _winrate_str, _render_metrics, _summarize_opponents,
     _render_table, _period_sort_key, _scrape_progress_widget, _get_all_profiles,
 )
-
-
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
+    """PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21: zie module-docstring
+    hierboven voor de volledige toelichting bij deze fix."""
     if not is_scraping_available():
-        render_cloud_scrape_trigger(
-            key_prefix=key_prefix,
-            player_ids=str(player_id),
-            mode="missing",
-            label="🔄 Dit profiel verversen",
-        )
+        try:
+            import cloud_helpers as ch
+            ch.render_full_player_scrape_button(
+                str(player_id), player_name=profile.get("display_name") or "", key_prefix=key_prefix,
+            )
+        except Exception:
+            # Defensieve fallback: nooit de rest van de pagina blokkeren
+            # als cloud_helpers om een onverwachte reden niet beschikbaar is.
+            render_cloud_scrape_trigger(
+                key_prefix=key_prefix,
+                player_ids=str(player_id),
+                mode="missing",
+                label="🔄 Dit profiel verversen (enkel matchdata)",
+            )
         return
     rc1, rc2 = st.columns(2)
     with rc1:
@@ -61,8 +87,17 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
-
-
+    # PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21: lokaal was er tot nu toe
+    # GEEN plek op dit scherm om playing strength + officieel klassement te
+    # verversen (enkel de losse padelstat-sectie verderop, die enkel TOONT,
+    # niet ververst). Hergebruikt hier dezelfde slimme, lokale refresh-
+    # functie als player_inline_actions.py (geen duplicatie van die logica),
+    # zodat "Mijn profiel"/"Spelers" ook lokaal een volledige refresh
+    # aanbiedt op 1 centrale plek.
+    st.divider()
+    pia._render_local_padelstat_klassement_refresh(
+        str(player_id), profile.get("display_name") or str(player_id), key_prefix,
+    )
 def _render_padelstat_section(player_id: str) -> None:
     """PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13."""
     st.divider()
@@ -73,9 +108,8 @@ def _render_padelstat_section(player_id: str) -> None:
         cached = None
     if not cached or cached.get("rating") is None:
         st.info(
-            "Nog niet opgehaald van padelstats.be voor deze speler. Voer lokaal "
-            "'python bulk_fetch_padelstat_ratings.py' uit (vereist Playwright) "
-            "om dit aan te vullen."
+            "Nog niet opgehaald van padelstats.be voor deze speler. Gebruik de refresh-knop "
+            "hierboven (verwerkt playing strength + officieel klassement in 1 stap)."
         )
         return
     st.metric("Playing strength", f"P{cached['rating']}")
@@ -83,8 +117,6 @@ def _render_padelstat_section(player_id: str) -> None:
         f"Bron: padelstats.be · opgehaald op {_format_scraped_at(cached.get('fetched_at'))} · "
         "onafhankelijke, externe schatting - geen officieel TVL-klassement."
     )
-
-
 def render_player_dashboard(player_id: str, profile: dict):
     """Stats + tabs voor één speler. Herbruikt door 'Mijn profiel' en 'Spelers'."""
     player_doc = fb.get_player(player_id)
@@ -402,10 +434,22 @@ def render_player_dashboard(player_id: str, profile: dict):
             scraped = _format_scraped_at(klassement_doc.get("scraped_at"))
             st.caption(f"Klassement gescraped op: {scraped}")
         else:
-            st.info(
-                "Nog geen klassementsdata beschikbaar. Klik hieronder om de klassementshistoriek te laden. "
-                "Dit opent een browser en doorloopt alle beschikbare periodes (~30-60 seconden)."
-            )
+            official_via_padelstat = fb.get_official_klassement_via_padelstat(player_id) if hasattr(fb, "get_official_klassement_via_padelstat") else None
+            if official_via_padelstat and official_via_padelstat.get("klassement") is not None:
+                # PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-21:
+                # nog geen volledige TVL-historiek, maar wél al een snapshot
+                # via padelstats.be beschikbaar - beter tonen dan niets.
+                onzeker = "" if official_via_padelstat.get("club_confirmed", True) else " ⚠️ club niet met zekerheid bevestigd"
+                st.info(
+                    f"Nog geen volledige klassementshistoriek (TVL) beschikbaar. Wel al een recente "
+                    f"schatting via padelstats.be: **P{official_via_padelstat['klassement']}**{onzeker} "
+                    f"(opgehaald op {_format_scraped_at(official_via_padelstat.get('fetched_at'))})."
+                )
+            else:
+                st.info(
+                    "Nog geen klassementsdata beschikbaar. Klik hieronder om de klassementshistoriek te laden. "
+                    "Dit opent een browser en doorloopt alle beschikbare periodes (~30-60 seconden)."
+                )
         if is_scraping_available():
             if st.button("📥 Klassementshistoriek laden / verversen", key=f"load_klassement_{player_id}"):
                 from scrape_klassement import scrape_klassement, klassement_to_history_summary, extract_niveau_winrates

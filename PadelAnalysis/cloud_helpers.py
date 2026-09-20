@@ -51,10 +51,30 @@ scraping voor missing/laatste periode zoals vroeger al aangehaald")
 Nieuwe functie: render_full_player_scrape_button(). Combineert, met ÉÉN
 klik, TWEE afzonderlijke achtergrond-triggers voor exact 1 speler:
   1. scrape-padel.yml, mode="missing" — TVL-matchdata, enkel de ontbrekende
-     periode(s)/de huidige actieve periode.
+     periode(s)/de huidige actieve periode (SLIM: enkel wat nog niet
+     gescraped is, geen volledige herscrape).
   2. refresh-padelstat.yml, met inputs={"player": <id>, "max": "1",
      "force_all": "false"} — ververst de padelstats.be playing strength
-     voor EXACT deze ene speler.
+     VOOR EXACT deze ene speler, SLIM (force_all=false: skip als de
+     bestaande waarde nog vers is, zie refresh_padelstat_only.needs_check()).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_IN_SINGLE_REFRESH_2026-09-21 (op verzoek
+van Kim: "die refresh knop [...] mag dan alles refreshen. padelstat
+playing strength, officieel klassement en matchen")
+--------------------------------------------------------------------------
+BELANGRIJKE WIJZIGING t.o.v. de eerdere versie van deze functie: die
+docstring/UI-tekst zei destijds EXPLICIET dat "het officiële klassement
+hier bewust niet meegenomen wordt". Dat was correct OP DAT MOMENT (het
+officiële klassement kwam toen enkel uit de trage, aparte TVL-2x/jaar-
+klassementscrape). Sinds refresh_padelstat_only.py (PADEL_ANALYSIS_
+OFFICIAL_KLASSEMENT_IN_SINGLE_REFRESH_2026-09-21, zie dat bestand) het
+officiële klassement AUTOMATISCH meeneemt bij ELKE padelstat-opzoeking
+(zonder extra Playwright-sessie — het komt uit dezelfde padelstats.be-
+zoekkaart), doet DEZE knop dat nu ook: de trigger op refresh-padelstat.yml
+hieronder is ONGEWIJZIGD, maar het EFFECT ervan is uitgebreid omdat het
+onderliggende script nu meer opslaat. De UI-tekst is aangepast om dit
+correct te communiceren — geen "niet meegenomen" meer, wel duidelijk dat
+dit de padelstats.be-gebaseerde SNAPSHOT is (geen volledige TVL-historiek).
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18 (op verzoek van Kim,
 na het testen van de knop hierboven: "duurt eerst lang tegen dat je daar
@@ -74,45 +94,17 @@ Kim's melding, samengevat in 2 punten:
      dat is niet relevant voor de gebruiker. ook de tekst dat deze
      omgeving zelf niet kan scrapen etc... is niet relevant voor de
      gebruiker." — ELKE tekst die de gebruiker in de lopende app ziet
-     (st.caption/st.write/st.warning/st.success/st.error/label/help/
-     button-tekst) mag NERGENS meer "GitHub", "workflow", "Actions",
-     "deze omgeving kan niet scrapen" of vergelijkbaar jargon bevatten.
-     Interne code-commentaren/docstrings (zoals deze) blijven WEL technisch
-     correct, want die zijn voor ontwikkeling, niet voor de eindgebruiker.
+     mag NERGENS meer "GitHub", "workflow", "Actions", "deze omgeving kan
+     niet scrapen" of vergelijkbaar jargon bevatten. Interne code-
+     commentaren/docstrings (zoals deze) blijven WEL technisch correct.
   2. "Een beetje vervelend is dat je na het drukken op 'schema nu
-     verversen' niet echt feedback krijgt van hoe ver github er mee staat
-     en of hij nog bezig is of klaar is. [...] bvb gewoon stap 1 van X of
-     zoiets zodat je toch enige voortgang ziet?" — een eenmalig "✅
-     Getriggerd in 1.2s"-berichtje (render_cloud_scrape_trigger) ís geen
-     voortgang, enkel een bevestiging dat de aanvraag vertrokken is. Dat
-     probleem was al gedeeltelijk opgelost voor render_full_player_
-     scrape_button() (sessie-persistente eindresultaten), maar NERGENS was
-     er een tussentijdse "stap X van Y"-indicatie terwijl de achtergrond-
-     taak nog liep.
-FIX, twee onderdelen:
-  - _find_run_started_after() / _get_run_step_progress(): NIEUWE, interne
-    (niet UI-gerichte) helpers die, NA een geslaagde trigger, de recentste
-    run van die achtergrondtaak opzoeken (op basis van het tijdstip van de
-    trigger) en per stap (elke YAML-stap = 1 "step") aflezen of die
-    voltooid, bezig, of nog niet gestart is.
-  - _render_tracked_progress(): toont dit als een levende voortgangsbalk
-    ("Stap 2 van 5 — <stapnaam>") in een st.empty()-placeholder, met een
-    begrensde polling-lus (max ~4 minuten, elke 4s een check — ruim binnen
-    de gebruikelijke 1-3 minuten wachttijd). Het EINDRESULTAAT (geslaagd/
-    mislukt/duurt-langer-dan-verwacht) blijft nadien, net als voorheen,
-    bewaard in st.session_state zodat een latere pagina-rerun de feedback
-    niet kan laten verdwijnen.
-  - render_cloud_scrape_trigger() en render_full_player_scrape_button()
-    gebruiken deze nieuwe helper nu ALTIJD na een geslaagde trigger — dit
-    is dus 1 centrale plek, dus ELKE bestaande aanroepplek (de "Schema nu
-    verversen"-knop in page_lineup_lab.py, de klassement/playing-strength-
-    knoppen in opponent_scout_ui.py, de ranking-knop in
-    dashboard_common.py, ...) krijgt deze verbetering automatisch mee,
-    zonder dat die aanroepplekken zelf hoeven te wijzigen.
-  - check_workflow_registered() bestaat nog (intern, voor de pre-flight-
-    check), maar de detail-strings zijn NEUTRAAL gemaakt (geen "GitHub",
-    geen "workflow", geen "default branch" meer) — ook bij een falende
-    pre-flight-check ziet de gebruiker enkel een neutrale melding.
+     verversen' niet echt feedback krijgt [...] bvb gewoon stap 1 van X of
+     zoiets zodat je toch enige voortgang ziet?" — levende "stap X van Y"-
+     voortgangsbalk i.p.v. enkel een eenmalig "gestart"-berichtje.
+FIX, twee onderdelen: _find_run_started_after()/_get_run_step_progress()
+(interne helpers die de recentste run opzoeken en per stap aflezen), en
+_render_tracked_progress() die dit toont als levende voortgangsbalk. Het
+eindresultaat blijft bewaard in st.session_state.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PER_PLAYER_CLUB_REQUIRED_2026-09-20 (op verzoek van Kim: "Het
 zou eigenlijk mss het eenvoudigste zijn dat je gemakkelijk op elke speler
@@ -124,23 +116,15 @@ ploeg op te geven of zoiets?")
 --------------------------------------------------------------------------
 ROOT CAUSE: render_full_player_scrape_button() triggerde de padelstat-
 achtergrondtaak altijd zonder een "club"-input mee te geven. Sinds
-refresh_padelstat_only.py een speler ZONDER gekende club nu bewust
-OVERSLAAT (PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20, om een
-verkeerde gelijknamige match te vermijden), zou een klik op deze knop voor
-zo'n speler stilzwijgend NIETS opleveren voor de playing-strength-helft
-(enkel een "club onbekend"-regel in de achtergrondtaak-log, die de
-gebruiker in de app nooit ziet).
-FIX: render_full_player_scrape_button() haalt nu eerst het bestaande
-profiel op (fb.get_player_profile()). Heeft de speler AL een club, dan
-verandert er niets (gedrag exact zoals voorheen). Ontbreekt de club, dan
-toont de knop-sectie EERST een verplicht tekstinvoerveld ("Club/ploeg van
-deze speler") — de "Scrape deze speler nu"-knop verschijnt pas zodra daar
-iets is ingevuld, en die ingevulde waarde wordt meteen meegegeven als
-"club"-input aan refresh-padelstat.yml (dezelfde workflow-input die de
-YAML/het script al ondersteunden voor een hele ploeg, nu ook bruikbaar
-voor 1 losse speler). Zo hoeft Kim nooit meer apart in de Spelers-pagina
-naar een speler te zoeken om enkel een club in te vullen — dat gebeurt nu
-inline, op de plek waar hij/zij de speler toch al aan het bekijken is.
+refresh_padelstat_only.py een speler ZONDER gekende club bewust OVERSLAAT
+(om een verkeerde gelijknamige match te vermijden), zou een klik op deze
+knop voor zo'n speler stilzwijgend NIETS opleveren voor de playing-
+strength/klassement-helft.
+FIX: render_full_player_scrape_button() haalt eerst het bestaande profiel
+op. Heeft de speler al een club, verandert er niets. Ontbreekt de club,
+dan toont de knop-sectie EERST een verplicht tekstinvoerveld ("Club/ploeg
+van deze speler") — de scrape-knop verschijnt pas zodra daar iets is
+ingevuld, en die waarde wordt meteen meegegeven als "club"-input.
 """
 import os
 import sys
@@ -218,11 +202,6 @@ def check_workflow_registered(workflow_file: str) -> tuple[bool, str]:
     """
     Interne, read-only pre-flight check (GEEN nieuwe run) die bevestigt of
     deze achtergrondtaak momenteel bereikbaar/gereed is.
-    PADEL_ANALYSIS_UI_NEUTRAL_LANGUAGE_AND_REAL_PROGRESS_2026-09-19: de
-    detail-strings zijn NEUTRAAL (geen "GitHub"/"workflow"/"default branch"
-    meer) — deze functie blijft intern nuttig (bv. om vooraf te weten of een
-    trigger zinvol is), maar alles wat de gebruiker uiteindelijk te zien
-    krijgt moet via de aanroeper neutraal geformuleerd worden.
     Returns (gevonden, detail):
       - (True, "actief")        -> kan gestart worden.
       - (True, "state=<state>") -> bestaat, maar staat niet klaar.
@@ -268,18 +247,7 @@ def trigger_github_actions_scrape(
     """
     Start een achtergrondtaak op afstand. Dit draait GEEN Playwright binnen
     Streamlit zelf — het triggert enkel de externe dienst die dat wél kan.
-    - workflow_file: optioneel, overschrijft welke achtergrondtaak
-      getriggerd wordt (standaard: uit st.secrets['github']['workflow'] of
-      DEFAULT_WORKFLOW_FILE, ONGEWIJZIGD gedrag).
-    - inputs: optioneel, een dict die RECHTSTREEKS als input-payload
-      gebruikt wordt. Wordt dit NIET meegegeven, dan wordt (net als
-      voorheen) {"player_ids": ..., "mode": ...} gebruikt.
     Returns (success, message).
-    PADEL_ANALYSIS_UI_NEUTRAL_LANGUAGE_AND_REAL_PROGRESS_2026-09-19: het
-    bericht bevat nog steeds de verstreken tijd (transparantie), maar
-    vermeldt nergens meer "GitHub"/"workflow"/een link naar Actions — de
-    aanroeper toont voortaan zelf de live voortgang via
-    _render_tracked_progress().
     """
     import requests
     start = time.monotonic()
@@ -336,10 +304,7 @@ def _iso_to_epoch(iso_str) -> float | None:
 
 def _find_run_started_after(workflow_file: str, after_epoch: float):
     """Polt de lijst van recente runs van deze achtergrondtaak tot er een
-    run verschijnt die op of na `after_epoch` gestart is. Geeft de ruwe
-    run-dict terug (of None als er binnen de pollingtijd niets verscheen —
-    dat is geen fout, de taak kan alsnog gewoon lopen, enkel niet meteen
-    zichtbaar)."""
+    run verschijnt die op of na `after_epoch` gestart is."""
     import requests
     token, repo, _, _ = _get_github_settings()
     if not token:
@@ -357,8 +322,6 @@ def _find_run_started_after(workflow_file: str, after_epoch: float):
                 runs = resp.json().get("workflow_runs", []) or []
                 for run in runs:
                     created_epoch = _iso_to_epoch(run.get("created_at"))
-                    # kleine marge (5s) voor kloktolerantie tussen onze eigen
-                    # trigger-tijdstip en de servertijd van de achtergronddienst.
                     if created_epoch is not None and created_epoch >= after_epoch - 5:
                         return run
         except Exception:
@@ -369,10 +332,7 @@ def _find_run_started_after(workflow_file: str, after_epoch: float):
 
 def _get_run_step_progress(run_id) -> dict | None:
     """Leest, voor 1 lopende/afgeronde run, het aantal voltooide stappen af
-    t.o.v. het totaal (over de eerste job — al onze achtergrondtaken
-    gebruiken telkens exact 1 job). Geeft None terug als dit niet kon
-    worden opgehaald (bv. tijdelijk netwerkprobleem) — de aanroeper moet dit
-    dan gewoon opnieuw proberen bij de volgende poll."""
+    t.o.v. het totaal."""
     import requests
     token, repo, _, _ = _get_github_settings()
     if not token:
@@ -418,13 +378,7 @@ def _get_run_step_progress(run_id) -> dict | None:
 def _render_tracked_progress(workflow_file: str, trigger_epoch: float, placeholder, label_prefix: str = "") -> dict:
     """Toont een LEVENDE voortgangsbalk ("Stap X van Y — <stapnaam>") in
     `placeholder`, door de zonet gestarte achtergrondtaak op te zoeken en
-    periodiek te bevragen (begrensde lus, max _POLL_MAX_SECONDS). Dit is
-    een BLOKKERENDE aanroep (de pagina toont de voortgang live binnen deze
-    ene klik, i.p.v. een enkel "gestart"-berichtje) — bewust gekozen zodat
-    Kim exact ziet "stap 2 van 5" i.p.v. enkel een eenmalige bevestiging.
-    Geeft een dict terug met het laatst gekende resultaat, zodat de
-    aanroeper dit kan bewaren in st.session_state (blijft zichtbaar na een
-    latere pagina-rerun)."""
+    periodiek te bevragen."""
     run = _find_run_started_after(workflow_file, trigger_epoch)
     if run is None:
         placeholder.info(f"{label_prefix}Bezig, voortgang nog niet zichtbaar...")
@@ -468,20 +422,7 @@ def render_cloud_scrape_trigger(
     help_text: str | None = None,
 ) -> None:
     """
-    Toont, enkel relevant op cloud, één eenvoudige knop om data te verversen
-    (start op de achtergrond de bestaande verwerking). Als de verbinding nog
-    niet geconfigureerd is, wordt er niets getoond.
-    player_ids: leeg = alle spelers; of komma-gescheiden lijst voor specifieke
-                speler(s) (bv. enkel de huidige speler verversen).
-    mode:       "missing" (enkel ontbrekende periodes, standaard en snelst),
-                "new_users", of "full".
-    - workflow_file / inputs: zie trigger_github_actions_scrape(). Laat beide
-      weg voor het ONGEWIJZIGDE, oorspronkelijke gedrag.
-    - help_text: optionele tooltip op de knop (st.button(help=...)).
-    PADEL_ANALYSIS_UI_NEUTRAL_LANGUAGE_AND_REAL_PROGRESS_2026-09-19: toont nu,
-    NA een geslaagde trigger, een LEVENDE "stap X van Y"-voortgangsbalk
-    (_render_tracked_progress) i.p.v. enkel een eenmalig "gestart"-berichtje.
-    Het eindresultaat blijft, net als voorheen, bewaard in st.session_state.
+    Toont, enkel relevant op cloud, één eenvoudige knop om data te verversen.
     """
     import streamlit as st
     if not is_github_trigger_configured():
@@ -526,29 +467,28 @@ def render_full_player_scrape_button(
     """
     PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18 (op verzoek van Kim):
     "bij elke speler die je ziet daar rechtstreeks gewoon te kunnen een
-    scrape starten. die scrape moet dan padelstat en TVL scrapen."
+    scrape starten."
     Toont, enkel relevant op cloud en enkel als de verbinding geconfigureerd
-    is, ÉÉN knop die met 1 klik BEIDE achtergrondtaken start voor exact deze
-    ene speler: matchdata (ontbrekende/huidige periode) en playing strength.
-    Het OFFICIËLE klassement wordt hier bewust NIET meegenomen — dat
-    verandert maar 2x per jaar en wordt apart, voor de volledige
-    spelerslijst, op de juiste momenten ververst.
-    PADEL_ANALYSIS_UI_NEUTRAL_LANGUAGE_AND_REAL_PROGRESS_2026-09-19: toont nu
-    voor BEIDE triggers een levende "stap X van Y"-voortgangsbalk i.p.v.
-    enkel een eenmalig "gestart"-berichtje + workflow-jargon. Er wordt
-    nergens meer "GitHub"/"workflow" vermeld — enkel neutrale taal.
-    PADEL_ANALYSIS_PER_PLAYER_CLUB_REQUIRED_2026-09-20 (op verzoek van Kim:
-    "gemakkelijk op elke speler een knop hebt om data te vernieuwen" +
-    "gelieve dan playing strength leeg te laten en te vragen om bij de
-    speler de ploeg op te geven"): refresh_padelstat_only.py slaat een
-    speler zonder gekende club sinds deze fix bewust over (om een verkeerde
-    gelijknamige match te vermijden). Deze functie haalt daarom EERST het
-    bestaande profiel op: heeft de speler al een club, verandert er niets;
-    ontbreekt de club, dan verschijnt HIER, INLINE, een verplicht
+    is, ÉÉN knop die met 1 klik TWEE achtergrondtaken start voor exact deze
+    ene speler: matchdata (ontbrekende/huidige periode, SLIM) en playing
+    strength + officieel klassement (SLIM: skip als al vers, zie
+    refresh_padelstat_only.needs_check()).
+    PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_IN_SINGLE_REFRESH_2026-09-21 (op
+    verzoek van Kim: "die refresh mag dan alles refreshen. padelstat
+    playing strength, officieel klassement en matchen"): het officiële
+    klassement komt VOORTAAN automatisch mee met dezelfde padelstat-trigger
+    hieronder (zie refresh_padelstat_only.py) — GEEN aparte trigger nodig,
+    GEEN extra Playwright-sessie. Dit is een SNAPSHOT (huidig cijfer, geen
+    volledige historiek) — voor de volledige TVL-klassementshistoriek blijft
+    de aparte, tragere refresh-klassement.yml-taak bestaan.
+    PADEL_ANALYSIS_PER_PLAYER_CLUB_REQUIRED_2026-09-20: refresh_padelstat_
+    only.py slaat een speler zonder gekende club bewust over (om een
+    verkeerde gelijknamige match te vermijden). Deze functie haalt daarom
+    EERST het bestaande profiel op: heeft de speler al een club, verandert
+    er niets; ontbreekt de club, dan verschijnt HIER, INLINE, een verplicht
     tekstinvoerveld — de scrape-knop wordt pas actief zodra daar iets is
-    ingevuld, en die waarde wordt meteen als "club"-input meegegeven aan
-    refresh-padelstat.yml (dezelfde workflow-input die al bestond voor een
-    hele ploeg-refresh, hier gebruikt voor 1 losse speler)."""
+    ingevuld, en die waarde wordt meteen als "club"-input meegegeven.
+    """
     import streamlit as st
     import firebase_service as fb
     if not is_github_trigger_configured():
@@ -556,8 +496,6 @@ def render_full_player_scrape_button(
     result_key = f"{key_prefix}_last_result_{player_id}"
     label_naam = f" voor {player_name}" if player_name else ""
 
-    # PADEL_ANALYSIS_PER_PLAYER_CLUB_REQUIRED_2026-09-20: club vooraf
-    # controleren, zodat we weten of het invoerveld getoond moet worden.
     try:
         existing_profile = fb.get_player_profile(player_id) or {}
     except Exception:  # noqa: BLE001
@@ -568,15 +506,15 @@ def render_full_player_scrape_button(
     if not existing_club:
         club_input_key = f"{key_prefix}_club_input_{player_id}"
         club_to_use = st.text_input(
-            f"Club/ploeg van {player_name or 'deze speler'} (nog onbekend — nodig om de playing "
-            "strength betrouwbaar op te zoeken bij gelijknamige spelers)",
+            f"Club/ploeg van {player_name or 'deze speler'} (nog onbekend — nodig om playing "
+            "strength/officieel klassement betrouwbaar op te zoeken bij gelijknamige spelers)",
             key=club_input_key,
             placeholder="Bv. Padel Factory",
         ).strip()
         if not club_to_use:
             st.caption(
-                "ℹ️ Vul hierboven de club/ploeg in om de playing strength voor deze speler te kunnen "
-                "verversen. De matchdata-verversing hieronder werkt ook zonder club."
+                "ℹ️ Vul hierboven de club/ploeg in om playing strength + officieel klassement voor "
+                "deze speler te kunnen verversen. De matchdata-verversing hieronder werkt ook zonder club."
             )
 
     if st.button(
@@ -584,10 +522,11 @@ def render_full_player_scrape_button(
         key=f"{key_prefix}_full_scrape_{player_id}",
         type="primary",
         help=(
-            "Ververst op de achtergrond de matchdata (enkel ontbrekende/huidige periode) en de "
-            "playing strength voor deze speler. Duurt meestal enkele minuten. Het officiële "
-            "klassement wordt hier bewust niet meegenomen — dat wordt apart, voor de volledige "
-            "spelerslijst, op de juiste momenten ververst."
+            "Ververst op de achtergrond, slim (enkel wat nog nodig is): de matchdata (enkel "
+            "ontbrekende/huidige periode), de playing strength (padelstats.be) en het officiële "
+            "klassement (snapshot, via dezelfde padelstats.be-opzoeking). Duurt meestal enkele "
+            "minuten. Voor de volledige klassementshistoriek (alle periodes) draait een aparte, "
+            "minder frequente achtergrondtaak."
         ),
     ):
         trigger_epoch = time.time()
@@ -602,19 +541,15 @@ def render_full_player_scrape_button(
         # PADEL_ANALYSIS_PER_PLAYER_CLUB_REQUIRED_2026-09-20: enkel de
         # padelstat-trigger starten als er een club bekend/ingevuld is —
         # anders zou refresh_padelstat_only.py deze speler toch weer
-        # overslaan (club_onbekend), en zou de voortgangsbalk hieronder op
-        # niets wachten.
+        # overslaan (club_onbekend).
         if not club_to_use:
             st.info(
-                "Playing strength wordt overgeslagen zolang de club/ploeg hierboven niet is "
-                "ingevuld. Matchdata wordt wel gewoon ververst."
+                "Playing strength + officieel klassement worden overgeslagen zolang de club/ploeg "
+                "hierboven niet is ingevuld. Matchdata wordt wel gewoon ververst."
             )
         elif padelstat_registered:
             padelstat_inputs = {"player": str(player_id), "max": "1", "force_all": "false"}
             if not existing_club:
-                # Nieuw ingevulde club: meteen meegeven zodat refresh_
-                # padelstat_only.py die als club_override kan gebruiken EN
-                # eenmalig backfillen naar het profiel (zie dat bestand).
                 padelstat_inputs["club"] = club_to_use
             ok_padelstat, _msg_padelstat = trigger_github_actions_scrape(
                 workflow_file=PADELSTAT_WORKFLOW_FILE, inputs=padelstat_inputs,
@@ -629,20 +564,18 @@ def render_full_player_scrape_button(
         if ok_padelstat:
             ph_padelstat = st.empty()
             outcome_padelstat = _render_tracked_progress(
-                PADELSTAT_WORKFLOW_FILE, trigger_epoch, ph_padelstat, label_prefix="Playing strength: ",
+                PADELSTAT_WORKFLOW_FILE, trigger_epoch, ph_padelstat,
+                label_prefix="Playing strength + klassement: ",
             )
             status_padelstat = outcome_padelstat.get("status")
         elif club_to_use:
-            st.error("Playing strength: kon niet gestart worden.")
+            st.error("Playing strength + klassement: kon niet gestart worden.")
         st.session_state[result_key] = {
             "timestamp": time.strftime("%H:%M:%S"),
             "tvl_ok": ok_tvl, "tvl_status": status_tvl,
             "padelstat_ok": ok_padelstat, "padelstat_status": status_padelstat,
             "padelstat_skipped_no_club": not club_to_use,
         }
-    # PADEL_ANALYSIS_SCRAPE_FEEDBACK_DIAGNOSTIC_2026-09-18: het laatst
-    # bekende resultaat wordt ALTIJD opnieuw getoond, zodat een latere
-    # pagina-rerun de feedback niet kan laten verdwijnen.
     last = st.session_state.get(result_key)
     if last:
         st.caption(f"Resultaat van de laatste poging, om {last['timestamp']}:")
@@ -655,27 +588,26 @@ def render_full_player_scrape_button(
         }
         for veld_ok, veld_status, titel in (
             ("tvl_ok", "tvl_status", "Matchdata"),
-            ("padelstat_ok", "padelstat_status", "Playing strength"),
+            ("padelstat_ok", "padelstat_status", "Playing strength + klassement"),
         ):
             ok = last.get(veld_ok)
-            if titel == "Playing strength" and last.get("padelstat_skipped_no_club"):
-                st.info("**Playing strength**: overgeslagen (club/ploeg was niet ingevuld).")
+            if titel == "Playing strength + klassement" and last.get("padelstat_skipped_no_club"):
+                st.info("**Playing strength + klassement**: overgeslagen (club/ploeg was niet ingevuld).")
                 continue
             status = last.get(veld_status) if ok else "failed"
             kind, tekst = _status_labels.get(status, ("info", "Onbekende status."))
             renderer = {"success": st.success, "info": st.info, "warning": st.warning, "error": st.error}[kind]
             renderer(f"**{titel}**: {tekst}")
     st.caption(
-        "ℹ️ Het officiële klassement wordt hier niet ververst — dat verandert maar 2x per jaar "
-        "en wordt daarom apart, op de juiste momenten, voor de volledige spelerslijst ververst."
+        "ℹ️ 'Playing strength + klassement' komt uit padelstats.be (snapshot, altijd het meest "
+        "recente cijfer). De volledige klassementshistoriek (alle periodes) wordt apart, minder "
+        "frequent, voor de volledige spelerslijst ververst."
     )
 
 
 def trigger_player_search(first_name: str, last_name: str, club: str = "") -> tuple[bool, str]:
-    """
-    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18: dunne wrapper rond
-    trigger_github_actions_scrape() die de speler-zoek-taak aanroept, voor
-    het zoeken van een NOG ONBEKENDE speler op naam."""
+    """Dunne wrapper rond trigger_github_actions_scrape() die de speler-
+    zoek-taak aanroept, voor het zoeken van een NOG ONBEKENDE speler op naam."""
     return trigger_github_actions_scrape(
         workflow_file=PLAYER_SEARCH_WORKFLOW_FILE,
         inputs={
@@ -692,18 +624,7 @@ def render_cloud_player_search(
     default_last: str = "",
     default_club: str = "",
 ) -> None:
-    """
-    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim):
-    Cloud-tegenhanger van de lokale "🔍 Zoek op TVL-website"-flow in
-    page_add_player.py. Triggert de speler-zoek-taak en toont, zodra
-    beschikbaar, de kandidaten uit firebase_service.get_player_search_cache().
-    Dit is ONVERMIJDELIJK een polling-flow (het resultaat komt pas na de
-    zoekactie binnen): na het triggeren toont deze functie een
-    "🔄 Resultaat ophalen"-knop, die de cache opnieuw uitleest tot er een
-    resultaat is.
-    PADEL_ANALYSIS_UI_NEUTRAL_LANGUAGE_AND_REAL_PROGRESS_2026-09-19: alle
-    teksten neutraal gemaakt (geen "GitHub Actions" meer).
-    """
+    """Cloud-tegenhanger van de lokale "🔍 Zoek op TVL-website"-flow."""
     import streamlit as st
     import firebase_service as fb
     if not is_github_trigger_configured():
@@ -789,9 +710,6 @@ def render_cloud_player_search(
                             club=club_str or None, dashboard_url=url or None,
                             aliases=[name],
                         )
-                        # PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17:
-                        # zelfde marker als de lokale "➕ Speler toevoegen"-pagina,
-                        # zodat cleanup_ghost_profiles.py deze speler nooit opruimt.
                         fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
                             {"added_by": "manual"}, merge=True,
                         )

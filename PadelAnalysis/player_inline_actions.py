@@ -1,4 +1,5 @@
 from __future__ import annotations
+import datetime as _dt
 import inspect
 import re
 from typing import Any, Optional
@@ -183,6 +184,140 @@ def player_status(player_id: str) -> dict:
         "scraped_at": doc.get("scraped_at") or doc.get("last_updated") or doc.get("updated_at") or "-",
     }
 # -----------------------------------------------------------------------------
+# PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21 (op verzoek van Kim: "waar zou
+# ik die refresh knop per speler moeten zien. ik zie die nergens. die zou
+# overal mogen verschijnen waar een spelersnaam te zien is. Die refresh mag
+# dan alles refreshen. padelstat playing strength, officieel klassement en
+# matchen (slim, enkel laatste checken als al gescrapet)")
+# -----------------------------------------------------------------------------
+# ROOT CAUSE (bevestigd in code, geen aanname): dit bestand — via
+# render_player_name_action()/_render_action_body() — is WEL degelijk de
+# plek die "overal waar een spelersnaam te zien is" al invult (Partners,
+# Tegenstanders, Match Explorer-detail, via render_dataframe_with_player_
+# actions()/render_matches_period_table()). MAAR _render_action_body() deed
+# tot nu toe UITSLUITEND een LOKALE achtergrond-matchscrape
+# (sj.start_background_scrape(), die Playwright vereist via scrape_player.py)
+# — GEEN playing strength, GEEN officieel klassement, en ZONDER ooit te
+# checken of scraping lokaal überhaupt beschikbaar is
+# (cloud_helpers.is_scraping_available()). Op Streamlit Community Cloud
+# (waar Kim dit gebruikt) faalde een klik hier dus stil op de achtergrond
+# (ModuleNotFoundError in de thread, opgevangen als job-status "error",
+# zichtbaar als een makkelijk te missen kleine foutbanner) — dit verklaart
+# waarom de knop leek te "verdwijnen"/niet te werken.
+# FIX, tweeledig:
+#   1. Cloud (is_scraping_available() == False): _render_action_body()
+#      delegeert nu VOLLEDIG naar cloud_helpers.render_full_player_scrape_
+#      button() — dezelfde gecombineerde, slimme trigger (matchdata SLIM via
+#      mode="missing", playing strength + officieel klassement SLIM via
+#      force_all="false"/staleness-check, club-verplicht) die al elders in
+#      de app gebruikt werd, nu ook HIER, dus overal waar een naam
+#      klikbaar is.
+#   2. Lokaal (is_scraping_available() == True): de bestaande matchdata-
+#      achtergrondscrape blijft ONGEWIJZIGD (die was al slim: incrementeel
+#      vanaf de laatste match, tenzij nog nooit gescraped). DAARONDER komt
+#      een NIEUWE, eigen sectie die playing strength + officieel klassement
+#      lokaal ververst — ook SLIM: _padelstat_age_days() slaat dit
+#      volledig OVER (geen enkele padelstats.be-aanroep) als de bestaande
+#      waarde jonger is dan _LOCAL_PADELSTAT_STALE_DAYS (14 dagen, zelfde
+#      drempel als refresh_padelstat_only.py se DEFAULT_STALE_AFTER_DAYS) —
+#      dit is de concrete invulling van "slim, enkel laatste checken als al
+#      gescrapet". Ontbreekt de club van deze speler, dan verschijnt hier
+#      (net als op Cloud) een verplicht invoerveld vóór de knop actief
+#      wordt — zelfde voorzichtigheidsprincipe als
+#      PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20 in
+#      refresh_padelstat_only.py, nu ook consistent toegepast in dit lokale
+#      pad.
+_LOCAL_PADELSTAT_STALE_DAYS = 14
+def _padelstat_age_days(player_id: str) -> Optional[float]:
+    """Leeftijd (in dagen) van de bestaande padelstat-rating voor deze
+    speler, gebaseerd op "fetched_at" (zie firebase_service.
+    save_padelstat_rating()). None als er nog geen rating is, of geen
+    bruikbare tijdstempel — in beide gevallen wordt dit conservatief als
+    'verouderd' behandeld door de aanroeper (liever een keer te veel
+    verversen dan een blijvend verouderd/ontbrekend cijfer tonen)."""
+    try:
+        cached = fb.get_padelstat_rating(player_id)
+    except Exception:
+        cached = None
+    if not cached or cached.get("rating") is None:
+        return None
+    fetched_at = cached.get("fetched_at")
+    if not fetched_at:
+        return None
+    try:
+        cleaned = str(fetched_at).replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return (_dt.datetime.now(_dt.timezone.utc) - dt).total_seconds() / 86400
+    except Exception:
+        return None
+def _render_local_padelstat_klassement_refresh(player_id: str, name: str, key_prefix: str) -> None:
+    """PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21: lokale (Playwright
+    beschikbaar) tegenhanger van cloud_helpers.render_full_player_scrape_
+    button()'s playing-strength-helft — synchroon (geen achtergrondthread
+    nodig, een enkele padelstats.be-opzoeking duurt maar 10-30s), SLIM
+    (skip volledig als de bestaande waarde nog vers is) en met dezelfde
+    club-verplichting als de cloud-variant."""
+    try:
+        import padelstats_scraper as pss
+    except Exception:
+        st.caption("Playing strength/klassement verversen is momenteel niet beschikbaar (padelstats_scraper ontbreekt).")
+        return
+    try:
+        profile = fb.get_player_profile(player_id) or {}
+    except Exception:
+        profile = {}
+    existing_club = (profile.get("club") or "").strip()
+    age = _padelstat_age_days(player_id)
+    is_stale = age is None or age > _LOCAL_PADELSTAT_STALE_DAYS
+    if not is_stale:
+        st.caption(f"🎯 Playing strength + officieel klassement: al actueel ({age:.0f} dag(en) geleden opgehaald).")
+        return
+    club_to_use = existing_club
+    if not existing_club:
+        club_to_use = st.text_input(
+            f"Club/ploeg van {name} (nog onbekend — nodig voor playing strength/klassement, "
+            "om gelijknamige spelers te onderscheiden)",
+            key=f"{key_prefix}_local_club_{player_id}",
+            placeholder="Bv. Padel Factory",
+        ).strip()
+        if not club_to_use:
+            st.caption("ℹ️ Vul de club/ploeg hierboven in om playing strength + klassement te kunnen verversen.")
+            return
+    if st.button("🎯 Playing strength + klassement verversen", key=f"{key_prefix}_padelstat_{player_id}"):
+        with st.spinner(f"'{name}' opzoeken op padelstats.be..."):
+            try:
+                gevonden = pss.search_and_fetch_padelstat_rating(name, club=club_to_use)
+            except Exception as e:
+                st.error(f"Mislukt: {e}")
+                return
+        if not gevonden or gevonden.get("rating") is None:
+            st.warning("Niet gevonden op padelstats.be.")
+            return
+        club_niet_bevestigd = bool(gevonden.get("club_disambiguation_note"))
+        try:
+            fb.save_padelstat_rating(
+                player_id,
+                gevonden.get("padelstat_id", ""),
+                gevonden.get("rating"),
+                gevonden.get("rating_source", "none"),
+                gevonden.get("raw_text_snippet", ""),
+                matched_klassement=gevonden.get("matched_klassement"),
+                club_confirmed=not club_niet_bevestigd,
+            )
+        except Exception as e:
+            st.error(f"Opslaan mislukt: {e}")
+            return
+        klassement_txt = (
+            f", officieel klassement P{gevonden.get('matched_klassement')}"
+            if gevonden.get("matched_klassement") is not None else ""
+        )
+        st.success(f"Playing strength P{gevonden['rating']}{klassement_txt} opgeslagen.")
+        if club_niet_bevestigd:
+            st.warning(f"⚠️ {gevonden['club_disambiguation_note']}")
+        st.rerun()
+# -----------------------------------------------------------------------------
 # PADEL_ANALYSIS_SEARCH_BEFORE_SCRAPE_FALLBACK_2026-09-06
 # -----------------------------------------------------------------------------
 def _split_name_guess(full_name: str) -> tuple[str, str]:
@@ -192,27 +327,6 @@ def _split_name_guess(full_name: str) -> tuple[str, str]:
         return "", _clean(full_name)
     return parts[-1], " ".join(parts[:-1])
 def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None:
-    # PADEL_ANALYSIS_CLOUD_SEARCH_FALLBACK_FIX_2026-09-07
-    # BUG/wens (opgelost): op Streamlit Community Cloud toonde deze fallback
-    # enkel de dode melding "Opzoeken op TVL kan enkel lokaal (vereist een
-    # browser)" wanneer er nog geen player_id gekend was voor een naam. Dat
-    # is technisch juist (de cloud-app zelf heeft geen Playwright/browser),
-    # maar misleidend: het lijkt alsof je niets kunt doen, terwijl de app
-    # WEL een externe GitHub Actions-workflow kan triggeren die dat op een
-    # ubuntu-runner mét browser doet (zie cloud_helpers.py /
-    # search-player.yml). Vandaar dat "opzoeken vroeger al eens lukte".
-    #
-    # PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18 (op verzoek van Kim):
-    # BUG (opgelost): de cloud-knop hierbeneden riep vroeger
-    # cloud_helpers.render_cloud_scrape_trigger() aan met
-    # mode="new_users" op scrape-padel.yml — een workflow die ENKEL
-    # bestaande player_id's kan verversen, en dus NOOIT op naam kon zoeken.
-    # De knop deed dus niet wat de tekst beloofde. Fix: gebruikt nu de
-    # nieuwe cloud_helpers.render_cloud_player_search(), die de aparte
-    # search-player.yml-workflow triggert (player_search.search_players()
-    # op een GitHub Actions-runner) en nadien de gevonden kandidaten toont,
-    # met een "➕ Toevoegen"-knop die meteen ook de volledige scrape
-    # (TVL + padelstat + klassement) aanbiedt.
     try:
         from cloud_helpers import is_scraping_available
     except Exception:
@@ -254,20 +368,11 @@ def _render_search_and_link_fallback(display_name: str, key_prefix: str) -> None
                 dashboard_url=cand_url or None,
                 aliases=[cand_name, display_name],
             )
-            # FIX 2026-09-06: ook hier achtergrond-scrape i.p.v. blokkerend.
             sj.start_background_scrape(str(cand_pid), cand_name, full=True)
             st.success(f"Gekoppeld. {cand_name} wordt nu op de achtergrond gescraped (zie melding bovenaan).")
             st.rerun()
 def _render_cloud_search_trigger(display_name: str, key_prefix: str) -> None:
-    """Cloud-variant van de opzoek-fallback: geen lokale browser, maar wel de
-    nieuwe search-player.yml GitHub Actions-workflow triggeren (indien
-    geconfigureerd).
-    PADEL_ANALYSIS_CLOUD_PLAYER_SEARCH_2026-09-18: gebruikt nu
-    cloud_helpers.render_cloud_player_search() (dezelfde herbruikbare
-    component als page_add_player.py's cloud-fallback), i.p.v. de oude
-    mode="new_users"-trigger op scrape-padel.yml die geen naam kon
-    meegeven en dus nooit echt kon zoeken. De reeds gekende (onvolledige)
-    naam wordt als beste-gok voorinvulling meegegeven."""
+    """Cloud-variant van de opzoek-fallback."""
     try:
         import cloud_helpers as ch
     except Exception:
@@ -317,16 +422,39 @@ def render_player_name_action(name: str, player_id: str, key_prefix: str) -> Non
 def _render_action_body(name: str, player_id: str, status: dict, key_prefix: str) -> None:
     """
     PADEL_ANALYSIS_BACKGROUND_SCRAPE_2026-09-06:
-    BUG/wens (opgelost): scrapes gestart vanuit een popover in een tabel
-    blokkeerden voorheen de hele app tot ze klaar waren. Nu wordt de scrape
-    gestart op de achtergrond (scrape_jobs.py); de popover sluit meteen (via
-    st.rerun()) en de voortgang is zichtbaar via de banner bovenaan de
-    pagina, ongeacht waar je nadien naartoe klikt.
-    """
+    Matchdata wordt lokaal op de achtergrond ververst (scrape_jobs.py); de
+    popover sluit meteen (via st.rerun()) en de voortgang is zichtbaar via
+    de banner bovenaan de pagina.
+    PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21 (op verzoek van Kim: "die
+    refresh knop [...] zou overal mogen verschijnen waar een spelersnaam
+    te zien is. Die refresh mag dan alles refreshen. padelstat playing
+    strength, officieel klassement en matchen"): dit is DE centrale plek
+    die overal (Partners/Tegenstanders/Match Explorer) verschijnt via
+    render_player_name_action() — vandaar hier nu de VOLLEDIGE, gecombineerde
+    refresh-actie, met een duidelijke Cloud/lokaal-splitsing (zie hierboven
+    voor de volledige toelichting bij deze fix)."""
     if not status["known"]:
         st.caption("Geen bekende player_id voor deze naam.")
         _render_search_and_link_fallback(name, key_prefix)
         return
+    try:
+        from cloud_helpers import is_scraping_available, render_full_player_scrape_button
+    except Exception:
+        is_scraping_available = lambda: True  # noqa: E731
+        render_full_player_scrape_button = None
+    if not is_scraping_available():
+        # Cloud: ÉÉN gecombineerde, slimme trigger (matchdata + playing
+        # strength + officieel klassement) - zelfde functie die overal
+        # elders in de app al gebruikt wordt voor "deze speler verversen".
+        if render_full_player_scrape_button:
+            render_full_player_scrape_button(
+                str(player_id), player_name=name, key_prefix=f"{key_prefix}_full",
+            )
+        else:
+            st.caption("Verversen is momenteel niet beschikbaar.")
+        return
+    # Lokaal — deel 1: matchdata (ONGEWIJZIGD, was al slim: incrementeel
+    # vanaf de laatste match, tenzij nog nooit gescraped).
     is_running = sj.is_scrape_running(player_id)
     if is_running:
         st.caption("⏳ Wordt al ververst op de achtergrond — zie melding bovenaan de pagina.")
@@ -336,15 +464,19 @@ def _render_action_body(name: str, player_id: str, status: dict, key_prefix: str
             f"Gescraped: {status['matches']} matchen. Refresh haalt op vanaf de periode van de laatst bekende match."
         )
         st.caption(f"Interclub: {status.get('interclub', 0)} | Tornooi: {status.get('tournament', 0)}")
-        action = "Refresh vanaf laatste match"
+        action = "🔄 Matchdata: refresh vanaf laatste match"
         full = False
     else:
         st.caption("Nog niet gescraped")
-        action = "Scrape alle data"
+        action = "🔄 Matchdata: scrape alle data"
         full = True
     if st.button(action, key=f"{key_prefix}_{player_id}_{'full' if full else 'refresh'}"):
         sj.start_background_scrape(str(player_id), name, full=full)
         st.rerun()
+    # Lokaal — deel 2 (NIEUW): playing strength + officieel klassement,
+    # synchroon en SLIM (skip volledig als al vers, zie _padelstat_age_days()).
+    st.divider()
+    _render_local_padelstat_klassement_refresh(str(player_id), name, key_prefix)
 def _dataframe_kwargs(**kwargs):
     """Use Streamlit's new width API, with fallback for older versions."""
     try:
@@ -364,23 +496,11 @@ def render_dataframe_with_player_actions(
 ) -> None:
     """
     Render a compact, sortable table with interactive player-name actions.
-    PADEL_ANALYSIS_TABLE_RENDER_FIX_2026-09-06:
-    BUG (opgelost): deze tabel werd voorheen rij per rij opgebouwd met een
-    APARTE st.columns()-aanroep voor de header EN nog eens een aparte
-    st.columns()-aanroep per databader ("titels zweven boven de rijen").
-    Streamlit behandelt elke st.columns()-aanroep als een onafhankelijk
-    layout-blok; zodra de popover-knoppen in de datarijen een andere hoogte
-    hadden dan de headertekst (wat bij deze speleracties-popovers vrijwel
-    altijd het geval is), kwam de header visueel los van de rest van de
-    tabel te staan.
-    Fix: gebruik nu hetzelfde, al werkende patroon als de Match
-    Explorer-tab (zie lineup_quick.py: _render_selectable_table_with_detail):
-    één enkele st.dataframe(...) voor de volledige tabel (header en rijen
-    horen dan gegarandeerd bij elkaar, correcte sortering inbegrepen), met
-    rijselectie. Klik je op een rij, dan verschijnen de klikbare
-    speleracties (scrape-status, refresh-knop, opzoeken...) voor de
-    spelerskolommen van DIE rij eronder — functioneel identiek aan
-    voorheen, maar zonder het layout-probleem.
+    PADEL_ANALYSIS_TABLE_RENDER_FIX_2026-09-06: één enkele st.dataframe(...)
+    voor de volledige tabel (header en rijen horen dan gegarandeerd bij
+    elkaar, correcte sortering inbegrepen), met rijselectie. Klik je op een
+    rij, dan verschijnen de klikbare speleracties (scrape-status, refresh,
+    opzoeken...) voor de spelerskolommen van DIE rij eronder.
     """
     _inject_compact_css()
     if df is None or df.empty:
@@ -405,7 +525,7 @@ def render_dataframe_with_player_actions(
     )
     sel_rows = (event or {}).get("selection", {}).get("rows", [])
     if not sel_rows:
-        st.caption("👉 Klik op een rij voor speleracties (scrape-status, refresh, opzoeken).")
+        st.caption("👉 Klik op een rij voor speleracties (verversen, opzoeken).")
         return
     idx = sel_rows[0]
     row = shown.iloc[idx]

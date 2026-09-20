@@ -13,13 +13,12 @@ PLAYER_SEARCH_CACHE_COLLECTION = "player_search_cache"
 PLAYER_PROFILES_COLLECTION = "player_profiles"
 SAVED_LINEUP_ANALYSES_COLLECTION = "saved_lineup_analyses"
 PADELSTAT_CACHE_COLLECTION = "padelstat_cache"
-# PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20: bron-label dat
-# in een klassement_history-rij gezet wordt zodra die rij AFKOMSTIG is van
-# padelstats.be (i.p.v. van de TVL-scraper scrape_klassement.py). Gebruikt om
-# exact 1 zo'n rij te kunnen upserten (i.p.v. bij elke refresh een nieuwe rij
-# toe te voegen) zonder de rest van de klassement_history (TVL-periodes,
-# niveau_winrates, ...) aan te raken.
-PADELSTAT_KLASSEMENT_SOURCE = "padelstats.be"
+# PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-21: veldnaam op
+# het player_profiles-document waar het (snapshot, geen historiek) officiële
+# klassement wordt bewaard zodra het via de padelstats.be-zoekkaart is
+# meegekomen (naast de playing strength) - zie save_official_klassement_
+# from_padelstat() hieronder voor de volledige toelichting.
+OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD = "official_klassement_via_padelstat"
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 def convert_firestore_values(obj: Any):
@@ -300,39 +299,23 @@ def list_lineup_analyses(owner_player_id: Optional[str] = None) -> List[Dict[str
     return out
 def delete_lineup_analysis(doc_id: str) -> None:
     db.collection(SAVED_LINEUP_ANALYSES_COLLECTION).document(str(doc_id)).delete()
-def save_padelstat_rating(
-    player_id: str,
-    padelstat_id: str,
-    rating: Optional[int],
-    rating_source: str,
-    raw_text_snippet: str = "",
-    matched_klassement: Optional[int] = None,
-    club_confirmed: Optional[bool] = None,
-) -> dict:
+def save_padelstat_rating(player_id: str, padelstat_id: str, rating: Optional[int], rating_source: str, raw_text_snippet: str = "", matched_klassement: Optional[int] = None, club_confirmed: bool = True) -> dict:
     """PADEL_ANALYSIS_PADELSTAT_CALIBRATION_2026-09-12:
     Cachet een opgezochte padelstats.be-waarde voor een eigen speler, zodat
     dezelfde speler niet herhaaldelijk opnieuw gescraped hoeft te worden
     (padelstats_scraper.py gebruikt Playwright, wat traag is en de site
     onnodig belast bij herhaling). doc-ID = onze eigen player_id, niet het
     padelstats-ID, zodat opzoeken vanuit de rest van de app eenvoudig blijft.
-    PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 (op verzoek
-    van Kim): twee nieuwe, OPTIONELE parameters, puur ter informatie/debug
-    opgeslagen in dezelfde padelstat_cache-cache (GEEN impact op bestaande
-    lezers van dit document, die deze velden gewoon negeren):
-      - matched_klassement: het officiële TVL-klassement (P-waarde) zoals
-        padelstats.be dat toont in de zoekresultaatkaart (bv. "P200" in
-        "P200 • PADEL FACTORY") - zie padelstats_scraper.py
-        search_and_fetch_padelstat_rating()["matched_klassement"]. Dit is
-        NIET hetzelfde als 'rating' (de 'playing strength', een apart,
-        door padelstats.be zelf berekend cijfer op de profielpagina).
-      - club_confirmed: False zodra de club-match onzeker was (zie
-        gevonden.get("club_disambiguation_note") in enrich_opponents.py),
-        zodat achteraf zichtbaar blijft welke waarden extra voorzichtig
-        geïnterpreteerd moeten worden.
-    De effectieve upsert van matched_klassement IN klassement_history (het
-    veld dat de rest van de app - opponent_dossier.py - echt leest voor
-    "Huidig klassement") gebeurt in save_official_klassement_from_padelstat()
-    hieronder, NIET hier: deze functie blijft puur de padelstat-cache."""
+    PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-21 (op verzoek
+    van Kim: "die refresh mag dan alles refreshen. padelstat playing
+    strength, officieel klassement en matchen"): nieuwe, optionele
+    `matched_klassement`/`club_confirmed`-parameters — puur GEMAK voor
+    aanroepers die playing strength EN het officiële klassement in 1 keer
+    willen opslaan (beide komen toch al uit hetzelfde padelstats.be-
+    paginabezoek). Is `matched_klassement` meegegeven, dan wordt INTERN ook
+    save_official_klassement_from_padelstat() aangeroepen — je hoeft dat dus
+    niet apart te doen. Achterwaarts compatibel: bestaande aanroepen zonder
+    deze twee nieuwe parameters blijven exact hetzelfde gedrag vertonen."""
     doc = {
         "player_id": str(player_id),
         "padelstat_id": str(padelstat_id),
@@ -341,11 +324,9 @@ def save_padelstat_rating(
         "raw_text_snippet": raw_text_snippet,
         "fetched_at": utc_now_iso(),
     }
-    if matched_klassement is not None:
-        doc["matched_klassement"] = matched_klassement
-    if club_confirmed is not None:
-        doc["club_confirmed"] = club_confirmed
     db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).set(sanitize_for_firestore(doc), merge=True)
+    if matched_klassement is not None:
+        save_official_klassement_from_padelstat(player_id, matched_klassement, club_confirmed=club_confirmed)
     return doc
 def get_padelstat_rating(player_id: str) -> Optional[dict]:
     doc = db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).get()
@@ -353,80 +334,50 @@ def get_padelstat_rating(player_id: str) -> Optional[dict]:
         return None
     return convert_firestore_values(doc.to_dict())
 # ---------------------------------------------------------------------------
-# PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 (op verzoek van
-# Kim: "aangezien we toch al het padelstat klassement scrapen van padelstat.be
-# zou ik willen voorstellen om het officieel klassement ook al meteen van
-# daar te scrapen. Dan moet die scraping van 2 keer per jaar niet meer
-# gebeuren aangezien padelstat toch regelmatig refresht.")
+# PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-21 (op verzoek van
+# Kim: "aangezien we toch al het padelstat klassement scrapen van
+# padelstat.be zou ik willen voorstellen om het officieel klassement ook al
+# meteen van daar te scrapen" — en later concreet gemaakt via "die refresh
+# mag dan alles refreshen. padelstat playing strength, officieel klassement
+# en matchen")
 # ---------------------------------------------------------------------------
-# ACHTERGROND: padelstats_scraper.search_and_fetch_padelstat_rating() haalt,
-# bovenop de 'playing strength' (rating), AL het officiële TVL-klassement op
-# uit de zoekresultaatkaart (bv. "P200" in "P200 • PADEL FACTORY" - zie de
-# bevestigde kaartstructuur in de docstring van dat bestand). Die waarde werd
-# tot nu toe enkel gelogd, nooit opgeslagen. Omdat elke reguliere
-# padelstat-verversing (enrich_opponents.run_padelstat_for_players(), draait
-# voor ALLE spelers, elke run) dit sowieso al ophaalt, kan het officiële
-# klassement voortaan GRATIS meeliften op die bestaande scrape - de aparte,
-# traGere TVL-klassement-scrape (scrape_klassement.py, slechts 2x/jaar
-# officieel relevant en bovendien momenteel geblokkeerd door bot-detectie
-# van tennisenpadelvlaanderen.be) is daarmee niet langer de ENIGE bron.
-# LET OP - dit is een SNAPSHOT, geen historiek: padelstats.be toont enkel het
-# HUIDIGE klassement, niet de meerdere periodes (Start/Zomer/...) die
-# scrape_klassement.py wel oplevert. Deze functie voegt daarom een ENKELE,
-# upsertbare rij toe aan klassement_history.history (herkenbaar aan
-# "source": PADELSTAT_KLASSEMENT_SOURCE), met een ECHTE (huidige) datum zodat
-# opponent_dossier._history_rows() deze rij correct als de MEEST RECENTE
-# sorteert (TVL-rijen hebben geen datum, enkel een periode-label) - zonder
-# de eventuele reeds aanwezige TVL-periodes te verwijderen of te overschrijven.
-def _klassement_history_doc_for_read(player_id: str) -> dict:
-    """Leest de BESTAANDE klassement_history op, bij voorkeur uit
-    player_profiles (bestaat ALTIJD zodra een profiel is aangemaakt, ook
-    voor tegenstanders zonder eigen 'players'-document), aangevuld met wat
-    in 'players' staat als dat recenter/voller zou zijn. In de praktijk
-    schrijft run_klassement_for_players() exact dezelfde payload naar beide
-    collecties, dus dit is vrijwel altijd identiek - dit is puur een
-    defensieve keuze voor het (zeldzame) geval dat ze uiteenlopen."""
+# BELANGRIJK, waarom dit een APARTE, kleine snapshot is en NIET rechtstreeks
+# in klassement_history.history wordt bijgeschreven: klassement_history komt
+# uit de TRAGERE, PERIODE-PER-PERIODE TVL-scraper (scrape_klassement.py) en
+# bevat de VOLLEDIGE, officieel-bevestigde historiek (elke halfjaarlijkse
+# berekening apart, met "vorig"/"virtueel" onderscheid). Een padelstats.be-
+# zoekkaart geeft daarentegen enkel het HUIDIGE klassement als los getal
+# (bv. "P200" naast de naam), zonder historiek of periode-context. Die twee
+# rechtstreeks samenvoegen zou het bestaande, betrouwbare TVL-schema kunnen
+# vervuilen/verwarren (bv. een "virtueel"-vs-"officieel"-onderscheid dat
+# padelstat niet kan bieden). Vandaar: een APART, klein veld op het
+# player_profiles-document — enkel gebruikt als FALLBACK/aanvulling zodra er
+# nog GEEN klassement_history bekend is (zie dashboard_common.
+# _official_current_rank(), dat deze fallback gebruikt), nooit om een
+# bestaande TVL-historiek te overschrijven of te vermengen.
+def save_official_klassement_from_padelstat(player_id: str, klassement: Optional[int], club_confirmed: bool = True) -> dict:
+    """Slaat het (snapshot, geen historiek) officiële klassement op zoals
+    meegekomen uit de padelstats.be-zoekkaart, in
+    OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD op het player_profiles-document.
+    `club_confirmed`=False betekent dat de zoekfunctie niet met zekerheid kon
+    disambigueren tussen gelijknamige spelers (zie padelstats_scraper.py's
+    club_disambiguation_note) — blijft toch bewaard (beter een onzekere
+    schatting dan niets), maar dashboard_common.py toont in dat geval een
+    duidelijke ⚠️-melding in plaats van dit stilzwijgend als zeker te tonen."""
+    doc = {
+        "klassement": klassement,
+        "fetched_at": utc_now_iso(),
+        "club_confirmed": bool(club_confirmed),
+    }
+    db.collection(PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(
+        {OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD: sanitize_for_firestore(doc)}, merge=True
+    )
+    return doc
+def get_official_klassement_via_padelstat(player_id: str) -> Optional[dict]:
+    """Geeft de laatst bewaarde padelstat-gebaseerde officiële-klassement-
+    snapshot terug voor deze speler, of None als die nog nooit is opgehaald."""
     try:
         profile = get_player_profile(player_id) or {}
-    except Exception:  # noqa: BLE001
-        profile = {}
-    profile_history = profile.get("klassement_history") or {}
-    if profile_history.get("history"):
-        return profile_history
-    try:
-        player_doc = get_player(player_id) or {}
-    except Exception:  # noqa: BLE001
-        player_doc = {}
-    return player_doc.get("klassement_history") or profile_history
-def save_official_klassement_from_padelstat(
-    player_id: str,
-    klassement_rank: int,
-    club_confirmed: bool = True,
-) -> dict:
-    """Upsert van het OFFICIËLE klassement (P-waarde), zoals opgehaald uit de
-    padelstats.be-zoekresultaatkaart, in klassement_history.history - zonder
-    een eventuele bestaande, door scrape_klassement.py opgebouwde
-    meerdere-periodes-historiek te verliezen.
-    Idempotent: een herhaalde aanroep (volgende run) VERVANGT de vorige
-    padelstat-rij (herkend via "source") i.p.v. er telkens een nieuwe aan toe
-    te voegen - klassement_history.history blijft dus altijd maximaal 1 rij
-    met source=PADELSTAT_KLASSEMENT_SOURCE bevatten.
-    Retourneert de nieuwe klassement_history-payload (voor logging/debug)."""
-    existing_history = _klassement_history_doc_for_read(player_id)
-    rows = list(existing_history.get("history") or [])
-    rows = [r for r in rows if r.get("source") != PADELSTAT_KLASSEMENT_SOURCE]
-    new_row = {
-        "periode": "Playing strength / klassement via padelstats.be",
-        "datum": utc_now_iso()[:10],  # echte, huidige datum (YYYY-MM-DD)
-        "klassement": f"P{klassement_rank}",
-        "source": PADELSTAT_KLASSEMENT_SOURCE,
-        "club_confirmed": club_confirmed,
-    }
-    rows.append(new_row)
-    updated_history = dict(existing_history)
-    updated_history["history"] = rows
-    updated_history["padelstat_klassement_updated_at"] = utc_now_iso()
-    payload = {"klassement_history": sanitize_for_firestore(updated_history)}
-    db.collection(PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(payload, merge=True)
-    db.collection(PLAYERS_COLLECTION).document(str(player_id)).set(payload, merge=True)
-    return updated_history
+    except Exception:
+        return None
+    return profile.get(OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD)
