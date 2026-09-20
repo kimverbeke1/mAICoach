@@ -1,6 +1,5 @@
 """
-opponent_dossier.py - scoutingdossier voor een tegenstander (v9).
-
+opponent_dossier.py - scoutingdossier voor een tegenstander (v10).
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De strikte poulefilter uit v2 was correct maar leverde in de praktijk bijna
 niets op: de huidige competitieperiode is pas gestart, dus tegenstanders
@@ -9,17 +8,14 @@ expliciet in TWEE lagen:
   1. HUIDIGE POULE  - strikt op spelgroep_id. Feitelijk, maar vaak dun.
   2. HISTORIEK      - alle overige interclubmatches, per periode gegroepeerd,
                       duidelijk gelabeld als context uit een andere poule.
-
 PADEL_ANALYSIS_RANK_DIRECTION_FIX_2026-09-10 (v4):
 In dit klassementsysteem geldt HOE HOGER HET GETAL, HOE BETER. "Beste ooit" =
 het HOOGSTE getal, niet het laagste. De tijdlijngrafiek gebruikt een normale
 (niet-omgekeerde) as.
-
 PADEL_ANALYSIS_KLASSEMENT_LABEL_SHORTENING_2026-09-10 (v5):
 De ruwe periode-omschrijving die TVL gebruikt (bv. "Startklassement" of
 "Zomerklassement") wordt nu verkort tot "Start <jaar>" / "Zomer <jaar>" op de
 grafiek-as en in de "beste klassement bereikt op"-tekst.
-
 PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13 (v7, BELANGRIJKE WIJZIGING):
 De eerder in v6 toegevoegde EIGEN Elo-berekening (elo_rating.compute_player_
 elo) is VERWIJDERD uit dit bestand. Op uitdrukkelijk verzoek van Kim, na een
@@ -35,7 +31,6 @@ reeks_url is in de praktijk None in alle opgeslagen matchrecords; de filter
 steunt daarom op spelgroep_id, met reeks_url enkel als optionele extra.
 Bordpositie-heuristiek is verwijderd (was een telling van round_text en gaf
 geen betrouwbare bordnummering).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PER_PLAYER_FULL_SCRAPE_2026-09-18 (v8, op verzoek van Kim:
 "bij elke speler die je ziet daar rechtstreeks gewoon te kunnen een scrape
@@ -57,7 +52,6 @@ zichtbaar als een GitHub-token geconfigureerd staat (dus vooral relevant
 op Streamlit Community Cloud, waar lokaal scrapen sowieso niet kan) - een
 importfout van cloud_helpers blokkeert de rest van deze functie nooit
 (lazy, defensieve import).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 (v9, op verzoek van Kim, chat
 2026-09-19: "Ook wel handig om een link naar het klassement te hebben bij
@@ -83,6 +77,34 @@ crashen) - build_player_summary() neemt het resultaat op als
 render_player_summary_inline() (Detail per speler) als
 opponent_analysis.py (Overzichtstabel + eventuele aparte tab) dit
 rechtstreeks kunnen hergebruiken zonder de URL apart te herberekenen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19 (v10, op
+verzoek van Kim, chat 2026-09-19: "ik merk nu plots bij mijn profiel dat ik
+P100 zou zijn. dat klopt niet, ik ben P200. Ik wel virtueel P100 op dit
+moment. bekijk of je dit goed ophaalt. andres is dat verkeerd vooralle
+spelers")
+--------------------------------------------------------------------------
+ROOT CAUSE (zie scrape_klassement.py voor de volledige analyse, incl. de
+officiële TVL-FAQ-bevestiging): Tennis en Padel Vlaanderen onderscheidt
+EXPLICIET "vorig", "huidig" (officieel, geldig tot de eerstvolgende 2x/jaar-
+berekening) en "virtueel" (voorspelling voor de VOLGENDE berekening,
+gebaseerd op lopende resultaten) klassement. scrape_klassement.klassement_
+to_history_summary() gaf voor de HUIDIGE periode tot nu toe het VIRTUELE/
+vertekende cijfer (_dominant_level(), afgeleid uit een niveau_data-tabel die
+- bevestigd via de officiële berekeningsmethode - systematisch richting
+lagere niveaus vertekend is) terug als "klassement" i.p.v. het OFFICIËLE,
+huidig geldige cijfer. Dit trof ALLE spelers (bevestigd: Kim's eigen vraag
+"andres is dat verkeerd vooralle spelers" - JA), niet enkel Kim's profiel,
+want render_player_summary_inline() hieronder is de ENE, centrale plek die
+"Huidig klassement" toont doorheen de hele app.
+FIX: _history_rows() geeft nu ook "virtueel_klassement" per rij door (nieuw
+veld uit klassement_to_history_summary(), enkel gevuld voor de meest
+recente/huidige periode). render_player_summary_inline() toont voortaan,
+ALS er een afwijkend virtueel cijfer gekend is, dat APART en duidelijk
+gelabeld naast (niet in plaats van) "Huidig klassement" - transparant, in
+lijn met Kim's eerder al bevestigde voorkeur (zie PADEL_ANALYSIS_LINEUP_
+TRANSPARENCY_2026-09-19 in page_lineup_lab.py) om een berekend/afgeleid
+cijfer nooit stilzwijgend te verstoppen of te verwarren met het officiële.
 """
 from __future__ import annotations
 import re
@@ -92,7 +114,6 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 import firebase_service as fb
-
 # PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: nu veilig te importeren op
 # module-niveau (ook op Streamlit Community Cloud), dankzij de lazy
 # Playwright-import in scrape_klassement.py zelf. Toch defensief
@@ -104,7 +125,6 @@ try:
     import scrape_klassement as _sk
 except Exception:  # noqa: BLE001  pragma: no cover
     _sk = None
-
 _DUTCH_MONTHS = {
     "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "augustus": 8, "september": 9, "oktober": 10, "november": 11,
@@ -234,7 +254,11 @@ def _render_klassement_link_button(player_id, label: str = "🔗 Bekijk officiee
 # ─────────────────────────────────────────────
 def _history_rows(doc: dict) -> list[dict]:
     """Leest klassement_history en sorteert RECENTSTE EERST (chronologisch,
-    niet op ranggetal). Voegt 'periode_kort' toe voor leesbare as-labels."""
+    niet op ranggetal). Voegt 'periode_kort' toe voor leesbare as-labels.
+    PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: leest nu
+    ook het (optionele) "virtueel_klassement"-veld per rij door (nieuw sinds
+    scrape_klassement.klassement_to_history_summary() - enkel gevuld voor de
+    meest recente/huidige periode)."""
     history_doc = (doc or {}).get("klassement_history") or {}
     rows = []
     for index, row in enumerate(history_doc.get("history") or []):
@@ -248,13 +272,20 @@ def _history_rows(doc: dict) -> list[dict]:
         if rank is None:
             continue
         periode_raw = row.get("periode") or row.get("label") or row.get("periodeomschrijving") or ""
+        virtueel_rank = _parse_rank(row.get("virtueel_klassement"))
         rows.append({
             "index": index,
             "datum": row.get("datum") or "",
             "periode": periode_raw,
             "periode_kort": _short_klassement_label(periode_raw),
             "rank": rank,
+            # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19:
+            # None zodra virtueel_klassement ontbreekt OF gelijk is aan het
+            # officiële cijfer (dan is er niets aparts te melden).
+            "virtual_rank": virtueel_rank if (virtueel_rank is not None and virtueel_rank != rank) else None,
         })
+        if rank is None:
+            continue
     def sort_key(row):
         parsed = _parse_match_date(row.get("datum"))
         if parsed:
@@ -275,6 +306,14 @@ def _history_summary(doc: dict):
     best = max(rows, key=lambda row: row["rank"])
     best_when = best.get("datum") or best.get("periode_kort") or best.get("periode")
     return current["rank"], best["rank"], best_when, rows
+def _current_virtual_rank(history_rows: list[dict]) -> Optional[int]:
+    """PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: geeft
+    het virtuele (voorspelde) klassement van de MEEST RECENTE periode terug,
+    ENKEL als dat afwijkt van het officiële cijfer (anders niets te melden).
+    history_rows is al recentste-eerst gesorteerd door _history_rows()."""
+    if not history_rows:
+        return None
+    return history_rows[0].get("virtual_rank")
 def _best_rank_from_klassement_history(doc: dict) -> Optional[int]:
     """Behouden voor compatibiliteit met bestaande aanroepen. Hoogste getal."""
     return max((row["rank"] for row in _history_rows(doc)), default=None)
@@ -474,8 +513,13 @@ def build_player_summary(
     PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: geeft nu ook "klassement_url"
     mee terug - de link naar de officiële TVL-klassementberekeningspagina
     voor deze speler, zodat opponent_analysis.py (Overzichtstabel/aparte
-    tab) dit rechtstreeks kan hergebruiken zonder de URL apart te
+    tab) dit rechtstreeks kunnen hergebruiken zonder de URL apart te
     herberekenen.
+    PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: geeft nu
+    ook "current_virtual_rank" mee terug (het VOORSPELDE klassement voor de
+    eerstvolgende officiële berekening, ENKEL gevuld als dat afwijkt van het
+    officiële "current_rank") - zie module-docstring voor de volledige
+    toelichting bij deze fix.
     """
     doc = fb.get_player(player_id) or all_docs.get(str(player_id)) or {}
     try:
@@ -493,6 +537,12 @@ def build_player_summary(
     losses_hist = sum(1 for m in history_matches if m.get("won") is False)
     rank_search_docs = global_docs if global_docs else all_docs
     current_rank, best_rank, best_when, history_rows = _history_summary(ranking_doc)
+    # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: het
+    # virtuele cijfer wordt UITSLUITEND afgeleid uit de eigen, expliciet
+    # gescrapete klassement_history (nooit uit de opportunistische
+    # fallbacks hieronder, die berusten op tegenstander-matchrecords en dus
+    # geen "virtueel_klassement"-concept kennen).
+    current_virtual_rank = _current_virtual_rank(history_rows)
     current_rank = current_rank or _current_rank_fallback(player_id, matches, rank_search_docs)
     best_rank = best_rank or _best_rank_opportunistic(player_id, rank_search_docs)
     # 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
@@ -515,13 +565,16 @@ def build_player_summary(
         elo_source = "none"
         elo_fetched_at = None
     return {
-        "schema": 8,
+        "schema": 9,
         "player_id": str(player_id),
         "name": name,
         # Klassement
         "current_rank": current_rank,
         "best_rank": best_rank,
         "best_rank_when": best_when,
+        # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: enkel
+        # gevuld als het afwijkt van current_rank (zie _current_virtual_rank()).
+        "current_virtual_rank": current_virtual_rank,
         "history": history_rows,
         "history_available": bool(history_rows),
         # PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19: link naar de officiële
@@ -585,18 +638,44 @@ def render_player_summary_inline(summary: dict) -> None:
     ook een klikbare link naar de officiële TVL-klassementberekeningspagina,
     naast de al bestaande klassementshistoriek-grafiek - handig om snel de
     brondata zelf te verifiëren of details te zien die niet in onze eigen
-    samenvatting zitten."""
+    samenvatting zitten.
+    PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19 (op verzoek
+    van Kim: "ik merk nu plots bij mijn profiel dat ik P100 zou zijn. dat
+    klopt niet, ik ben P200. Ik wel virtueel P100 op dit moment"): "Huidig
+    klassement" toont nu ALTIJD het OFFICIËLE cijfer (niet meer het
+    vertekende, virtuele) - en toont, ENKEL als er een afwijkend virtueel
+    cijfer gekend is, dat APART en duidelijk gelabeld als 5de metric,
+    zodat dit onderscheid nooit meer verward kan worden."""
     player_id = summary.get("player_id")
     player_name = summary.get("name") or ""
     if player_id:
         _render_scrape_button(str(player_id), player_name, key_prefix=f"dossier_{player_id}")
-    c1, c2, c3, c4 = st.columns(4)
+    current_virtual = summary.get("current_virtual_rank")
+    # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: 5 kolommen
+    # i.p.v. 4 zodra er een afwijkend virtueel klassement gekend is, zodat
+    # beide cijfers naast elkaar zichtbaar zijn - anders blijft het bestaande
+    # 4-kolommen-gedrag ongewijzigd.
+    if current_virtual is not None:
+        c1, c2, c3, c4, c5 = st.columns(5)
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c5 = None
     current = summary.get("current_rank")
     best = summary.get("best_rank")
     c1.metric("Huidig klassement", f"P{current}" if current is not None else "Onbekend")
     c2.metric("Beste ooit", f"P{best}" if best is not None else "Onbekend")
     c3.metric("Matchen deze poule", summary.get("matches_relevant", 0))
     c4.metric("Matchen historiek", summary.get("matches_history", 0))
+    if c5 is not None:
+        c5.metric(
+            "Virtueel klassement", f"P{current_virtual}",
+            help=(
+                "Voorspelling van TVL voor de EERSTVOLGENDE officiële klassementsberekening, "
+                "gebaseerd op de tot nu toe behaalde resultaten deze periode. Dit is NOG NIET "
+                "het officiële klassement (dat blijft 'Huidig klassement' hierboven) en kan bij "
+                "de definitieve berekening nog afwijken."
+            ),
+        )
     if summary.get("best_rank_when"):
         st.caption(f"Beste klassement bereikt in/op: **{summary['best_rank_when']}**")
     # PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13: playing strength uitsluitend
