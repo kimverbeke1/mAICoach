@@ -6,14 +6,16 @@
 # waar Playwright/browser-binaries niet beschikbaar zijn en dus ook niet
 # horen te worden geïnstalleerd.
 #
-# PADEL_ANALYSIS_PREBUILT_DOCKER_IMAGE_2026-09-19 (op verzoek van Kim: "docker
-# image"): playwright staat hier voortaan EXACT gepind (==, niet meer >=) op
-# dezelfde versie als de FROM-tag in PadelAnalysis/scraper/Dockerfile
-# (mcr.microsoft.com/playwright/python:v1.62.0-noble). Die basis-image bevat
-# AL de Chromium-browserbinary die precies bij playwright==1.62.0 hoort - een
-# lossere >=-constraint zou pip toelaten om een NIEUWERE playwright-package
-# te installeren dan de browserbinary die al in het image zit, wat een
-# "Executable doesn't exist"-fout geeft bij het draaien van de scraper.
-# Bij een toekomstige upgrade: verhoog deze versie EN de FROM-tag in
-# Dockerfile ALTIJD SAMEN, nooit apart.
+# PADEL_ANALYSIS_SLIM_IMAGE_2026-09-21 (op verzoek van Kim, over trage
+# "Initialize containers"-stappen bij de GitHub Actions-workflows): sinds het
+# slanke, zelfgebouwde Dockerfile (python:3.12-slim + zelf Chromium
+# installeren, GEEN vooraf-gebouwd multi-browser Playwright-basisimage meer)
+# is deze versie NIET langer gekoppeld aan een specifieke FROM-tag in
+# Dockerfile - `playwright install --with-deps chromium` gebeurt daar in
+# DEZELFDE RUN-laag, ONMIDDELLIJK na deze pip-install, dus de geïnstalleerde
+# Chromium-browserbinary komt altijd automatisch overeen met de hier
+# gepinde playwright-versie. Een upgrade van deze versie vereist dus geen
+# aparte aanpassing elders meer (enkel een nieuwe image-build, die
+# automatisch getriggerd wordt door een wijziging aan dit bestand - zie
+# .github/workflows/build-scraper-image.yml).
 playwright==1.62.0
