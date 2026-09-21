@@ -2,14 +2,64 @@
 # PADEL_ANALYSIS_PADel_BEFORE_CAPTURE_FIX_V1
 """
 fetch_period_playwright.py
-
 Playwright helper voor periode-wisseling op het TVL dashboard.
 Geeft per periode de HTML terug; parsing gebeurt via scraper_v2.py.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_STALE_SELECT_LOCATOR_FIX_2026-09-21 (op verzoek van Kim, na
+een run met speler 1622012: periodes 1-3 lukten, daarna faalden ALLE 13
+resterende periodes identiek met "Locator.select_option: Timeout 5000ms
+exceeded ... waiting for locator('select').nth(2)")
+--------------------------------------------------------------------------
+ROOT CAUSE (zeer waarschijnlijk, op basis van het logpatroon): de periode-
+select wordt in de oude code precies ÉÉN keer opgezocht, vóór de hele lus
+over alle periodes (`padel_select = _get_padel_period_select(page)`).
+`_get_padel_period_select()` identificeert de juiste `<select>` weliswaar
+op INHOUD (opties met "resultaten van week"), maar het resultaat is nog
+steeds een POSITIONELE Locator (Playwright's `.nth(k)`, hier toevallig
+overeenkomend met "select".nth(2)) die bij ELKE volgende actie de pagina
+OPNIEUW doorzoekt op basis van die vaste index - niet opnieuw op basis van
+de oorspronkelijke inhoudsmatch.
+In het gemelde geval was periode 3 ("week 27/2025 tot en met week 48/2025")
+LEEG (bevestigd verderop in scrape_player.py se log: "... : leeg") - een
+lege periode toont vermoedelijk een andere pagina-layout (bv. een "geen
+resultaten"-melding die andere filterelementen verbergt/verwijdert),
+waardoor het totale aantal `<select>`-elementen op de pagina verschuift.
+Zodra dat gebeurt, wijst de vaste `select.nth(2)`-verwijzing niet meer naar
+de juiste (of geen enkele) select, en blijft dat voor de REST van de lus zo
+- vandaar dat alle 13 overige periodes exact dezelfde timeout gaven: geen
+van die pogingen deed ooit een nieuwe poging om de select opnieuw op te
+zoeken.
+FIX (self-herstellend, twee lagen):
+  1. De select wordt voortaan bij ELKE periode OPNIEUW opgezocht
+     (`_get_padel_period_select(page)` vlak vóór elke `select_option()`-
+     aanroep), i.p.v. één keer helemaal bovenaan de functie. Dit is een
+     kleine, goedkope herquery (een handvol `<select>`-elementen) en maakt
+     de code robuust tegen ELKE tussentijdse DOM-wijziging, niet enkel het
+     specifieke "lege periode"-scenario hierboven.
+  2. Als de verse select niet gevonden wordt, of `select_option()` toch
+     faalt, wordt ÉÉN volledige "harde herstelpoging" gedaan
+     (`_hard_recover()`): de pagina wordt herladen, de Padel-tab opnieuw
+     geactiveerd, cookies opnieuw weggeklikt (voor het geval een banner
+     terugkeert na herladen), en de select opnieuw gezocht. Lukt dat, dan
+     wordt de selectie voor DIE periode opnieuw geprobeerd. Faalt ook dat,
+     dan wordt de periode als mislukt gelogd - MAAR de volgende periode in
+     de lus krijgt gewoon opnieuw een VERSE poging (stap 1), i.p.v. voort
+     te bouwen op een reeds bewezen kapotte toestand. Zo blijft één
+     tijdelijk DOM-probleem niet langer alle DAAROPVOLGENDE periodes
+     "vergiftigen", zoals in het gemelde geval gebeurde (13 van de 16
+     periodes verloren voor een speler die zijn allereerste, volledige
+     scrape kreeg).
+  Bijkomend voordeel: scrape_player.py se "missing"-boekhouding
+  (`periods_scraped`) markeert mislukte periodes sowieso al NIET als
+  gedaan, dus een volgende bulk-run zou ze vroeg of laat toch opnieuw
+  proberen - maar met deze fix is de kans veel groter dat ze al binnen
+  DEZELFDE run alsnog lukken, wat zowel tijd bespaart (geen herhaalde
+  bulk-runs nodig) als de speler sneller een volledige, betrouwbare
+  historiek geeft.
 """
 import time
 import logging
 from typing import Optional
-
 from playwright.sync_api import sync_playwright
 import re
 
@@ -25,7 +75,6 @@ DEFAULT_PADEL_PARAMS = {
 # PADEL_ANALYSIS_FETCH_PERIOD_CLICK_PADEL_FIX
 def _activate_padel_results_tab(page, debug: bool = False) -> bool:
     """Force TVL results dashboard to the Padel tab before reading HTML.
-
     The results dashboard can open on Tennis enkel by default. Period fetching and
     HTML extraction happen in fetch_period_playwright.py, so clicking Padel inside
     scrape_player.py is too late if the HTML is already captured here.
@@ -131,7 +180,12 @@ def _dismiss_cookies(page):
 
 
 def _get_padel_period_select(page):
-    """Return the padel period <select> element (3rd select with period options)."""
+    """Return the padel period <select> element (3rd select with period options).
+    PADEL_ANALYSIS_STALE_SELECT_LOCATOR_FIX_2026-09-21: LET OP - dit geeft
+    een POSITIONELE Locator terug die bij een volgende actie de pagina
+    OPNIEUW doorzoekt op basis van de HUIDIGE DOM. Roep deze functie daarom
+    altijd VLAK VOOR een actie opnieuw aan i.p.v. het resultaat lang vast te
+    houden over meerdere periode-wissels heen (zie fetch_all_periods_html)."""
     period_selects = []
     for sel in page.locator("select").all():
         try:
@@ -166,6 +220,32 @@ def _wait_after_select(page, timeout_ms: int = 10000):
     page.wait_for_timeout(1500)
 
 
+def _hard_recover(page, url: str, debug: bool = False):
+    """PADEL_ANALYSIS_STALE_SELECT_LOCATOR_FIX_2026-09-21: volledige reset
+    van de pagina (herladen + Padel-tab heractiveren + cookies opnieuw
+    wegklikken) wanneer een verse select-poging toch mislukt is. Geeft de
+    NIEUW gevonden select-Locator terug, of None als dat ook na deze reset
+    niet lukt (bv. de site zelf ligt eruit)."""
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        if debug:
+            print(f"[fetch-period/recover] herladen mislukt: {e}")
+        return None
+    _activate_padel_results_tab(page, debug=debug)
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+    _dismiss_cookies(page)
+    _activate_padel_results_tab(page, debug=debug)
+    try:
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+    return _get_padel_period_select(page)
+
+
 def fetch_all_periods_html(
     player_id: str,
     max_periods: Optional[int] = None,
@@ -176,11 +256,9 @@ def fetch_all_periods_html(
 ) -> list[dict]:
     """
     Open player dashboard, iterate over padel periods, capture HTML per period.
-
     progress_callback(i, total, label, status): optioneel, wordt aangeroepen
     vóór elke periode ("bezig") en erna ("ok"/"empty"/"error"), zodat de UI
     kan tonen waar het scrapen precies staat.
-
     Args:
         max_periods:    (legacy gedrag) als target_labels niet gegeven is,
                          worden enkel de eerste `max_periods` opties uit de
@@ -204,13 +282,7 @@ def fetch_all_periods_html(
                          er effectief gevraagd waren, wat bij scrape_player's
                          strict_missing_only-modus (enkel echt ontbrekende,
                          niet per se recente periodes) tot het ophalen van de
-                         VERKEERDE periode leidde (voorbeeld uit productie:
-                         gevraagd "week 49/2025 tot 26/2026", opgehaald werd
-                         i.p.v. daarvan "week 27/2026 tot 48/2026", simpelweg
-                         omdat dat toevallig de eerste dropdown-optie was).
-                         Gebruik dit ALTIJD wanneer je specifieke periodes
-                         nodig hebt i.p.v. "de eerste N".
-
+                         VERKEERDE periode leidde.
     Returns list of:
         {"label": str, "value": str, "html": str, "status": "ok"|"empty"|"error"}
     """
@@ -236,7 +308,6 @@ def fetch_all_periods_html(
                 return results
             all_options = _get_period_options(page, padel_select)
             logger.info(f"  {len(all_options)} periodes gevonden")
-
             if target_labels is not None:
                 # PADEL_ANALYSIS_TARGET_LABEL_FIX: filter op EXACT label-match,
                 # behoud dropdown-volgorde voor de resterende (gefilterde) opties.
@@ -248,7 +319,6 @@ def fetch_all_periods_html(
                     logger.warning(f"  Gevraagde periode(s) niet gevonden in dropdown: {sorted(missing)}")
             elif max_periods is not None:
                 all_options = all_options[:max_periods]
-
             total = len(all_options)
             for i, opt in enumerate(all_options):
                 label, value = opt["label"], opt["value"]
@@ -265,17 +335,61 @@ def fetch_all_periods_html(
                 # paginadefault na het laden niet noodzakelijk die periode.
                 needs_explicit_select = (i > 0) or (target_labels is not None)
                 if needs_explicit_select:
-                    try:
-                        padel_select.select_option(value=value, timeout=5000)
-                        _wait_after_select(page)
-                        _activate_padel_results_tab(page, debug=bool(globals().get('DEBUG', False)))
-                        _wait_after_select(page)
-                    except Exception as e:
-                        logger.error(f"    → selectie FOUT: {e}")
-                        results.append({**opt, "html": "", "status": "error", "error": str(e)})
+                    # PADEL_ANALYSIS_STALE_SELECT_LOCATOR_FIX_2026-09-21: zie
+                    # module-docstring. Elke periode krijgt hier een VERSE
+                    # select-resolutie i.p.v. de ene, bovenaan de functie
+                    # berekende `padel_select` te blijven hergebruiken - dat
+                    # was de kern van het "select nth(2) timeout"-probleem
+                    # dat na één lege periode ALLE resterende periodes liet
+                    # falen.
+                    fresh_select = _get_padel_period_select(page)
+                    select_ok = False
+                    last_error: Optional[Exception] = None
+                    if fresh_select is not None:
+                        try:
+                            fresh_select.select_option(value=value, timeout=5000)
+                            select_ok = True
+                        except Exception as e:
+                            last_error = e
+                    else:
+                        last_error = RuntimeError("periode-select niet gevonden op de pagina")
+                    if not select_ok:
+                        # Eén volledige, harde herstelpoging: herladen +
+                        # Padel-tab heractiveren + select opnieuw zoeken.
+                        # Lukt DIE poging, dan wordt de selectie voor deze
+                        # periode alsnog geprobeerd i.p.v. de periode meteen
+                        # als mislukt te boeken.
+                        logger.warning(
+                            f"    → selectie mislukt ({last_error}); pagina wordt herladen voor "
+                            "een herstelpoging..."
+                        )
+                        recovered_select = _hard_recover(
+                            page, url, debug=bool(globals().get('DEBUG', False)),
+                        )
+                        if recovered_select is not None:
+                            try:
+                                recovered_select.select_option(value=value, timeout=5000)
+                                select_ok = True
+                            except Exception as e:
+                                last_error = e
+                        else:
+                            last_error = RuntimeError(
+                                "periode-select ook na herladen niet gevonden"
+                            )
+                    if not select_ok:
+                        logger.error(f"    → selectie FOUT (ook na herstelpoging): {last_error}")
+                        results.append({**opt, "html": "", "status": "error", "error": str(last_error)})
                         if progress_callback:
                             progress_callback(i + 1, total, label, "error")
+                        # BELANGRIJK: geen `continue` op een kapotte, blijvend
+                        # herbruikte select-referentie - de VOLGENDE periode
+                        # in de lus start opnieuw met een VERSE resolutiepoging
+                        # (zie hierboven), dus dit ene mislukte geval "vergiftigt"
+                        # de rest van de lus niet langer.
                         continue
+                    _wait_after_select(page)
+                    _activate_padel_results_tab(page, debug=bool(globals().get('DEBUG', False)))
+                    _wait_after_select(page)
                 _activate_padel_results_tab(page, debug=bool(globals().get('DEBUG', False)))
                 html = page.content()
                 results.append({**opt, "html": html, "status": "ok"})
@@ -296,7 +410,6 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from scraper_v2 import parse_tournament_section, parse_interclub_section
-
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     print("Test: eerste 5 periodes voor speler 214435...")
     pages = fetch_all_periods_html("214435", max_periods=5, headless=True)
