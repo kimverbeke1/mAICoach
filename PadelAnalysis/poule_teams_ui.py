@@ -1,17 +1,14 @@
 """
 poule_teams_ui.py — "🌐 Andere ploegen"-tabblad in Opstelling-analyse.
-
 PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 (Fase D1, op verzoek van Kim, chat
 2026-09-19: "Het zou ook handig zijn dat er een mogelijkheid is om al meteen
 ook andere ploegen van je poule al eens te bekijken. eventueel via apart
 tabblad.")
-
 Doel: het volledige team-analysescherm (overzichtstabel, detail-per-speler,
 AI-inzichten, "ontbrekende gegevens ophalen") dat vandaag enkel voor de
 EERSTVOLGENDE tegenstander getoond wordt, ook beschikbaar maken voor OM HET
 EVEN WELKE andere ploeg in dezelfde poule — zonder de bestaande logica te
 dupliceren.
-
 ONTWERPKEUZE: dit hergebruikt bewust de reeds bestaande, generieke bouwstenen
 in plaats van een parallel scoutingpad te bouwen:
   - schedule_scraper.py se `fixtures` (al geparsed, al gecached via
@@ -30,7 +27,6 @@ in plaats van een parallel scoutingpad te bouwen:
     ophalen"-knop al generiek per speler-roster.
 Voor élke van deze bouwstenen is enkel een ANDERE `opp`-dict (ploeg_id/naam)
 en een apart `key_prefix` nodig — geen enkele hoeft aangepast te worden.
-
 AFHANKELIJKHEID VAN "Volgende match": om de volledige poule-tabel (fixtures)
 en de eigen-ploeg-identificatie te kennen, moet de gebruiker eerst minstens
 1x "📅 Volgende match laden" gebruikt hebben in het tabblad "🔍 Analyseren" —
@@ -38,14 +34,12 @@ page_lineup_lab.py bewaart die fixtures/own_ploeg_id sindsdien in
 st.session_state (zie PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 in dat
 bestand). Is dat nog niet gebeurd, dan toont dit tabblad een duidelijke
 verwijzing i.p.v. zelf een parallelle, dubbele scrape-flow op te zetten.
-
 LOOKBACK: in tegenstelling tot de eerstvolgende tegenstander (waar 1-2
 recente wedstrijden meestal volstaan) wil je van een WILLEKEURIGE poule-
 ploeg typisch hun VOLLEDIGE seizoenshistoriek zien — er is immers geen
 "eerstvolgende match"-datum die de blik natuurlijk beperkt. _team_lookback()
 berekent daarom automatisch "alle tot nu toe gespeelde wedstrijden van deze
 ploeg" i.p.v. een vast klein getal.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CLUB_HINT_FOR_TEAM_TRIGGERS_2026-09-19 (op verzoek van Kim,
 chat 2026-09-19: "je weet toch welke ploeg je scrapet dus deze melding is
@@ -58,6 +52,42 @@ poule-ploeg (net als voor de eerstvolgende tegenstander) NOOIT meer de "geen
 club opgegeven om te disambigueren"-waarschuwing hoeft te geven voor spelers
 zonder eigen club-veld — de ploegnaam is hier immers altijd al gekend
 (`chosen["name"]`), dus geen enkele reden om dat niet door te geven.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21 (op verzoek van Kim,
+chat 2026-09-21: "ik heb nu de ploeg KTC ISIS eens willen analyseren bij de
+andere ploegen en was dat ooit al eens begonnen [...] er staat dan ook dat
+deze ploeg nog geen matchen gespeeld heeft maar dat is niet waar. ondertussen
+is die situatie al veranderd")
+--------------------------------------------------------------------------
+ROOT CAUSE: `fixtures` kwam hier UITSLUITEND uit st.session_state (
+`vm_fixtures_{sel_player_id}`), een EENMALIGE snapshot die enkel gezet wordt
+op het moment dat de gebruiker "📅 Volgende match laden" gebruikte in het
+tabblad "🔍 Analyseren" (zie page_lineup_lab.py, `_finish()`). Die snapshot
+wordt NOOIT automatisch ververst binnen deze sessie — ook niet door
+opnieuw op "{team} analyseren" te klikken hieronder, want dat hergebruikte
+gewoon dezelfde, mogelijk verouderde `fixtures`-variabele. Voor een ploeg
+zoals KTC ISIS, die INTUSSEN al matchen speelde nadat het schema voor het
+laatst geladen werd, bleef `scout_opponent()` daardoor keer op keer "geen
+eerdere, al gespeelde wedstrijden gevonden" rapporteren — ook de freshness-
+check (team_freshness.team_freshness_status()) kon dit niet detecteren,
+want die vergelijkt enkel BINNEN diezelfde (stale) fixtures-lijst.
+FIX, drie onderdelen:
+  1. Vóór alles wordt de ACTUEEL PERSISTEERDE schedule opnieuw opgehaald via
+     dashboard_common._get_saved_schedule() (dezelfde bron die de dagelijkse
+     achtergrondtaak / een schema-verversing bijwerkt) — die wordt, indien
+     beschikbaar, ALTIJD verkozen boven de eenmalige sessie-snapshot. Zo
+     ziet dit tabblad automatisch de meest recente schema-stand, zonder dat
+     de gebruiker terug naar "Volgende match laden" moet.
+  2. Een nieuwe, expliciete "🔄 Schema nu verversen"-sectie (hergebruikt
+     cloud_helpers.render_cloud_scrape_trigger(), net als in
+     page_lineup_lab.py's `_render_schema_refresh_button()`) laat toe het
+     schema DIRECT vanuit dit tabblad te forceren, zonder tabblad te
+     wisselen.
+  3. Toont de gebruiker, wanneer een bundle nog "geen matchen gespeeld"
+     meldt TERWIJL het (nu verse) schema wél gespeelde wedstrijden toont
+     voor deze ploeg, een EXPLICIETE melding dat de analyse verouderd is en
+     een herhaalde klik op "analyseren" nodig heeft — i.p.v. de oude,
+     mogelijk misleidende melding stilzwijgend te laten staan.
 """
 from __future__ import annotations
 
@@ -71,6 +101,7 @@ import opponent_scout as osc
 import opponent_scout_ui as osu
 import schedule_scraper as ss
 import team_freshness as tf
+from dashboard_common import _get_saved_schedule, _format_scraped_at, render_cloud_scrape_trigger
 
 
 def _extract_poule_teams(fixtures: list[dict], own_ploeg_id: Optional[str]) -> list[dict]:
@@ -108,6 +139,24 @@ def _team_lookback(fixtures: list[dict], ploeg_id: str) -> int:
     return max(played, 1)
 
 
+def _freshest_fixtures(sel_player_id: str, session_fixtures: list[dict]) -> tuple[list[dict], Optional[str]]:
+    """PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: geeft de
+    meest ACTUEEL PERSISTEERDE schedule terug (via
+    dashboard_common._get_saved_schedule(), dezelfde bron die de dagelijkse
+    achtergrondtaak/schema-verversing bijwerkt), MET terugval op de
+    eenmalige sessie-snapshot (`session_fixtures`) als er nog geen
+    persisteerde schedule beschikbaar is. Geeft (fixtures, laatst_ververst_op)
+    terug — het 2de element is None als er geen persisteerde timestamp
+    gekend is (dan tonen we ook geen "laatst bijgewerkt op"-caption)."""
+    try:
+        saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
+    except Exception:
+        saved_fixtures, sched_at = None, None
+    if saved_fixtures:
+        return saved_fixtures, sched_at
+    return session_fixtures, None
+
+
 def render_poule_teams_tab(
     sel_player_id: str,
     name_lookup_global: dict,
@@ -119,14 +168,31 @@ def render_poule_teams_tab(
     # bekend, wanneer de nachtelijke achtergrond-poule-scan (Fase D2) voor
     # het laatst liep — puur informatief, geen actie.
     tf.render_last_prescan_caption()
-    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}")
+    session_fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}")
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
-    if not fixtures or not own_ploeg_id:
+    if not session_fixtures or not own_ploeg_id:
         st.info(
             "Laad eerst je poule-schema via '📅 Volgende match laden' in het tabblad '🔍 Analyseren' "
             "— dat schema wordt hier hergebruikt, zonder opnieuw te moeten ophalen."
         )
         return
+    # PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: gebruik de
+    # meest actuele, PERSISTEERDE schedule i.p.v. blind te vertrouwen op de
+    # eenmalige sessie-snapshot hierboven — zie module-docstring voor de
+    # volledige toelichting (KTC ISIS-melding van Kim).
+    fixtures, sched_at = _freshest_fixtures(sel_player_id, session_fixtures)
+    if sched_at:
+        st.caption(f"ℹ️ Poule-schema laatst automatisch bijgewerkt op {_format_scraped_at(sched_at)}.")
+    with st.expander("🔄 Schema nu verversen", expanded=False):
+        st.caption(
+            "Ververst het wedstrijdschema van de volledige poule op de achtergrond. Gebruik dit als "
+            "een ploeg hieronder een verouderde status toont (bv. 'nog geen matchen gespeeld' terwijl "
+            "ze intussen wel al speelde(n))."
+        )
+        render_cloud_scrape_trigger(
+            key_prefix=f"poule_schema_{sel_player_id}", player_ids=str(sel_player_id),
+            mode="missing", label="🔄 Schema nu verversen",
+        )
     teams = _extract_poule_teams(fixtures, own_ploeg_id)
     if not teams:
         st.info("Geen andere ploegen gevonden in dit poule-schema.")
@@ -162,7 +228,23 @@ def render_poule_teams_tab(
         st.info(f"⬆️ Klik op '🔍 {chosen['name']} analyseren' om hun gegevens te bekijken.")
         return
     if bundle.get("note"):
-        st.info(bundle["note"])
+        # PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: vóór we de
+        # (mogelijk verouderde) "note" gewoon tonen, controleren we of het
+        # NU verse schema deze ploeg toch al gespeelde wedstrijden toont —
+        # zo ja, dan is de note zelf verouderd (gebaseerd op een eerdere,
+        # inmiddels achterhaalde schedule-snapshot) en tonen we een
+        # EXPLICIETE melding i.p.v. de gebruiker te laten geloven dat de
+        # ploeg écht nog niets speelde.
+        played_now = tf.team_played_count(fixtures, ploeg_id)
+        if played_now > 0:
+            st.warning(
+                f"⚠️ Deze analyse toont nog: \"{bundle['note']}\" — maar het (zonet ververste) poule-schema "
+                f"laat intussen {played_now} gespeelde wedstrijd(en) zien voor {chosen['name']}. Deze "
+                f"analyse is dus verouderd. Klik hierboven opnieuw op '🔍 {chosen['name']} analyseren' "
+                "om ze bij te werken."
+            )
+        else:
+            st.info(bundle["note"])
         return
     unique_players = bundle.get("unique_players", []) or []
     if not unique_players:
@@ -176,6 +258,10 @@ def render_poule_teams_tab(
     # gebaseerd is, en (b) de playing strength van 1 of meer spelers
     # verouderd is. Toont enkel een banner — de effectieve actie loopt via
     # de bestaande '🔄 Ontbrekende gegevens ophalen'-knop hieronder.
+    # PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: gebruikt nu de
+    # verse `fixtures` (zie hierboven), dus deze check kan NU ook effectief
+    # nieuwe matchen detecteren die pas na de laatste sessie-snapshot bekend
+    # raakten.
     freshness = tf.team_freshness_status(
         unique_players, fixtures=fixtures, ploeg_id=ploeg_id,
         known_played_count=st.session_state.get(known_played_key),
@@ -190,7 +276,10 @@ def render_poule_teams_tab(
     # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19: dezelfde "ontbrekende
     # gegevens ophalen"-knop als bij de eerstvolgende tegenstander (Fase C),
     # rechtstreeks hergebruikt via de publieke alias in opponent_scout_ui.py
-    # — geen dubbele detectie-/trigger-logica.
+    # — geen dubbele detectie-/trigger-logica. Sinds
+    # PADEL_ANALYSIS_TEAM_SYNC_FULL_FORCE_OPTION_2026-09-21 (zie
+    # opponent_scout_ui.py) toont deze knop ook een optionele "forceer voor
+    # alle spelers"-checkbox, hier dus automatisch mee-hergebruikt.
     # PADEL_ANALYSIS_CLUB_HINT_FOR_TEAM_TRIGGERS_2026-09-19: geeft nu
     # team_name=chosen["name"] mee, zodat een padelstat-verversing voor deze
     # willekeurige poule-ploeg dezelfde club-disambiguatie-hint krijgt als
