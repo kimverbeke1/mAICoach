@@ -61,11 +61,10 @@ eerder berekende, foutieve groepering tot 10 minuten laten "doorleven")
 --------------------------------------------------------------------------
 Nieuwe, kleine "🔄 Ontmoetingen-cache verversen"-knop, geplaatst vlak boven
 de "Beschikbare eigen spelers"-selector, roept `_load_encounter_index.clear()`
-aan en forceert een rerun. LET OP (zie PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_
-MATCH_FIX_2026-09-21 hieronder): deze cache/knop is intussen ENKEL nog
-relevant voor de sandbox-preset "📋 Onze vorige opstelling"
-(_recent_own_lineup_boards()) — de HOOFDSELECTIE ("Beschikbare eigen
-spelers") gebruikt deze cache niet langer.
+aan en forceert een rerun. Deze cache/knop is intussen enkel nog relevant
+voor de sandbox-preset "📋 Onze vorige opstelling" (_recent_own_lineup_
+boards()) — de HOOFDSELECTIE ("Beschikbare eigen spelers") gebruikt deze
+cache sinds de fixes hieronder niet meer.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_OWN_TEAM_PARTNER_ID_FALLBACK_FIX_2026-09-21 (op verzoek van
 Kim, chat 2026-09-21: "het probleem dat mijn eigen ploeg nog steeds maar
@@ -74,54 +73,61 @@ Kim, chat 2026-09-21: "het probleem dat mijn eigen ploeg nog steeds maar
 Eerste tussenstap: _recent_own_lineup_player_ids() gebruikte niet langer
 ll.reconstruct_boards()/board["pair"] (die een correct opgeloste
 partner_user_id vereiste, notoir onbetrouwbaar), maar verzamelde in de
-plaats elke `pid` met een eigen entry in de encounter-index-groep
-(index[most_recent_key]) — gebaseerd op exacte matching van
-(match_date, encounter)-TEKST tussen de onafhankelijk gescrapete
-documenten van elke teamgenoot.
+plaats elke `pid` met een eigen entry in de encounter-index-groep — op
+basis van exacte matching van (match_date, encounter)-TEKST tussen de
+onafhankelijk gescrapete documenten van elke teamgenoot. Bleek in de
+praktijk (zie volgende fix) NOG STEEDS te fragiel.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_MATCH_FIX_2026-09-21 (op verzoek van Kim,
-chat 2026-09-21, letterlijk: "beschikbare eigen spelers in laatste versie
-is nu maar 1 bij opstellinganalyse. komaan los dit voor eens en altijd op.
-kijk gewoon naar de spelers van mijn ploeg van de vorige match. moeilijker
-dan dat is het niet. hou ook rekening dat het er minimum 4 moeten zijn.
-dus 1,2,3 is altijd mis!")
+PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_MATCH_FIX_2026-09-21 (op verzoek van Kim:
+"beschikbare eigen spelers in laatste versie is nu maar 1 [...] kijk gewoon
+naar de spelers van mijn ploeg van de vorige match")
 --------------------------------------------------------------------------
-ROOT CAUSE (na verificatie van de vorige "fix" in productie): de vorige
-aanpak matchte teamgenoten nog steeds op EXACTE (match_date, encounter)-
-TEKST-gelijkheid tussen 4 VOLLEDIG ONAFHANKELIJK GESCRAPETE documenten (elke
-speler wordt vanaf zijn/haar EIGEN TVL-resultatenpagina gescraped — zie
-scrape_player.py). Die "encounter"-tekst blijkt in de praktijk NIET
-betrouwbaar identiek tussen teamgenoten (vermoedelijk kleine verschillen in
-hoe de HTML per sessie/speler gerenderd wordt, of een baan-/tafelvermelding
-die per bord verschilt) — met als gevolg dat na deze "fix" nog maar 1
-speler (in het beste geval de geselecteerde speler zelf) overbleef, een
-verSLECHTERING t.o.v. de vorige "3 van 4"-situatie. Elke poging om
-teamgenoten te groeperen op basis van vrije TEKST die apart per speler
-gescraped wordt, is dus fundamenteel te fragiel gebleken — ongeacht welke
-combinatie van tekstvelden (match_date+reeks_name+encounter+competition_
-name, of enkel match_date+encounter) als sleutel gebruikt wordt.
-FIX (definitief, geen tekstuele matching meer): _recent_own_lineup_
-player_ids() bepaalt nu UITSLUITEND op basis van de KALENDERDATUM (via
-_parse_match_date(), die datumnotatie al normaliseert naar een vergelijkbare
-tuple, dus ongevoelig voor kleine tekstverschillen in het ruwe
-'match_date'-veld) welke spelers meespeelden:
-  1. Zoek de meest recente interclub-matchdatum in sel_player_id's EIGEN
-     matches (`_parse_match_date(m["match_date"])`, MAX ervan).
-  2. Doorzoek vervolgens ALLE profielen (niet enkel wie toevallig een
-     "encounter"-tekst-match heeft) op een EIGEN interclub-matchrecord met
-     EXACT diezelfde kalenderdatum, en verzamel elke pid die zo'n record
-     heeft.
-Dit vermijdt volledig elke afhankelijkheid van (a) partner_user_id-
-resolutie (eerdere fix) EN (b) exacte tekstgelijkheid van vrije velden als
-"encounter" (deze fix) — een interclub-ontmoeting van je eigen team vindt
-per definitie voor ALLE teamgenoten op DEZELFDE kalenderdag plaats, dus dit
-is de meest robuuste, simpelste correcte matching-sleutel die er is.
-Bijkomend, op Kim's expliciete eis ("hou ook rekening dat het er minimum 4
-moeten zijn. dus 1,2,3 is altijd mis"): _render_opstelling_scenario() toont
-nu een EXPLICIETE ⚠️-waarschuwing zodra er minder dan 4 spelers in de
-"standaard vooraf geselecteerd"-lijst zitten, met een concrete, uitvoerbare
-aanwijzing (controleer of alle teamgenoten individueel gescraped zijn) —
-in plaats van dit stilzwijgend te laten gebeuren zoals voorheen.
+Tussenstap: matching op EXACTE (match_date, encounter)-TEKST bleek nog
+steeds te fragiel tussen 4 onafhankelijk gescrapete documenten, dus
+vervangen door matching op UITSLUITEND de kalenderdatum
+(_parse_match_date()), gezocht over ALLE profielen in de database.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OWN_TEAM_CLUB_SCOPED_MATCH_FIX_2026-09-21 (op verzoek van
+Kim, chat 2026-09-21, letterlijk: "fout. je moet de eigen spelers nemen bij
+de eigen spelers. niet de tegenstanders!")
+--------------------------------------------------------------------------
+ROOT CAUSE (van de vorige, datum-only fix): interclub-speeldagen zijn
+league-breed vaak GESTANDAARDISEERD (bv. "elke zaterdag om 14u speelt
+iedereen"). Puur op kalenderdatum zoeken, over de VOLLEDIGE
+player_profiles-collectie (die zowel eigen team ALS reeds gekende
+tegenstanders van andere ontmoetingen bevat), pikt daardoor onvermijdelijk
+ook spelers op die die dag toevallig een HELEMAAL ANDERE, ongerelateerde
+interclub-wedstrijd speelden — inclusief, zoals Kim expliciet meldde, de
+HUIDIGE tegenstander-roster (bundle["unique_players"]) van de opstelling
+die net geanalyseerd wordt. Datum alleen discrimineert dus NIET tussen "ons
+team" en "eender welk ander team dat toevallig dezelfde speeldag heeft".
+FIX, twee complementaire, samenwerkende signalen (geen tekstuele matching
+meer op vrije velden zoals "encounter" — die bleek al 2x te fragiel):
+  1. CLUB-FILTER (primair): _recent_own_lineup_player_ids() haalt eerst
+     sel_player_id's eigen, reeds bekende club op (player_profiles.club,
+     normaliter automatisch gezet bij het laden van "Volgende match" — zie
+     dashboard_common's club-autodetectie). Is die club bekend, dan worden
+     ENKEL kandidaat-profielen met DEZELFDE (genormaliseerde, teamletter-
+     ongevoelige) club meegenomen in de datum-matching hieronder —
+     tegenstanders horen zo goed als altijd bij een ANDERE club, dus dit
+     sluit ze structureel uit, niet enkel toevallig voor deze ene analyse.
+  2. EXPLICIETE UITSLUITING VAN DE HUIDIGE TEGENSTANDER-ROSTER (vangnet):
+     ONGEACHT of de club-filter hierboven kon toegepast worden (bv. als
+     sel_player_id's eigen club nog niet gekend is), wordt elke player_id
+     die voorkomt in de op dit moment geanalyseerde tegenstander-roster
+     (bundle["unique_players"], meegegeven als nieuwe `exclude_ids`-
+     parameter door de aanroeper in _render_opstelling_scenario()) altijd
+     hard uitgesloten van de kandidatenlijst — dit is de meest directe,
+     gegarandeerde fix voor exact het scenario dat Kim meldde (een
+     tegenstander die in de "Beschikbare eigen spelers"-lijst verscheen).
+Beide filters werken onafhankelijk van elkaar en vullen elkaar aan: de
+club-filter is de bredere, structurele hygiëne (voorkomt OOK dat spelers
+van een DERDE, niet-huidige tegenstander-ploeg zouden binnensluipen); de
+exclude_ids-uitsluiting is de directe garantie voor het specifieke,
+zichtbare probleem dat Kim meldde. Is de eigen club nog niet gekend EN zit
+een foutief meegenomen speler niet in de huidige tegenstander-roster, dan
+blijft de bestaande "minimum 4"-waarschuwing (zie hieronder) zichtbaar als
+extra vangnet — dit wordt in de UI-tekst nu ook expliciet vermeld.
 """
 import itertools
 import streamlit as st
@@ -312,21 +318,48 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     return _finish(fixtures, reeks_url)
 
 
-def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list) -> set:
-    """PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_MATCH_FIX_2026-09-21: zie
-    module-docstring voor de volledige toelichting bij deze definitieve fix.
+def _normalize_club_for_teammate_match(club: str) -> str:
+    """PADEL_ANALYSIS_OWN_TEAM_CLUB_SCOPED_MATCH_FIX_2026-09-21: normaliseert
+    een clubnaam voor vergelijking tussen speler-profielen — lowercase,
+    whitespace genormaliseerd (via fb.normalize_name(), hetzelfde mechanisme
+    dat firebase_service.py al gebruikt voor club_normalized), EN de
+    eventuele trailing team-letter weggehaald (bv. "PADEL FACTORY A" en
+    "PADEL FACTORY B" moeten als DEZELFDE club/vereniging herkend worden —
+    enkel de afdeling/reeks-letter verschilt, niet de club zelf)."""
+    if not club:
+        return ""
+    try:
+        base = fb.normalize_name(club)
+    except Exception:
+        base = str(club).strip().lower()
+    # Verwijder een enkele, losstaande trailing letter (team-suffix), bv.
+    # "padel factory a" -> "padel factory". Laat langere/andere suffixen
+    # (bv. een clubnaam die toevallig op een echt woord eindigt) ongemoeid.
+    parts = base.split()
+    if len(parts) > 1 and len(parts[-1]) == 1 and parts[-1].isalpha():
+        base = " ".join(parts[:-1])
+    return base
+
+
+def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list, exclude_ids: set = None) -> set:
+    """PADEL_ANALYSIS_OWN_TEAM_CLUB_SCOPED_MATCH_FIX_2026-09-21: zie
+    module-docstring voor de volledige toelichting bij deze fix.
     Bepaalt "wie speelde er in de meest recente interclub-ontmoeting van ons
-    team" UITSLUITEND op basis van de KALENDERDATUM — geen tekstuele
-    matching meer op "encounter" of afhankelijkheid van partner_user_id.
-    Stap 1: meest recente interclub-matchdatum in sel_player_id's EIGEN,
-    zelf gescrapete matches.
-    Stap 2: elke speler (uit alle profielen) die ZELF een interclub-
-    matchrecord heeft met EXACT diezelfde datum, hoort bij deze ontmoeting.
-    Dit werkt omdat een interclub-ontmoeting van ons team per definitie op
-    1 kalenderdag plaatsvindt voor ALLE teamgenoten — de enige aanname die
-    hiervoor nodig is, in tegenstelling tot exacte tekstgelijkheid van vrije
-    velden (die tussen onafhankelijk gescrapete documenten bleek te
-    verschillen, zie de vorige, mislukte pogingen hierboven)."""
+    team" via TWEE samenwerkende filters, GEEN tekstuele matching op vrije
+    velden meer:
+      1. Kandidaten worden, indien sel_player_id's eigen club gekend is,
+         eerst beperkt tot profielen met DEZELFDE (genormaliseerde) club —
+         tegenstanders horen zo goed als altijd bij een andere club.
+      2. `exclude_ids` (optioneel, door de aanroeper meegegeven — typisch de
+         player_id's van de HUIDIGE tegenstander-roster uit bundle) wordt
+         ALTIJD hard uitgesloten, ongeacht of stap 1 kon toegepast worden —
+         dit garandeert dat de speler(s) die je op dit moment als
+         tegenstander analyseert NOOIT in "Beschikbare eigen spelers"
+         kunnen verschijnen.
+      3. Van de resterende kandidaten: wie een EIGEN interclub-matchrecord
+         heeft op EXACT dezelfde kalenderdatum als sel_player_id's meest
+         recente interclub-match, hoort bij deze ontmoeting."""
+    exclude_ids = {str(x) for x in (exclude_ids or set())}
     try:
         sel_doc = fb.get_player(sel_player_id) or {}
         own_ic_matches = [m for m in (sel_doc.get("matches") or []) if m.get("match_type") == "interclub"]
@@ -335,16 +368,37 @@ def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list) -> set:
         if not dated_own:
             return set()
         most_recent_date = max(d for _, d in dated_own)
-        profile_ids = [p.get("player_id") for p in profiles if p.get("player_id")]
-        docs = ll.get_docs_for_players(profile_ids)
+        try:
+            sel_profile = fb.get_player_profile(sel_player_id) or {}
+        except Exception:
+            sel_profile = {}
+        own_club_norm = _normalize_club_for_teammate_match(sel_profile.get("club"))
+        profile_by_id = {str(p.get("player_id")): p for p in profiles if p.get("player_id")}
+        # Kandidatenpool: bij een gekende eigen club ENKEL profielen met
+        # dezelfde club; anders (club nog onbekend) alle profielen, met de
+        # exclude_ids-uitsluiting hieronder als enige vangnet.
+        if own_club_norm:
+            candidate_ids = [
+                pid for pid, prof in profile_by_id.items()
+                if _normalize_club_for_teammate_match(prof.get("club")) == own_club_norm
+            ]
+        else:
+            candidate_ids = list(profile_by_id.keys())
+        candidate_ids = [pid for pid in candidate_ids if pid not in exclude_ids]
+        if not candidate_ids:
+            return set()
+        docs = ll.get_docs_for_players(candidate_ids)
         player_ids = set()
         for pid, doc in docs.items():
+            pid_str = str(pid)
+            if pid_str in exclude_ids:
+                continue
             for m in doc.get("matches", []) or []:
                 if m.get("match_type") != "interclub":
                     continue
                 d = _parse_match_date(m.get("match_date"))
                 if d == most_recent_date:
-                    player_ids.add(str(pid))
+                    player_ids.add(pid_str)
                     break
         return player_ids
     except Exception:
@@ -2067,15 +2121,25 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     with st.expander("🔄 Ontmoetingen-cache verversen (enkel relevant voor de sandbox-preset 'Onze vorige opstelling')", expanded=False):
         st.caption(
             "Deze cache wordt NIET meer gebruikt om de 'standaard vooraf geselecteerd'-lijst hieronder te "
-            "bepalen (die matcht sinds deze fix rechtstreeks op kalenderdatum, zonder cache). Enkel de "
-            "sandbox-snelknop '📋 Onze vorige opstelling' verderop gebruikt deze nog. Klik hieronder als je "
-            "daar twijfelt over de opgehaalde koppels."
+            "bepalen (die matcht sinds deze fix op club + kalenderdatum, met de huidige tegenstander-roster "
+            "altijd uitgesloten — zie hieronder). Enkel de sandbox-snelknop '📋 Onze vorige opstelling' "
+            "verderop gebruikt deze nog. Klik hieronder als je daar twijfelt over de opgehaalde koppels."
         )
         if st.button("🔄 Ontmoetingen-cache nu verversen", key=f"clear_encounter_cache_{sel_player_id}"):
             _load_encounter_index.clear()
             st.success("Cache geleegd — de pagina herlaadt met een verse groepering.")
             st.rerun()
-    recent_ids = _recent_own_lineup_player_ids(sel_player_id, profiles)
+    # PADEL_ANALYSIS_OWN_TEAM_CLUB_SCOPED_MATCH_FIX_2026-09-21 (op verzoek
+    # van Kim: "fout. je moet de eigen spelers nemen bij de eigen spelers.
+    # niet de tegenstanders!"): de huidige tegenstander-roster (bundle
+    # ["unique_players"]) wordt hier ALTIJD expliciet uitgesloten, bovenop
+    # de club-filter binnenin _recent_own_lineup_player_ids() zelf — zie de
+    # module-docstring voor de volledige toelichting van beide,
+    # samenwerkende filters.
+    current_opponent_ids = {
+        str(p.get("user_id")) for p in (bundle.get("unique_players") or []) if p.get("user_id")
+    }
+    recent_ids = _recent_own_lineup_player_ids(sel_player_id, profiles, exclude_ids=current_opponent_ids)
     if recent_ids:
         default_labels = [lbl for lbl, pid in own_label_to_id.items() if pid in recent_ids]
         sel_label_self = next((lbl for lbl, pid in own_label_to_id.items() if pid == sel_player_id), None)
@@ -2085,17 +2149,15 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         # PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_MATCH_FIX_2026-09-21 (op verzoek
         # van Kim: "hou ook rekening dat het er minimum 4 moeten zijn. dus
         # 1,2,3 is altijd mis!"): een interclub-doublematch bestaat ALTIJD
-        # uit minstens 2 gelijktijdige borden (4 spelers). Minder dan 4 is
-        # dus per definitie een teken dat niet alle teamgenoten (nog)
-        # individueel gescraped zijn voor deze datum — expliciet
-        # waarschuwen i.p.v. dit stilzwijgend te laten gebeuren.
+        # uit minstens 2 gelijktijdige borden (4 spelers).
         if len(default_labels) < 4:
             st.warning(
                 f"⚠️ Slechts {len(default_labels)} speler(s) automatisch gevonden voor jullie laatste "
                 "interclubontmoeting — een doublesronde bestaat normaliter uit minstens 4 spelers "
-                "(2 gelijktijdige borden). Vermoedelijke oorzaak: niet alle teamgenoten van die "
-                "ontmoeting hebben zelf al een gescrapete matchrecord voor deze datum. Ververs (via "
-                "de per-speler-knop) de ontbrekende teamgenoot/teamgenoten, of vul de selectie "
+                "(2 gelijktijdige borden). Mogelijke oorzaken: niet alle teamgenoten van die ontmoeting "
+                "hebben zelf al een gescrapete matchrecord voor deze datum, OF je eigen club-veld staat "
+                "nog niet correct ingesteld (waardoor de club-filter geen kandidaten kon vinden). Ververs "
+                "(via de per-speler-knop) de ontbrekende teamgenoot/teamgenoten, of vul de selectie "
                 "hieronder handmatig aan."
             )
     else:
