@@ -63,6 +63,19 @@
 # de club/ploeg in te vullen; daarna pikt zowel die knop als deze uurlijkse
 # achtergrondtaak die speler gewoon weer op.
 #
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_BATCH_SIZE_INCREASE_2026-09-21 (op verzoek van Kim: "Je mag
+# dat maximum trouwens op 10 zetten. zal nodig zijn voor het najaar")
+# --------------------------------------------------------------------------
+# De default voor zowel de workflow_dispatch-input 'max' als de cron-
+# fallback (gebruikt wanneer de workflow via het uurlijkse schedule draait,
+# dus zonder inputs) gaat van 2 naar 10 — meer spelers/tegenstanders om
+# periodiek te verversen zodra de interclub-competitie in het najaar
+# hervat. Bij ~10-30s per speler blijft een run van 10 spelers (~1,5-5
+# minuten) ruim binnen de timeout-minutes hieronder (10 min) — geen wijziging
+# aan de timeout nodig. Het handmatig aanpasbare 'max'-inputveld blijft
+# uiteraard beschikbaar voor grotere, eenmalige batches (bv. --force-all).
+#
 # Vereiste repo secret (Settings -> Secrets and variables -> Actions):
 #   FIREBASE_SERVICE_ACCOUNT_JSON - Firestore-toegang (zelfde secret als
 #                                   scrape-padel.yml/sync-mAIcoach.yml)
@@ -83,9 +96,9 @@ on:
   workflow_dispatch:
     inputs:
       max:
-        description: "Max aantal spelers deze run (standaard 2 voor de uurlijkse trickle-refresh)"
+        description: "Max aantal spelers deze run (standaard 10, opgetrokken van 2 voor het najaarsseizoen)"
         required: false
-        default: "2"
+        default: "10"
       force_all:
         description: "Iedereen opnieuw controleren, ongeacht versie-marker/staleness (true/false)"
         required: false
@@ -108,9 +121,11 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Ruim volstaand voor een kleine batch (max=2, ~15-60s totaal); blijft
-    # begrensd zodat een onverwacht vastgelopen run de VOLGENDE uurlijkse
-    # run niet blokkeert (concurrency.group hierboven wacht anders op deze).
+    # PADEL_ANALYSIS_BATCH_SIZE_INCREASE_2026-09-21: bij max=10 (~10-30s per
+    # speler) duurt een volledige run ~1,5-5 minuten in het slechtste geval —
+    # nog steeds ruim binnen deze 10 minuten; blijft begrensd zodat een
+    # onverwacht vastgelopen run de VOLGENDE uurlijkse run niet blokkeert
+    # (concurrency.group hierboven wacht anders op deze).
     timeout-minutes: 10
     container:
       image: ghcr.io/kimverbeke1/padelanalysis-scraper:latest
@@ -124,7 +139,10 @@ jobs:
         working-directory: PadelAnalysis/scraper
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-          PADELSTAT_MAX: ${{ github.event.inputs.max || '2' }}
+          # PADEL_ANALYSIS_BATCH_SIZE_INCREASE_2026-09-21: fallback (voor de
+          # cron-trigger, zonder workflow_dispatch-inputs) opgetrokken van
+          # '2' naar '10' - zie changelog hierboven.
+          PADELSTAT_MAX: ${{ github.event.inputs.max || '10' }}
           PADELSTAT_STALE_DAYS: ${{ github.event.inputs.stale_days || '14' }}
           # PADEL_ANALYSIS_CLUB_OVERRIDE_2026-09-19: doorgegeven als env var
           # (zelfde patroon als PADELSTAT_MAX) i.p.v. als bash --club-arg,

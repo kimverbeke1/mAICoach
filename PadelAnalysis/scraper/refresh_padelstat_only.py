@@ -54,7 +54,7 @@ DAGELIJKS/UURLIJKS, MET EEN HARDE LIMIET PER RUN (batching)
 --------------------------------------------------------------------------
 Elke padelstat-opzoeking kost een volledige Playwright-sessie (~10-30s).
 Om nooit tegen een workflow-timeout aan te lopen, verwerkt dit script
-STANDAARD MAX 2 spelers per run (PADELSTAT_MAX, overschrijfbaar via env of
+STANDAARD MAX 10 spelers per run (PADELSTAT_MAX, overschrijfbaar via env of
 --max) — bedoeld om ELK UUR te draaien, zie
 PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20 hieronder.
 --------------------------------------------------------------------------
@@ -144,11 +144,43 @@ enkele trigger van dit script (via de per-speler-knop of de uurlijkse
 achtergrondtaak) houdt zo VOORTAAN zowel playing strength als het officiële
 klassement-snapshot actueel.
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_MISSING_REQUESTED_PLAYER_WARNING_2026-09-21 (op verzoek van
+Kim: "ik zie bij refresh van ploeg bij padelstat dat 1 speler niet
+meegenomen wordt: nochtans wel max: 5" — met --player 1467612,1510358,
+1622012,1462657,1226267 (5 ID's), maar de log toonde "4 kandidaten,
+waarvan 4 verwerkt")
+--------------------------------------------------------------------------
+ROOT CAUSE: select_players_to_process() se `only_player_id`-tak filterde
+gewoon `profiles` op de gevraagde ID's (`matches = [p for p in profiles if
+_norm_id(p.get("player_id")) in gevraagde_ids]`) — een gevraagd ID dat GEEN
+player_profiles-document heeft (bv. een nog niet aangemaakt profiel voor
+een nieuwe speler) viel daardoor STILZWIJGEND uit `matches` weg. Er was
+geen enkele log-regel die zei WELK gevraagd ID ontbrak of WAAROM — de
+samenvatting toonde gewoon "4 kandidaten" i.p.v. de gevraagde 5, zonder
+enige aanwijzing.
+FIX: select_players_to_process() berekent nu expliciet het verschil tussen
+de gevraagde ID's en de teruggevonden ID's, en logt een duidelijke
+waarschuwing met de exacte, ontbrekende player_id('s) zodra dit voorkomt —
+zodat meteen duidelijk is of het om een ontbrekend profiel gaat (eerst
+aanmaken/toevoegen als speler vóór een padelstat-refresh mogelijk is) i.p.v.
+zelf te moeten tellen/vergelijken welke van de opgegeven ID's ontbreekt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_BATCH_SIZE_INCREASE_2026-09-21 (op verzoek van Kim: "Je mag
+dat maximum trouwens op 10 zetten. zal nodig zijn voor het najaar" — meer
+spelers/tegenstanders om periodiek te verversen zodra de interclub-
+competitie hervat)
+--------------------------------------------------------------------------
+FIX: DEFAULT_MAX_PER_RUN opgetrokken van 2 naar 10. Bij ~10-30s per speler
+blijft een run van 10 spelers (~1,5-5 minuten) nog ruim binnen de
+workflow-timeout van 10 minuten (zie refresh-padelstat.yml, waar de
+workflow_dispatch-input 'max' en de cron-fallback consistent mee opgetrokken
+zijn naar 10).
+--------------------------------------------------------------------------
 GEBRUIK
 --------------------------------------------------------------------------
     python refresh_padelstat_only.py --dry-run
     python refresh_padelstat_only.py
-    python refresh_padelstat_only.py --max 2                       (uurlijkse batch-grootte)
+    python refresh_padelstat_only.py --max 2                       (kleine batch)
     python refresh_padelstat_only.py --max 60
     python refresh_padelstat_only.py --player 1759548              (1 speler, altijd)
     python refresh_padelstat_only.py --player 111,222,333          (meerdere spelers, altijd)
@@ -178,7 +210,8 @@ logger = logging.getLogger(__name__)
 # Verhogen bij een volgende fix in padelstats_scraper.py die een nieuwe,
 # algehele hercontrole van ALLE spelers rechtvaardigt (zelfherstel-trigger).
 PADELSTAT_LOGIC_VERSION = "v2-clubwordmatch-consentretry-2026-09-16"
-DEFAULT_MAX_PER_RUN = 2
+# PADEL_ANALYSIS_BATCH_SIZE_INCREASE_2026-09-21: 2 -> 10 (zie changelog hierboven).
+DEFAULT_MAX_PER_RUN = 10
 DEFAULT_PAUSE_SECONDS = 1.5
 # PADEL_ANALYSIS_HOURLY_TRICKLE_REFRESH_2026-09-20: na hoeveel dagen een
 # bestaande, actuele (juiste logic-version) rating ALSNOG als "te
@@ -286,10 +319,25 @@ def select_players_to_process(
     PADEL_ANALYSIS_MULTI_WORKFLOW_TRIGGER_2026-09-17: only_player_id
     ondersteunt ook een KOMMA-GESCHEIDEN lijst van player_id's. Deze spelers
     worden ALTIJD verwerkt, ongeacht max_per_run (die cap geldt enkel voor
-    de generieke, prioriteit-gebaseerde selectie hieronder)."""
+    de generieke, prioriteit-gebaseerde selectie hieronder).
+    PADEL_ANALYSIS_MISSING_REQUESTED_PLAYER_WARNING_2026-09-21 (op verzoek
+    van Kim: "ik zie bij refresh van ploeg bij padelstat dat 1 speler niet
+    meegenomen wordt"): een gevraagd ID zonder bijhorend player_profiles-
+    document viel voorheen STILZWIJGEND weg. Nu wordt expliciet gelogd
+    WELKE gevraagde ID('s) niet teruggevonden werden, zodat dit nooit meer
+    onopgemerkt blijft."""
     if only_player_id:
         gevraagde_ids = {_norm_id(pid) for pid in str(only_player_id).split(",") if pid.strip()}
         matches = [p for p in profiles if _norm_id(p.get("player_id")) in gevraagde_ids]
+        gevonden_ids = {_norm_id(p.get("player_id")) for p in matches}
+        ontbrekend = gevraagde_ids - gevonden_ids
+        if ontbrekend:
+            logger.warning(
+                f"⚠️ {len(ontbrekend)} aangevraagde speler(s) NIET gevonden in player_profiles "
+                f"(geen bestaand profiel voor dit player_id, of het profiel mist een player_id-veld): "
+                f"{', '.join(sorted(ontbrekend))}. Deze speler(s) worden deze run NIET verwerkt — maak "
+                "eerst een profiel aan (bv. via 'Speler toevoegen' in de app) voor je opnieuw ververst."
+            )
         return matches
     kandidaten = []
     for p in profiles:
