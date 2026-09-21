@@ -193,12 +193,69 @@ periodes-historiek-grafiek (die padelstat niet kan leveren) - zet
 ENABLE_KLASSEMENT=true expliciet in een incidentele/handmatige of 2x-per-
 jaar geplande workflow-run wanneer je die volledige historiek wil
 verversen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21 (op verzoek van Kim,
+chat 2026-09-21: "bij het ophalen van gegevens ontbrekende speler blijf ik
+problemen houden met het officieel klassement van 1 speler" — speler
+1622012 (De Rekeneire Kenneth), NIET gevonden door refresh_padelstat_
+only.py: "geen bestaand profiel voor dit player_id")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd): PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_
+2026-09-20 (hierboven) zorgt er terecht voor dat deze bulk-workflow GEEN
+nieuwe player_profiles-documenten meer aanmaakt voor ONTDEKTE (via
+matchcontent gevonden) tegenstanders/partners — dat was exact Kim's
+verzoek, om de ghost-profielen-explosie te stoppen. Maar dat schot heeft
+een neveneffect dat Kim niet bedoelde: wanneer je deze workflow EXPLICIET
+met een player_id aanroept via PLAYER_IDS (bv. via de "🔄 Ontbrekende
+gegevens ophalen"-knop in poule_teams_ui.py/opponent_scout_ui.py, of een
+handmatige workflow_dispatch) voor een speler die NOG NOOIT eerder
+gescraped is, wordt er WEL een "players"-document (matchdata) voor die
+speler aangemaakt (scrape_player() doet dat altijd, ongeacht discovery-
+instellingen) — maar GEEN "player_profiles"-document, want profielaanmaak
+loopt uitsluitend via do_discover (nu standaard uit). Dat is precies wat
+er gebeurde bij speler 1622012 tijdens de allereerste KTC ISIS-bulkrun
+("Merge: 0 -> 12 matches (+12 nieuw)" - hun allereerste ooit scrape).
+BELANGRIJK ONDERSCHEID met de PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_
+2026-09-20-fix: DIE fix ging over het voorkomen van profielen voor
+ONBEKENDE, automatisch UIT MATCHCONTENT ONTDEKTE derden (tegenstanders/
+partners van iemand anders) — een potentieel ONBEGRENSDE, ongewenste
+lijst. DIT hier gaat over EXPLICIET DOOR DE GEBRUIKER AANGEVRAAGDE
+player_id's (PLAYER_IDS) — een BEGRENSDE, bewuste lijst (exact zoveel
+profielen als er ID's in PLAYER_IDS staan), die Kim zelf al koos om te
+verversen. Een profiel-stub aanmaken voor zo'n EXPLICIET aangevraagde
+speler is dus GEEN heropening van het ghost-profielen-probleem.
+FIX, twee onderdelen:
+  1. _find_display_name_via_cross_reference(player_id): zoekt de naam van
+     een speler zonder eigen profiel op via KRUISVERWIJZING — scant de
+     matches van reeds bekende spelers (PLAYERS_COLLECTION) op een
+     vermelding van dit player_id als tegenstander/partner
+     (opp1_user_id/opp2_user_id/partner_user_id) en gebruikt het
+     bijhorende naam-veld (opp1_name/opp2_name/partner_name). Dit is
+     dezelfde soort matchcontent die enrich_opponents.py al gebruikt om
+     namen van ontdekte tegenstanders af te leiden — hier enkel toegepast
+     voor een naam-opzoeking, niet voor het ONTDEKKEN van nieuwe,
+     ongevraagde spelers.
+  2. ensure_profile_stubs_for_requested_players(): wordt in main() ENKEL
+     aangeroepen wanneer PLAYER_IDS EXPLICIET gezet was (dus NOOIT bij een
+     volledige bulk-run zonder PLAYER_IDS, waar "alle spelers" toch al uit
+     player_profiles komt). Voor elke expliciet aangevraagde speler zonder
+     geldig player_profiles-document: probeert een minimaal profiel
+     (player_id + display_name) aan te maken via de kruisverwijzing
+     hierboven. Lukt dat niet (geen kruisverwijzing gevonden, bv. een
+     volledig geïsoleerde nieuwe speler zonder gekende tegenstanders/
+     partners), dan wordt dit EXPLICIET en duidelijk gelogd, met een
+     concrete actie ("voeg toe via 'Speler toevoegen'"), in plaats van
+     stilzwijgend te blijven falen zoals nu het geval was.
+Dit lost Kim's concrete melding op EN voorkomt dat dit voor een toekomstige,
+nieuw-gescrapete speler (via een expliciete PLAYER_IDS-aanvraag) opnieuw
+gebeurt.
 """
 import logging
 import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 # --- path setup: zelfde patroon als scrape_player.py ---
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
@@ -229,6 +286,8 @@ DEFAULT_MODE = "missing"
 # Blijft relevant als AANVULLENDE cap, ook wanneer discovery bewust via
 # ENABLE_DISCOVERY=true opnieuw aangezet wordt (zie hieronder).
 DEFAULT_DISCOVERY_RECENT_PERIODS = 2
+
+
 def get_all_player_ids() -> list:
     """Alle player_id's uit player_profiles."""
     docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()
@@ -239,6 +298,8 @@ def get_all_player_ids() -> list:
         if pid:
             ids.append(str(pid))
     return ids
+
+
 def get_requested_player_ids() -> list:
     """Bepaalt WELKE spelers deze run in aanmerking neemt."""
     raw = os.environ.get("PLAYER_IDS", "").strip()
@@ -249,17 +310,34 @@ def get_requested_player_ids() -> list:
         return get_all_player_ids()
     logger.info(f"Specifieke spelers aangevraagd via PLAYER_IDS: {requested}")
     return requested
+
+
+def was_player_ids_explicit() -> bool:
+    """PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21: True zodra
+    PLAYER_IDS effectief (niet-leeg) gezet was voor deze run — gebruikt om
+    ensure_profile_stubs_for_requested_players() ENKEL dan aan te roepen.
+    Bij een volledige bulk-run (geen PLAYER_IDS) is dit altijd False, want
+    get_requested_player_ids() valt dan terug op get_all_player_ids() —
+    "alle spelers" komt per definitie al UIT player_profiles, dus daar kan
+    dit ontbrekende-profiel-scenario nooit optreden."""
+    return bool(os.environ.get("PLAYER_IDS", "").strip())
+
+
 def get_mode() -> str:
     mode = os.environ.get("MODE", DEFAULT_MODE).strip().lower() or DEFAULT_MODE
     if mode not in VALID_MODES:
         logger.warning(f"Onbekende MODE '{mode}', val terug op '{DEFAULT_MODE}'.")
         return DEFAULT_MODE
     return mode
+
+
 def _get_bool_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _get_int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -269,6 +347,8 @@ def _get_int_env(name: str, default: int) -> int:
     except ValueError:
         logger.warning(f"{name}='{raw}' is geen getal, val terug op {default}.")
         return default
+
+
 def _get_float_env(name: str, default: float) -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: analoog aan
     _get_int_env(), maar voor de nieuwe, floating-point wachttijd-env-vars."""
@@ -280,14 +360,24 @@ def _get_float_env(name: str, default: float) -> float:
     except ValueError:
         logger.warning(f"{name}='{raw}' is geen getal, val terug op {default}.")
         return default
+
+
 def get_poule_update_enabled() -> bool:
     return _get_bool_env("ENABLE_POULE_UPDATE", True)
+
+
 def get_poule_force() -> bool:
     return _get_bool_env("POULE_FORCE", False)
+
+
 def get_poule_eindronde() -> bool:
     return _get_bool_env("POULE_EINDRONDE", True)
+
+
 def get_enrich_enabled() -> bool:
     return _get_bool_env("ENABLE_ENRICH", True)
+
+
 def get_discovery_enabled() -> bool:
     """PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 (op verzoek van
     Kim: "creeer enkel profielen van spelers die rechtstreekse tegenspeler
@@ -302,15 +392,25 @@ def get_discovery_enabled() -> bool:
     uitzondering (bv. eenmalig de volledige tegenstander-database
     herbouwen) - géén regulier gedrag."""
     return _get_bool_env("ENABLE_DISCOVERY", False)
+
+
 def get_padelstat_enabled() -> bool:
     return _get_bool_env("ENABLE_PADELSTAT", True)
+
+
 def get_padelstat_refresh() -> bool:
     return _get_bool_env("PADELSTAT_REFRESH", False)
+
+
 def get_padelstat_max() -> int:
     return _get_int_env("PADELSTAT_MAX", 25)
+
+
 def get_padelstat_stale_days() -> int:
     """PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16."""
     return _get_int_env("PADELSTAT_STALE_DAYS", 14)
+
+
 def get_klassement_enabled() -> bool:
     """PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20: default
     gewijzigd van True naar False. run_padelstat_for_players() haalt het
@@ -322,21 +422,33 @@ def get_klassement_enabled() -> bool:
     expliciet voor een incidentele/2x-per-jaar-run die de volledige
     historiek-grafiek wil verversen."""
     return _get_bool_env("ENABLE_KLASSEMENT", False)
+
+
 def get_klassement_refresh() -> bool:
     return _get_bool_env("KLASSEMENT_REFRESH", False)
+
+
 def get_klassement_max() -> int:
     return _get_int_env("KLASSEMENT_MAX", 8)
+
+
 def get_enrich_scrape_new() -> bool:
     return _get_bool_env("ENRICH_SCRAPE_NEW", False)
+
+
 def get_delay_between_players() -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
     versie van DELAY_BETWEEN_PLAYERS (default ONGEWIJZIGD, 3.0s). Zie de
     module-docstring voor de waarschuwing tegen te agressief verlagen."""
     return _get_float_env("DELAY_BETWEEN_PLAYERS_SECONDS", DELAY_BETWEEN_PLAYERS)
+
+
 def get_delay_between_poule_updates() -> float:
     """PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: env-overrideable
     versie van DELAY_BETWEEN_POULE_UPDATES (default ONGEWIJZIGD, 3.0s)."""
     return _get_float_env("DELAY_BETWEEN_POULE_UPDATES_SECONDS", DELAY_BETWEEN_POULE_UPDATES)
+
+
 def get_discovery_recent_periods() -> int:
     """PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: beperkt het
     ontdekken van nieuwe tegenstander-profielen tot de N meest recente
@@ -344,6 +456,8 @@ def get_discovery_recent_periods() -> int:
     relevant wanneer ENABLE_DISCOVERY bewust op true gezet is (zie
     get_discovery_enabled())."""
     return _get_int_env("DISCOVERY_RECENT_PERIODS", DEFAULT_DISCOVERY_RECENT_PERIODS)
+
+
 def filter_by_mode(player_ids: list, mode: str) -> list:
     """Mode-specifieke voorselectie VOOR het scrapen begint."""
     if mode != "new_users":
@@ -361,10 +475,14 @@ def filter_by_mode(player_ids: list, mode: str) -> list:
     if skipped:
         logger.info(f"mode=new_users: {skipped} reeds-gekende speler(s) overgeslagen, {len(new_only)} nieuwe speler(s) te scrapen.")
     return new_only
+
+
 def scrape_kwargs_for_mode(mode: str) -> dict:
     if mode == "full":
         return {"force_full_refresh": True, "refresh_recent": 0, "strict_missing_only": False}
     return {"force_full_refresh": False, "refresh_recent": 0, "strict_missing_only": True}
+
+
 def run_match_scrapes(
     player_ids: list, mode: str, delay_seconds: float = DELAY_BETWEEN_PLAYERS,
 ) -> tuple[list, list, list, dict]:
@@ -409,6 +527,95 @@ def run_match_scrapes(
         if i < len(player_ids):
             time.sleep(delay_seconds)
     return ok, failed, skipped_up_to_date, new_matches_by_player
+
+
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21: zie module-docstring
+# voor de volledige toelichting bij deze fix.
+# ---------------------------------------------------------------------------
+def _find_display_name_via_cross_reference(player_id: str) -> Optional[str]:
+    """Zoekt een leesbare naam voor `player_id` op via KRUISVERWIJZING in
+    reeds bekende spelers' matchdata (PLAYERS_COLLECTION), zonder zelf een
+    nieuw, ONGEVRAAGD profiel voor een DERDE partij te ontdekken/aan te
+    maken — dit wordt uitsluitend gebruikt om een naam te vinden voor een
+    player_id dat de AANROEPER al expliciet kent/aanvraagt.
+    Scant elke bekende speler se matches op een vermelding van dit
+    player_id als tegenstander (opp1/opp2) of partner, en geeft de eerste
+    gevonden naam terug. Geeft None terug als geen enkele kruisverwijzing
+    gevonden wordt (bv. een volledig geïsoleerde speler zonder gekende
+    tegenstanders/partners in de huidige dataset)."""
+    pid_norm = str(player_id)
+    try:
+        docs = fb.db.collection(fb.PLAYERS_COLLECTION).stream()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Kon players-collectie niet doorzoeken voor naam-kruisverwijzing van {pid_norm}: {e}")
+        return None
+    for doc in docs:
+        data = doc.to_dict() or {}
+        for m in data.get("matches", []) or []:
+            if str(m.get("opp1_user_id") or "") == pid_norm and m.get("opp1_name"):
+                return m["opp1_name"]
+            if str(m.get("opp2_user_id") or "") == pid_norm and m.get("opp2_name"):
+                return m["opp2_name"]
+            if str(m.get("partner_user_id") or "") == pid_norm and m.get("partner_name"):
+                return m["partner_name"]
+    return None
+
+
+def ensure_profile_stubs_for_requested_players(player_ids: list) -> dict:
+    """PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21 (op verzoek van
+    Kim, zie module-docstring voor de volledige toelichting/root-cause).
+    ENKEL bedoeld om aangeroepen te worden wanneer PLAYER_IDS EXPLICIET
+    gezet was voor deze run (zie was_player_ids_explicit()) — dit is een
+    BEGRENSDE, door de gebruiker zelf gekozen lijst, GEEN heropening van
+    het ghost-profielen-probleem (dat ging over ONBEGRENSDE, automatisch
+    ONTDEKTE derden — zie PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_
+    2026-09-20 hierboven, die ONGEWIJZIGD blijft).
+    Voor elke speler in `player_ids` zonder geldig player_profiles-
+    document (of een document dat het player_id-veld mist): probeert een
+    minimaal profiel (player_id + display_name) aan te maken via
+    _find_display_name_via_cross_reference(). Lukt dat niet, dan wordt dit
+    duidelijk gelogd met een concrete, uitvoerbare vervolgstap i.p.v.
+    stilzwijgend te blijven falen bij elke volgende padelstat/klassement-
+    verversing voor deze speler (exact wat Kim meldde voor speler
+    1622012/"De Rekeneire Kenneth").
+    Returns {"aangemaakt": [(pid, naam), ...], "geen_naam_gevonden": [pid, ...]}."""
+    aangemaakt = []
+    geen_naam_gevonden = []
+    for pid in player_ids:
+        pid = str(pid)
+        try:
+            profile = fb.get_player_profile(pid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{pid}] Kon player_profiles niet controleren: {e}")
+            profile = None
+        if profile and profile.get("player_id"):
+            continue  # al een geldig profiel — niets te doen.
+        naam = _find_display_name_via_cross_reference(pid)
+        if not naam:
+            geen_naam_gevonden.append(pid)
+            continue
+        try:
+            fb.save_player_profile(pid, display_name=naam)
+            aangemaakt.append((pid, naam))
+            logger.info(
+                f"[{pid}] Ontbrekend player_profiles-document aangemaakt (naam via kruisverwijzing "
+                f"in andere spelers' matchdata: '{naam}')."
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{pid}] Kon profiel-stub niet aanmaken: {e}")
+            geen_naam_gevonden.append(pid)
+    if geen_naam_gevonden:
+        logger.warning(
+            f"⚠️ {len(geen_naam_gevonden)} expliciet aangevraagde speler(s) hebben nog GEEN "
+            f"player_profiles-document EN konden niet automatisch benoemd worden (geen kruisverwijzing "
+            f"gevonden in andere spelers' matchdata): {', '.join(geen_naam_gevonden)}. Padelstat/"
+            "klassement-verversing (refresh-padelstat.yml/refresh-klassement.yml) blijft deze speler(s) "
+            "overslaan tot je ze zelf toevoegt via '➕ Speler toevoegen' in de app."
+        )
+    return {"aangemaakt": aangemaakt, "geen_naam_gevonden": geen_naam_gevonden}
+
+
 def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict:
     """PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15 +
     PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16 +
@@ -579,6 +786,8 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
                 f"(limiet KLASSEMENT_MAX={get_klassement_max()})."
             )
     return resultaat
+
+
 def run_single_player_enrichment(player_id: str) -> dict:
     """PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van
     Kim: "bedoeling is dat enkel die speler ververst wordt (id speler
@@ -607,6 +816,8 @@ def run_single_player_enrichment(player_id: str) -> dict:
         "padelstat": result.get("padelstat", {}),
         "klassement": result.get("klassement", {}),
     }
+
+
 def run_poule_updates(
     player_ids: list, force: bool, include_eindronde: bool = True,
     delay_seconds: float = DELAY_BETWEEN_POULE_UPDATES,
@@ -661,8 +872,11 @@ def run_poule_updates(
         if i < total:
             time.sleep(delay_seconds)
     return updated, skipped_or_failed
+
+
 def main() -> int:
     mode = get_mode()
+    explicit_request = was_player_ids_explicit()
     player_ids = get_requested_player_ids()
     player_ids = filter_by_mode(player_ids, mode)
     if not player_ids:
@@ -704,6 +918,23 @@ def main() -> int:
         logger.error(f"  \u274c {pid}: {err}")
     totaal_nieuwe_matches = sum(len(v) for v in new_matches_by_player.values())
     logger.info(f"Netto nieuwe matches deze run (over alle spelers): {totaal_nieuwe_matches}")
+    # PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21: ENKEL bij een
+    # EXPLICIETE PLAYER_IDS-aanvraag (nooit bij een volledige bulk-run
+    # zonder PLAYER_IDS, waar "alle spelers" toch al uit player_profiles
+    # komt) — zie module-docstring en was_player_ids_explicit() voor de
+    # volledige toelichting. Dit vangt precies het gat op dat Kim meldde:
+    # een EXPLICIET aangevraagde, voor het eerst gescrapete speler (nieuw
+    # "players"-document) zonder bijhorend player_profiles-document,
+    # waardoor padelstat/klassement-verversing hem/haar structureel bleef
+    # overslaan.
+    if explicit_request:
+        stub_result = ensure_profile_stubs_for_requested_players(player_ids)
+        if stub_result["aangemaakt"]:
+            logger.info(
+                f"=== {len(stub_result['aangemaakt'])} ontbrekend(e) player_profiles-document(en) "
+                f"automatisch aangemaakt (kruisverwijzing) ===  "
+                + ", ".join(f"{naam} ({pid})" for pid, naam in stub_result["aangemaakt"])
+            )
     enrich_result = {}
     if get_enrich_enabled():
         # PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19: bij EXACT 1
@@ -750,5 +981,7 @@ def main() -> int:
     if ok or skipped_up_to_date or not player_ids:
         return 0
     return 1
+
+
 if __name__ == "__main__":
     sys.exit(main())
