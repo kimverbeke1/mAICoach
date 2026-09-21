@@ -45,6 +45,19 @@ ploeg typisch hun VOLLEDIGE seizoenshistoriek zien — er is immers geen
 "eerstvolgende match"-datum die de blik natuurlijk beperkt. _team_lookback()
 berekent daarom automatisch "alle tot nu toe gespeelde wedstrijden van deze
 ploeg" i.p.v. een vast klein getal.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_CLUB_HINT_FOR_TEAM_TRIGGERS_2026-09-19 (op verzoek van Kim,
+chat 2026-09-19: "je weet toch welke ploeg je scrapet dus deze melding is
+eigenlijk niet nodig als je meteen de juiste club meegeeft")
+--------------------------------------------------------------------------
+render_unified_team_sync_trigger() krijgt hier nu team_name=chosen["name"]
+mee — exact dezelfde club-disambiguatie-hint als in opponent_scout_ui.py se
+render_scout_header(), zodat een padelstat-verversing voor een willekeurige
+poule-ploeg (net als voor de eerstvolgende tegenstander) NOOIT meer de "geen
+club opgegeven om te disambigueren"-waarschuwing hoeft te geven voor spelers
+zonder eigen club-veld — de ploegnaam is hier immers altijd al gekend
+(`chosen["name"]`), dus geen enkele reden om dat niet door te geven.
 """
 from __future__ import annotations
 
@@ -127,7 +140,6 @@ def render_poule_teams_tab(
     chosen = teams[team_labels.index(chosen_label)]
     ploeg_id = chosen["ploeg_id"]
     key_prefix = f"poule_team_{ploeg_id}"
-
     # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19: scout_opponent() is al
     # generiek — hergebruikt hier ONGEWIJZIGD, enkel met een ANDERE
     # ploeg_id/naam en een hogere lookback (volledige seizoenshistoriek
@@ -156,7 +168,6 @@ def render_poule_teams_tab(
     if not unique_players:
         st.info("Geen spelers gevonden voor deze ploeg.")
         return
-
     # PADEL_ANALYSIS_TEAM_FRESHNESS_CHECK_2026-09-19 (Fase D3, op verzoek van
     # Kim: "Freshness-check bij elke analyse i.p.v. enkel manueel verversen —
     # gebaseerd op aantal matchen + tijdstip laatste padelstat-check."):
@@ -175,15 +186,17 @@ def render_poule_teams_tab(
             f"↳ Klik opnieuw op '🔍 {chosen['name']} analyseren' hierboven om de nieuwe "
             "wedstrijd(en) en eventuele nieuwe spelers mee te nemen."
         )
-
     opp = {"name": chosen["name"], "ploeg_id": ploeg_id}
     # PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19: dezelfde "ontbrekende
     # gegevens ophalen"-knop als bij de eerstvolgende tegenstander (Fase C),
     # rechtstreeks hergebruikt via de publieke alias in opponent_scout_ui.py
     # — geen dubbele detectie-/trigger-logica.
+    # PADEL_ANALYSIS_CLUB_HINT_FOR_TEAM_TRIGGERS_2026-09-19: geeft nu
+    # team_name=chosen["name"] mee, zodat een padelstat-verversing voor deze
+    # willekeurige poule-ploeg dezelfde club-disambiguatie-hint krijgt als
+    # bij de eerstvolgende tegenstander (zie opponent_scout_ui.py).
     if not osu.is_scraping_available():
-        osu.render_unified_team_sync_trigger(unique_players, key_prefix=key_prefix)
-
+        osu.render_unified_team_sync_trigger(unique_players, key_prefix=key_prefix, team_name=chosen["name"])
     all_docs = ll.get_docs_for_players([p["user_id"] for p in unique_players])
     global_docs = osu.load_all_player_docs()
     report = oa.get_team_report(
