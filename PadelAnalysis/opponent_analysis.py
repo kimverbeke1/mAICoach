@@ -1,18 +1,14 @@
 """
-opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v15).
-
+opponent_analysis.py - samengevat analysescherm voor de volledige tegenploeg (v16).
 PADEL_ANALYSIS_TWO_LAYER_2026-09-10
 De overzichtstabel toont per speler ZOWEL de huidige poule als de historiek
 uit vorige periodes, in aparte kolommen.
-
 PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13 (v7):
 Overzichtstabel toont "Playing strength" rechtstreeks uit de gecachete
 padelstats.be-waarde (via build_player_summary(), zie opponent_dossier.py).
-
 PADEL_ANALYSIS_REMOVE_OWN_LINEUP_EDITOR_2026-09-13 (v8):
 De "Onze opstelling"-sectie is volledig verwijderd - al gedekt door de
 Opstelling-scenario's in dashboard.py.
-
 PADEL_ANALYSIS_RENDER_SPLIT_2026-09-14 (v9, op verzoek van Kim):
 Kim wil de Opstelling-scenario's + AI-functies BOVENAAN de pagina tonen, en
 pas DAARONDER de overzichtstabel/detail-per-speler van de tegenploeg. Om
@@ -29,21 +25,17 @@ render_team_analysis() blijft bestaan als dunne wrapper (roept alle
 bovenstaande in de OUDE volgorde aan) voor eventuele andere/toekomstige
 aanroepers die de vroegere volgorde verwachten - dashboard.py gebruikt sinds
 deze versie de losse functies rechtstreeks, in de NIEUWE volgorde.
-
 PADEL_ANALYSIS_REMOVE_JUMP_BUTTON_2026-09-14:
 De "👁️ Volledige spelerpagina"-knop bij Detail-per-speler is verwijderd.
 Verder in v9: "board" hernoemd naar "dubbel"; bordpositie-heuristiek
 volledig verwijderd.
-
 PADEL_ANALYSIS_TEAM_REPORT_STALE_CACHE_FIX_2026-09-17 (v10):
 _underlying_data_is_fresher() zorgt dat het team-rapport automatisch
 herbouwt zodra padelstat/klassement van een speler ondertussen ververst is.
-
 PADEL_ANALYSIS_SPARK_QUOTA_CACHE_2026-09-17 (v11):
 _underlying_data_is_fresher() gebruikt freshness_cache.py (sessie-lokale
 TTL-cache) i.p.v. rechtstreekse Firestore-reads, om de Spark-plan-daglimiet
 (50.000 reads) niet nodeloos te belasten.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18 (v12, op verzoek van Kim: "bij de
 AI functie kan je zaken intypen in een prompt en dat werkt maar je kan niet
@@ -72,7 +64,6 @@ FIX: render_ai_section() is herschreven tot een ECHTE chat:
     Kim bewust opnieuw wil beginnen (bv. na een sterk gewijzigde tegenstander-
     analyse) i.p.v. impliciet door te blijven bouwen op een inmiddels
     irrelevant gesprek.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_WEEKLY_PLUS_ONDEMAND_2026-09-19 (v13, op verzoek
 van Kim: "Padelstat cijfers zouden wel scheduled moeten updaten. Ik wil dat
@@ -101,31 +92,13 @@ een volgende render van deze pagina. Dit is dezelfde asynchrone aanpak als
 _ensure_fresh_padelstat_for_roster() in opponent_scout_ui.py (bij
 "🔍 Tegenstander analyseren") - beide knoppen garanderen nu consistent een
 verse-waarde-aanvraag.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 (v14, op verzoek van Kim, chat
 2026-09-19: "Ook wel handig om een link naar het klassement te hebben bij
 de ploeganalyse. eventueel in aparte tab.")
 --------------------------------------------------------------------------
-Twee, elkaar aanvullende toevoegingen (bewust GEEN ingrijpende herstructurering
-van de bestaande Overzicht/Detail-indeling, om niets te breken voor de
-bestaande aanroepers - page_lineup_lab.py, poule_teams_ui.py - die
-render_overview_and_detail() als 1 ondeelbaar blok aanroepen):
-  1. De Overzichtstabel krijgt een NIEUWE "🔗 Klassement"-kolom
-     (st.column_config.LinkColumn) - rechtstreeks klikbaar vanuit de tabel
-     zelf, per speler. Gebruikt build_player_summary()'s (opponent_dossier.py)
-     nieuwe "klassement_url"-veld - geen aparte URL-berekening hier nodig.
-     Valt terug op een gewone tekstkolom (ruwe URL) als LinkColumn niet
-     beschikbaar is (oudere Streamlit-versie) - nooit een harde crash.
-  2. Nieuwe, aparte sectie "🔗 Alle klassement-links op TVL" (een
-     st.expander, ingeklapt getoond onder de Overzichtstabel) die ELKE
-     speler als een losse, klikbare link-knop toont - dit is de "eventueel
-     in aparte tab"-optie die Kim noemde. Gekozen voor een expander i.p.v.
-     een letterlijke st.tabs()-herstructurering van deze functie, om het
-     bestaande Overzicht/Detail-gedrag 100% ongewijzigd te laten (lagere
-     regressiekans) - zeg het gerust als een ECHTE aparte tab (st.tabs())
-     hiervoor toch de voorkeur geniet, dat is een kleine aanpassing.
-
+Twee, elkaar aanvullende toevoegingen (later gecorrigeerd in v15, zie
+hieronder).
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RANKING_TAB_CORRECTION_2026-09-20 (v15, op verzoek van Kim: "k
 wil het officiele klassement opdaten van padelstat.be maar niet het playing
@@ -134,23 +107,18 @@ naar het klassement van de interclub gevraagd maar niet naar het klassement
 van elke speler. Dus die link mag weg in de tabel. Ik weil een aparte tab
 met een link naar de huidige rangschikking")
 --------------------------------------------------------------------------
-MISVERSTAND (opgelost): de v14-toevoeging (PADEL_ANALYSIS_KLASSEMENT_LINK_
-2026-09-19) interpreteerde "een link naar het klassement bij de
-ploeganalyse" als een link PER SPELER naar diens individuele TVL-
-klassementberekeningspagina (een "🔗 Klassement"-kolom in de
-Overzichtstabel + een expander met alle spelers als losse link-knoppen).
-Dat was niet de bedoeling: Kim vroeg een link naar de RANGSCHIKKING VAN DE
-INTERCLUB-POULE zelf (de stand van de reeks/poule waarin de tegenploeg
-speelt), niet naar het klassement van individuele spelers.
+MISVERSTAND (opgelost): de v14-toevoeging interpreteerde "een link naar het
+klassement bij de ploeganalyse" als een link PER SPELER naar diens
+individuele TVL-klassementberekeningspagina. Dat was niet de bedoeling: Kim
+vroeg een link naar de RANGSCHIKKING VAN DE INTERCLUB-POULE zelf (de stand
+van de reeks/poule waarin de tegenploeg speelt), niet naar het klassement
+van individuele spelers.
 FIX:
   1. De "🔗 Klassement"-kolom (LinkColumn) is VOLLEDIG verwijderd uit de
      Overzichtstabel (_overview_row() geeft dit veld niet langer terug).
   2. De expander "🔗 Alle klassement-links op TVL" (per-speler-links) is
      VOLLEDIG verwijderd.
-  3. render_overview_and_detail() toont voortaan ECHTE tabs (st.tabs()) -
-     dit keer WEL een letterlijke herstructurering, in tegenstelling tot
-     de v14-keuze voor een expander, omdat Kim nu expliciet "een aparte
-     tab" bevestigt:
+  3. render_overview_and_detail() toont voortaan ECHTE tabs (st.tabs()):
        - Tab 1 "📊 Overzicht & Detail": de bestaande overzichtstabel +
          detail-per-speler, ONGEWIJZIGD qua inhoud (enkel de Klassement-
          kolom is weg).
@@ -158,12 +126,35 @@ FIX:
          interclub-poule-rangschikking op TVL. Gebruikt het reeds
          bestaande report["reeks_url"]-veld (gezet in _build_report(),
          dezelfde URL als de poule-scraper - poule_playwright.py - gebruikt
-         om fixtures/rangschikking op te halen: "interclub-poule-tabel?
-         afdelingId=...&spelgroepId=...&pouleId=..."), dus GEEN nieuwe
-         URL-berekening nodig.
-  Bestaande aanroepers van render_overview_and_detail() (page_lineup_lab.py,
-  poule_teams_ui.py) blijven ongewijzigd werken: de functiesignatuur is
-  identiek gebleven, enkel de INTERNE rendering is nu tabs i.p.v. één blok.
+         om fixtures/rangschikking op te halen).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_THREE_TABS_SPLIT_2026-09-21 (v16, op verzoek van Kim: "ik zou
+tab overzicht, detail per speler en rangschikking maken: detail per speler
+moet naar detail per speler tab. Opstelling analyse mag bij overzicht (staat
+nu bij detail).")
+--------------------------------------------------------------------------
+ROOT CAUSE: render_overview_and_detail() (v15) bundelde de overzichtstabel
++ detail-per-speler samen in 1 tab ("📊 Overzicht & Detail"), en de
+Opstelling-analyse (page_lineup_lab.py: _render_opstelling_scenario) werd
+DAARONDER, buiten alle tabs, getoond — visueel dus vlak na de
+detail-per-speler-sectie, wat het voor Kim als "bij detail horend" deed
+aanvoelen, terwijl hij de Opstelling-analyse net bij het Overzicht wil.
+FIX: 3 nieuwe, PUBLIEKE bouwstenen toegevoegd, die de bestaande, interne
+logica van render_overview_and_detail() HERGEBRUIKEN (geen duplicatie):
+  - render_overview_tab(report)                    : toont ENKEL de
+    overzichtstabel + bijhorende captions (geen detail-per-speler-selector,
+    geen tabs eromheen) - page_lineup_lab.py toont hier zelf meteen
+    daaronder de volledige Opstelling-analyse.
+  - render_player_detail_tab(report, key_prefix)    : toont ENKEL de
+    detail-per-speler-selector + od.render_player_summary_inline().
+  - render_ranking_tab(report)                      : PUBLIEKE naam voor de
+    reeds bestaande _render_ranking_tab() (nu ook rechtstreeks aanroepbaar
+    vanuit page_lineup_lab.py, niet enkel intern via
+    render_overview_and_detail()).
+render_overview_and_detail() ZELF blijft ONGEWIJZIGD bruikbaar (roept nu
+gewoon de 3 nieuwe functies na elkaar aan binnen zijn eigen 2-tabs-
+structuur) - poule_teams_ui.py en elke andere bestaande aanroeper werken
+dus zonder enige aanpassing verder.
 """
 from __future__ import annotations
 import re
@@ -186,7 +177,7 @@ except Exception:  # pragma: no cover
     def trigger_github_actions_scrape(**_kwargs):
         return False, "cloud_helpers ontbreekt"
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v14
+REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v16
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -388,7 +379,7 @@ def render_team_header(
             st.rerun()
     return report
 # ─────────────────────────────────────────────
-# Overzichtstabel (twee lagen naast elkaar + playing strength + klassement-link)
+# Overzichtstabel (twee lagen naast elkaar + playing strength)
 # ─────────────────────────────────────────────
 def _overview_row(summary: dict) -> dict:
     current = summary.get("current_rank")
@@ -446,6 +437,69 @@ def _render_ranking_tab(report: dict) -> None:
         st.link_button(label, reeks_url, use_container_width=False)
     except AttributeError:
         st.markdown(f"[{label}]({reeks_url})")
+def render_ranking_tab(report: dict) -> None:
+    """PADEL_ANALYSIS_THREE_TABS_SPLIT_2026-09-21: PUBLIEKE naam voor
+    _render_ranking_tab(), zodat page_lineup_lab.py dit ook RECHTSTREEKS
+    (als eigen, apart tabblad) kan aanroepen, niet enkel indirect via
+    render_overview_and_detail(). Gedrag 100% identiek aan de private
+    versie hieronder (dunne wrapper, geen duplicatie)."""
+    _render_ranking_tab(report)
+def render_overview_tab(report: dict) -> None:
+    """PADEL_ANALYSIS_THREE_TABS_SPLIT_2026-09-21 (op verzoek van Kim: "ik
+    zou tab overzicht, detail per speler en rangschikking maken [...]
+    Opstelling analyse mag bij overzicht"): toont ENKEL de overzichtstabel +
+    bijhorende captions - GEEN detail-per-speler-selector, GEEN tabs
+    eromheen. page_lineup_lab.py toont hier zelf, in hetzelfde tabblad,
+    meteen daaronder de volledige Opstelling-analyse (was voorheen
+    ONGEWILD onder 'Detail per speler' terechtgekomen, zie module-
+    docstring voor de volledige toelichting)."""
+    players = report.get("players", []) or []
+    if not players:
+        st.info("Nog geen spelersdata beschikbaar voor deze tegenploeg.")
+        return
+    st.markdown("#### 📊 Overzicht")
+    overview_df = pd.DataFrame([_overview_row(p) for p in players])
+    st.dataframe(
+        overview_df, use_container_width=True, hide_index=True,
+        height=min(400, 40 + 36 * len(overview_df)),
+    )
+    missing_padelstat = sum(1 for p in players if p.get("elo_source") != "padelstat")
+    if missing_padelstat:
+        st.caption(
+            f"🎯 'Playing strength' komt van padelstats.be. Voor {missing_padelstat} speler(s) hier nog "
+            "niet opgehaald ('-' in de tabel) - dit wordt automatisch aangevuld door de wekelijkse "
+            "achtergrondtaak, of forceer het meteen via '🔄 Verversen' hierboven."
+        )
+    played_now = sum(p.get("matches_relevant", 0) for p in players)
+    total_history = sum(p.get("matches_history", 0) for p in players)
+    if played_now == 0 and total_history:
+        st.info(
+            f"Deze ploeg heeft in de huidige poule nog geen gespeelde matchen in onze data. "
+            f"De kolommen 'historiek' tonen {total_history} matchen uit vorige periodes - "
+            "bruikbaar als niveau-inschatting, niet als stand in deze poule."
+        )
+    else:
+        st.caption(
+            "Kolommen 'deze poule' zijn strikt gefilterd op spelgroep-ID. "
+            "Kolommen 'historiek' komen uit vorige periodes en andere poules."
+        )
+def render_player_detail_tab(report: dict, key_prefix: str = "team_analysis") -> None:
+    """PADEL_ANALYSIS_THREE_TABS_SPLIT_2026-09-21: toont ENKEL de
+    detail-per-speler-selector + od.render_player_summary_inline() - de
+    tegenhanger van render_overview_tab() hierboven, zodat beide apart, in
+    hun EIGEN tabblad, getoond kunnen worden (i.p.v. samen in 1 tab zoals
+    voorheen in render_overview_and_detail())."""
+    ploeg_id = report.get("opponent_ploeg_id")
+    players = report.get("players", []) or []
+    if not players:
+        st.info("Nog geen spelersdata beschikbaar voor deze tegenploeg.")
+        return
+    st.markdown("#### 🔎 Detail per speler")
+    names = [p.get("name", "?") for p in players]
+    sel_name = st.selectbox("Bekijk details van:", names, key=f"{key_prefix}_detail_v8_{ploeg_id}")
+    selected = next((p for p in players if p.get("name") == sel_name), None)
+    if selected:
+        od.render_player_summary_inline(selected)
 def render_overview_and_detail(
     report: dict,
     go_to_player_fn: Optional[Callable[[str], None]] = None,
@@ -453,12 +507,15 @@ def render_overview_and_detail(
 ) -> None:
     """Overzichtstabel + Detail-per-speler, in een aparte tab, plus een
     TWEEDE, aparte tab met de link naar de huidige interclub-rangschikking.
-    PADEL_ANALYSIS_RANKING_TAB_CORRECTION_2026-09-20 (op verzoek van Kim,
-    zie module-docstring voor het volledige, eerder verkeerd begrepen
-    verzoek): de "🔗 Klassement"-kolom (per speler) en de bijhorende
-    per-speler-links-expander zijn VOLLEDIG verwijderd. In de plaats komt
-    een ECHTE tweede tab "🏆 Rangschikking" met ÉÉN link naar de huidige
-    interclub-poule-rangschikking (zie _render_ranking_tab())."""
+    PADEL_ANALYSIS_THREE_TABS_SPLIT_2026-09-21: hergebruikt nu intern de 3
+    nieuwe, publieke bouwstenen hierboven (render_overview_tab() /
+    render_player_detail_tab() / render_ranking_tab()) i.p.v. de logica
+    hier te dupliceren - het GEDRAG en de signatuur van deze functie zelf
+    zijn ONGEWIJZIGD (2 tabs: "📊 Overzicht & Detail" met overzicht+detail
+    samen, en "🏆 Rangschikking"), dus poule_teams_ui.py en elke andere
+    bestaande aanroeper werkt zonder enige aanpassing verder. Enkel
+    page_lineup_lab.py roept sinds deze versie de 3 losse bouwstenen
+    RECHTSTREEKS aan, in een eigen 3-tabs-indeling (zie dat bestand)."""
     ploeg_id = report.get("opponent_ploeg_id")
     players = report.get("players", []) or []
     if not players:
@@ -466,40 +523,10 @@ def render_overview_and_detail(
         return
     tab_overzicht, tab_rangschikking = st.tabs(["📊 Overzicht & Detail", "🏆 Rangschikking"])
     with tab_overzicht:
-        st.markdown("#### 📊 Overzicht")
-        overview_df = pd.DataFrame([_overview_row(p) for p in players])
-        st.dataframe(
-            overview_df, use_container_width=True, hide_index=True,
-            height=min(400, 40 + 36 * len(overview_df)),
-        )
-        missing_padelstat = sum(1 for p in players if p.get("elo_source") != "padelstat")
-        if missing_padelstat:
-            st.caption(
-                f"🎯 'Playing strength' komt van padelstats.be. Voor {missing_padelstat} speler(s) hier nog "
-                "niet opgehaald ('-' in de tabel) - dit wordt automatisch aangevuld door de wekelijkse "
-                "achtergrondtaak, of forceer het meteen via '🔄 Verversen' hierboven."
-            )
-        played_now = sum(p.get("matches_relevant", 0) for p in players)
-        total_history = sum(p.get("matches_history", 0) for p in players)
-        if played_now == 0 and total_history:
-            st.info(
-                f"Deze ploeg heeft in de huidige poule nog geen gespeelde matchen in onze data. "
-                f"De kolommen 'historiek' tonen {total_history} matchen uit vorige periodes - "
-                "bruikbaar als niveau-inschatting, niet als stand in deze poule."
-            )
-        else:
-            st.caption(
-                "Kolommen 'deze poule' zijn strikt gefilterd op spelgroep-ID. "
-                "Kolommen 'historiek' komen uit vorige periodes en andere poules."
-            )
-        st.markdown("#### 🔎 Detail per speler")
-        names = [p.get("name", "?") for p in players]
-        sel_name = st.selectbox("Bekijk details van:", names, key=f"{key_prefix}_detail_v8_{ploeg_id}")
-        selected = next((p for p in players if p.get("name") == sel_name), None)
-        if selected:
-            od.render_player_summary_inline(selected)
+        render_overview_tab(report)
+        render_player_detail_tab(report, key_prefix=key_prefix)
     with tab_rangschikking:
-        _render_ranking_tab(report)
+        render_ranking_tab(report)
 # ─────────────────────────────────────────────
 # Eigen-speler rating (gedeeld met dashboard.py's Opstelling-scenario's)
 # ─────────────────────────────────────────────
