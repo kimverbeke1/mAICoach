@@ -80,6 +80,58 @@ encounter-index gegarandeerd vers herberekent — ongeacht hoe lang de
 resterende TTL nog was. Dit is een BEWUST kleine, gerichte knop (enkel
 DEZE ene cache, niet alle caches van de app) om onbedoelde neveneffecten
 te vermijden.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OWN_TEAM_PARTNER_ID_FALLBACK_FIX_2026-09-21 (op verzoek van
+Kim, chat 2026-09-21: "het probleem dat mijn eigen ploeg nog steeds maar
+3 spelers toont blijft bestaan. Hoe kunnen we dat in godsnaam eindelijk
+oplossen" — GENOTEERD ná de _encounter_key()-fix én de bijhorende
+cache-clear-knop, dus deze fix pakt een ANDER, dieper mankement aan)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd via code-analyse, niet enkel de eerdere
+_encounter_key()-groepering): _recent_own_lineup_player_ids() bepaalde de
+"standaard vooraf geselecteerd"-lijst tot nu toe via
+ll.reconstruct_boards(index[most_recent_key]) — en die functie heeft een
+STRIKTE afhankelijkheid die hier NOOIT eerder blootgelegd werd:
+    def reconstruct_boards(entries):
+        for pid, m in entries:
+            ...
+            partner = m.get("partner_user_id")
+            if not partner:
+                continue   # <-- BOARD WORDT VOLLEDIG OVERGESLAGEN
+            seen[key] = {"pair": frozenset({pid, partner}), ...}
+Met andere woorden: een board (dus BEIDE spelers van dat duo) wordt ENKEL
+gereconstrueerd als minstens 1 van de 2 duo-leden, in hun EIGEN gescrapete
+matchrecord voor deze ontmoeting, een correct opgelost "partner_user_id"
+heeft. Bij interclub-uitslagenbladen is dat veld NIET altijd betrouwbaar
+te herleiden uit de HTML (bv. de partner-naam staat er wel, maar zonder
+een klikbare profiel-link waar de scraper een user_id uit haalt) — een
+bekend, structureel scrape-euvel, los van de encounter-GROEPERING die de
+vorige fix aanpakte.
+Concreet gevolg bij 4 teamgenoten (= 2 boards/duo's in de rotatie): zodra
+voor ÉÉN van die 2 boards GEEN van beide duo-leden een bruikbare
+partner_user_id heeft, valt dat HELE board weg — dus 2 van de 4 spelers
+verdwijnen structureel uit de "standaard vooraf geselecteerd"-lijst. De
+"voeg mezelf toe als ik er nog niet bij zit"-vangnet verderop in
+_render_opstelling_scenario() herstelt enkel de HUIDIG BEKEKEN speler zelf
+(als die toevallig in het weggevallen board zat) — nooit diens partner.
+Dat verklaart exact "3 spelers i.p.v. 4": board 1 (2 spelers, partner_user_
+id OK) + de zelf-toegevoegde huidige speler uit het kapotte board 2 = 3,
+terwijl board 2's partner nergens meer opduikt.
+FIX: _recent_own_lineup_player_ids() gebruikt niet langer reconstruct_
+boards()/board["pair"] om te bepalen WIE er speelde. In plaats daarvan
+wordt rechtstreeks elke `pid` verzameld die al een entry heeft in
+`index[most_recent_key]` — dat wil zeggen: elke EIGEN speler die voor DEZE
+ontmoeting zelf een interclub-matchrecord in zijn/haar EIGEN gescrapete
+document heeft staan (ongeacht of diens partner_user_id correct oploste).
+Dit is fundamenteel robuuster voor het doel van deze functie ("wie speelde
+recent mee namens ons team", geen koppel-/bordinformatie nodig): zolang
+minstens 1 van de 4 teamgenoten zijn/haar EIGEN wedstrijd correct
+gescraped heeft voor deze ontmoeting (vrijwel altijd het geval, want elke
+eigen speler wordt individueel gescraped), verschijnt die speler nu
+gegarandeerd in de lijst, volledig losstaand van de partner_user_id-
+fragiliteit die reconstruct_boards() elders (bv. voor de sandbox-preset
+"Onze vorige opstelling", waar de PAREN zelf wel nodig zijn) terecht nog
+gebruikt.
 """
 import itertools
 import streamlit as st
@@ -271,6 +323,14 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
 
 
 def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list) -> set:
+    """PADEL_ANALYSIS_OWN_TEAM_PARTNER_ID_FALLBACK_FIX_2026-09-21: zie
+    module-docstring voor de volledige toelichting bij deze fix.
+    Verzamelt WIE er (namens ons team) speelde in de meest recente
+    interclub-ontmoeting van `sel_player_id`, rechtstreeks vanuit de
+    encounter-index — dus voor elke `pid` die zelf een matchrecord voor
+    deze ontmoeting heeft, ONGEACHT of diens partner_user_id correct
+    oploste (dat was de fragiele schakel in de vorige, reconstruct_boards()
+    -gebaseerde aanpak, zie hierboven)."""
     try:
         profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
         docs, index = _load_encounter_index(profile_ids)
@@ -283,13 +343,14 @@ def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list) -> set:
             dates = [d for d in dates if d]
             return max(dates) if dates else (0, 0, 0)
         most_recent_key = max(own_keys, key=_encounter_date)
-        boards = ll.reconstruct_boards(index[most_recent_key]) or []
-        player_ids = set()
-        for board in boards:
-            for pid in (board.get("pair") or []):
-                if pid:
-                    player_ids.add(pid)
-        return player_ids
+        # PADEL_ANALYSIS_OWN_TEAM_PARTNER_ID_FALLBACK_FIX_2026-09-21: elke
+        # `pid` die in deze groep voorkomt, heeft PER DEFINITIE (zie
+        # build_encounter_index() in lineup_lab.py) zelf een interclub-
+        # matchrecord voor deze exacte ontmoeting in ZIJN/HAAR EIGEN
+        # gescrapete document staan — dat is voldoende bewijs dat deze
+        # speler meespeelde, volledig los van of diens partner_user_id
+        # (nodig voor reconstruct_boards()/"pair") correct resolveerde.
+        return {str(pid) for pid, _entry in index[most_recent_key]}
     except Exception:
         return set()
 
@@ -2007,12 +2068,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
     own_labels = [_display_name(p) for p in own_candidates]
     own_label_to_id = {_display_name(p): p.get("player_id") for p in own_candidates}
-    # PADEL_ANALYSIS_ENCOUNTER_CACHE_MANUAL_CLEAR_2026-09-21 (op verzoek van
-    # Kim, chat 2026-09-21): zie module-docstring voor de volledige
-    # toelichting. Deze knop staat BEWUST vlak boven de spelersselectie
-    # hieronder, want die selectie hangt rechtstreeks af van
-    # _recent_own_lineup_player_ids() -> _load_encounter_index() -> de
-    # 10-minuten-gecachete encounter-groepering.
     with st.expander("🔄 Ontmoetingen-cache verversen (bij twijfel over teamgenoten-groepering)", expanded=False):
         st.caption(
             "De 'standaard vooraf geselecteerd'-lijst hieronder is gebaseerd op een tot 10 minuten "
