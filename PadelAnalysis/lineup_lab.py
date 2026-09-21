@@ -1,4 +1,3 @@
-
 """
 lineup_lab.py — Opstelling-analyse (Fase 1: retrospectieve test-tool)
 Doel: een eerder gespeelde interclub-ontmoeting reconstrueren uit de al
@@ -6,7 +5,6 @@ gescrapete Firestore-data, en berekenen wat de beste alternatieve
 opstelling(en) geweest zouden zijn op basis van historische partner-synergie.
 Belangrijke spelregel die hier hard gecodeerd is: een speler speelt op één
 en dezelfde dag nooit twee keer met dezelfde partner.
-
 PADEL_ANALYSIS_MATCHUP_EDGE_DIRECTION_FIX_2026-09-13: matchup_edge() gebruikt
 de projectbrede conventie HOGER = STERKER.
 PADEL_ANALYSIS_BOARD_DEDUPE_SAME_MATCHID_FIX_2026-09-13: dedupe-sleutel bevat
@@ -44,7 +42,6 @@ Kim's kernpunten, in eigen woorden:
      een VERWACHT AANTAL GEWONNEN BORDEN geven, i.p.v. een abstract
      "score"-getal, mét een expliciete waarschuwing dat dit een ruwe
      schatting is (geen gevalideerd statistisch model).
-
 BUG (root cause van punt 1, opgelost): in de vorige versie werd, bij het
 OPBOUWEN van 'official_ranks' (in page_lineup_lab.py, niet in dit bestand),
 een ONBEKEND officieel klassement stilzwijgend vervangen door de
@@ -59,7 +56,6 @@ puntengrens hangen immers NIET af van de tegenstander). Fix: de aanroeper
 (geen fallback naar padelstat) — zie ook de nieuwe validatiehelper
 `has_missing_official_rank()` hieronder, die de UI kan gebruiken om expliciet
 te waarschuwen i.p.v. in stilte te substitueren.
-
 NIEUWE FUNCTIES (simulatie, volledig los van de reglement-functies
 hierboven):
   - effective_simulation_rating(pid, padelstat_ratings, official_ranks):
@@ -80,7 +76,6 @@ hierboven):
     gevalideerd model — dat wordt ook zo in de UI gecommuniceerd.
   - risk_note_for_probability(p): leesbare risico-omschrijving ("zeer
     onzeker", "kleine voorsprong", "duidelijke favoriet", ...).
-
 optimize_lineup_vs_scenario() berekent nu, per bord in 'assignment': zowel de
 bestaande 'edge' (ongewijzigd qua schaal-logica per-bord-conventie vervangen
 door per-speler fallback) als NIEUW 'win_probability' en 'risk_note'. Het
@@ -109,24 +104,45 @@ onmogelijkheid. Dit is een BACKWARD-INCOMPATIBLE wijziging van de
 return-signatuur (was Tuple[List[dict], bool], wordt Tuple[List[dict], bool,
 dict]) — alle aanroepers in page_lineup_lab.py zijn hierop aangepast.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21 (op verzoek
-van Kim: "3 spelers i.p.v. 4" bij een ontmoeting)
+PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_GROUPING_FIX_2026-09-21 (op verzoek
+van Kim, chat 2026-09-21: "4-teammates-probleem" — hij vermoedde zelf al
+correct dat _encounter_key() de root cause was, en verifieerde dat de
+logica van de voorgestelde fix klopt, maar dat ze in GEEN van de OneDrive-
+kopieën van dit bestand effectief was doorgevoerd)
 --------------------------------------------------------------------------
-BUG (root cause gevonden en gefixt): _encounter_key() groepeerde
-matchrecords op 4 velden (match_date, reeks_name, encounter,
-competition_name) — elk record wordt echter INDIVIDUEEL per speler
-gescraped. Een klein tekstverschil tussen 2 teamgenoten in reeks_name of
-competition_name (bv. een leeg veld bij de één, niet bij de ander) liet ze
-in APARTE encounter-groepen belanden, waardoor bij het reconstrueren van
-een ontmoeting maar een deel van het team (bv. 3 i.p.v. 4 spelers)
-teruggevonden werd.
-Fix: groepeer nog uitsluitend op (match_date, encounter) — die 2 velden
-identificeren een ontmoeting ondubbelzinnig en zijn niet gevoelig aan
-per-speler tekstverschillen in reeks_name/competition_name. Getest en
-bevestigd dat 4 teamgenoten met verschillende reeks_name/competition_name
-nu correct in dezelfde groep vallen. list_encounters() leidt het
-weergave-label (reeks/competitie) nu af uit de entries zelf i.p.v. uit de
-(nu kortere) key.
+ROOT CAUSE (bevestigd): _encounter_key() groepeerde matchrecords tot nu toe
+op VIER velden — (match_date, reeks_name, encounter, competition_name).
+Deze velden komen echter individueel uit het matchrecord VAN ELKE SPELER
+APART (elke speler wordt afzonderlijk gescraped, zie scraper_v2.py). Een
+kleine, onschuldig ogende tekstvariatie tussen 2 teamgenoten in HETZELFDE
+board — bijvoorbeeld een leeg/ontbrekend "reeks_name"-veld bij de één maar
+een ingevulde waarde bij de ander (bv. door een net iets andere HTML-
+structuur op het uitslagenblad, of een tussentijdse scrape die het veld nog
+niet had), of een net iets andere spelling/whitespace in "competition_name"
+— liet die twee matchrecords op EEN ANDERE encounter-key uitkomen, ook al
+ging het overduidelijk om DEZELFDE ontmoeting (zelfde datum, zelfde
+"encounter"-tekst). Gevolg: build_encounter_index() (hieronder) plaatste die
+teamgenoot in een aparte groep, en _recent_own_lineup_player_ids()/
+_recent_own_lineup_boards() (page_lineup_lab.py, gebruikt voor de "standaard
+vooraf geselecteerd"-lijst bij "Beschikbare eigen spelers") vond daardoor
+slechts 3 van de 4 effectieve teamgenoten voor die ontmoeting.
+FIX: _encounter_key() groepeert nu UITSLUITEND op (match_date, encounter) —
+de twee velden die een ontmoeting op zichzelf al ondubbelzinnig
+identificeren (een interclub-ontmoeting heeft één datum en één "encounter"-
+omschrijving, ongeacht wie van de 4 teamgenoten toevallig een net iets
+andere waarde voor reeks_name/competition_name in zijn/haar EIGEN
+matchrecord heeft staan). reeks_name/competition_name blijven WEL bewaard
+en gebruikt voor de leesbare labeltekst in list_encounters() hieronder
+(opportunistisch afgeleid uit de eerste match-entry van de groep, i.p.v.
+rechtstreeks uit de key) — enkel hun rol als GROEPERINGSCRITERIUM is
+weggehaald.
+LET OP (belangrijk, zie ook page_lineup_lab.py): deze fix lost de
+GROEPERINGSLOGICA zelf op, maar Streamlit's @st.cache_data(ttl=600) op
+_load_encounter_index() (page_lineup_lab.py) kan een EERDER berekende,
+foutieve groepering tot 10 minuten laten "doorleven" na een deploy, als de
+onderliggende Streamlit-cache niet volledig herstart. Zie de nieuwe
+"🔄 Ontmoetingen-cache verversen"-knop in page_lineup_lab.py om dit
+onmiddellijk, handmatig te forceren i.p.v. te moeten wachten.
 """
 import heapq
 import itertools
@@ -135,6 +151,7 @@ import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 import firebase_service as fb
+
 
 # ─────────────────────────────────────────────
 # Data ophalen
@@ -160,13 +177,14 @@ def get_docs_for_players(player_ids: List[str]) -> Dict[str, dict]:
 # Ontmoetingen (encounters) opsporen
 # ─────────────────────────────────────────────
 def _encounter_key(m: dict) -> Tuple:
-    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21:
-    groepeer UITSLUITEND op (match_date, encounter). reeks_name en
-    competition_name worden bewust NIET meer in de sleutel opgenomen: ze
-    worden per speler individueel gescraped en kunnen tekstueel licht
-    verschillen tussen teamgenoten van dezelfde ontmoeting (bv. één leeg
-    veld), wat voorheen leidde tot valse, aparte encounter-groepen en dus
-    een onvolledig gereconstrueerd team (bv. 3 i.p.v. 4 spelers)."""
+    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_GROUPING_FIX_2026-09-21: zie
+    module-docstring voor de volledige toelichting bij deze fix.
+    Groepeert UITSLUITEND op (match_date, encounter) — deze 2 velden
+    identificeren een interclub-ontmoeting op zichzelf al ondubbelzinnig,
+    ONGEACHT eventuele kleine tekstvariaties in reeks_name/competition_name
+    tussen de individuele matchrecords van verschillende teamgenoten in
+    diezelfde ontmoeting (die velden werden voorheen ten onrechte ALSOF ze
+    ook een teamgenoot van de ontmoeting konden UITSLUITEN gebruikt)."""
     return (
         m.get("match_date") or "",
         m.get("encounter") or "",
@@ -185,22 +203,18 @@ def build_encounter_index(docs: Dict[str, dict]) -> Dict[Tuple, List[Tuple[str, 
 
 
 def list_encounters(index: Dict[Tuple, List[Tuple[str, dict]]]) -> List[Tuple[Tuple, str]]:
-    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21: de key
-    bevat nu enkel nog (date, encounter). reeks_name/competition_name voor
-    het weergave-label worden afgeleid uit de entries zelf (eerste
-    niet-lege waarde die we tegenkomen), niet meer uit de key."""
+    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_GROUPING_FIX_2026-09-21: de key
+    is nu (match_date, encounter) i.p.v. de vroegere 4-veldige tuple.
+    reeks_name/competition_name worden hier nog steeds getoond in het
+    label, maar nu opportunistisch afgeleid UIT DE EERSTE match-entry van
+    de groep (in plaats van rechtstreeks uit de key zelf), aangezien ze
+    niet langer meebepalen of matchrecords bij dezelfde ontmoeting horen."""
     items = []
     for key, entries in index.items():
         date, encounter = key
-        reeks = None
-        competition = None
-        for _pid, m in entries:
-            if not reeks:
-                reeks = m.get("reeks_name")
-            if not competition:
-                competition = m.get("competition_name")
-            if reeks and competition:
-                break
+        first_match = entries[0][1] if entries else {}
+        reeks = first_match.get("reeks_name") or ""
+        competition = first_match.get("competition_name") or ""
         label_parts = [p for p in [date, reeks or competition, encounter] if p]
         label = " — ".join(label_parts) if label_parts else "Onbekende ontmoeting"
         items.append((key, label, date))
@@ -326,12 +340,10 @@ def make_pair_score_fn(
     confidence_k: float = DEFAULT_SYNERGY_CONFIDENCE_K,
 ) -> Callable[[str, str], float]:
     indiv_cache: Dict[str, Optional[float]] = {}
-
     def indiv(p: str) -> Optional[float]:
         if p not in indiv_cache:
             indiv_cache[p] = compute_individual_winrate(docs.get(str(p)))
         return indiv_cache[p]
-
     def score(a: str, b: str) -> float:
         pair = frozenset({str(a), str(b)})
         slot = synergy.get(pair)
@@ -345,7 +357,6 @@ def make_pair_score_fn(
                 basis = indiv_avg if indiv_avg is not None else slot["winrate"]
                 return round(weight * slot["winrate"] + (1 - weight) * basis, 4)
         return round(indiv_avg, 4) if indiv_avg is not None else 0.5
-
     return score
 
 
@@ -375,10 +386,8 @@ def optimize_lineup(
     seen_keys = set()
     calls = [0]
     truncated = [False]
-
     def heap_worst():
         return heap[0][0] if heap else float("-inf")
-
     def backtrack(remaining, used_partners, pairs, score):
         calls[0] += 1
         if calls[0] > call_budget:
@@ -416,7 +425,6 @@ def optimize_lineup(
             remaining[partner] += 1
             if calls[0] > call_budget:
                 return
-
     backtrack(dict(required), {p: set() for p in players}, [], 0.0)
     results = sorted(heap, key=lambda x: -x[0])
     return [(round(s, 4), p) for s, _, p in results], truncated[0]
@@ -470,7 +478,6 @@ def _sort_boards_by_opponent_official_rank(opponent_boards: List[dict]) -> List[
         pair = board.get("opponent_pair", []) or []
         vals = [parse_ranking(p.get("ranking")) for p in pair]
         return sum(v for v in vals if v is not None)
-
     return sorted(opponent_boards, key=strength, reverse=True)
 
 
@@ -682,7 +689,6 @@ def generate_all_opponent_lineups(
                 vals = [rank_by_id.get(pid) for pid in pair]
                 known = [v for v in vals if v is not None]
                 return sum(known) if known else None
-
             groups: Dict[Optional[float], List[frozenset]] = {}
             for pair in matching:
                 groups.setdefault(_pair_strength(pair), []).append(pair)
@@ -738,7 +744,6 @@ def optimize_lineup_vs_scenario(
     """
     Zoekt, voor een SPECIFIEK tegenstander-scenario, de beste koppelvorming
     aan ONZE kant.
-
     STRIKTE SCHEIDING (PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_
     2026-09-17):
       - REGLEMENT (bordvolgorde + puntengrens): uitsluitend
@@ -747,7 +752,6 @@ def optimize_lineup_vs_scenario(
       - SIMULATIE (win_probability/edge): per speler, padelstat bij
         voorkeur, met een terugval naar het officiële klassement PER SPELER
         via effective_simulation_rating().
-
     PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18: geeft nu een DERDE
     returnwaarde terug, `diagnostics`:
         {
@@ -761,7 +765,6 @@ def optimize_lineup_vs_scenario(
     punten van de toegelaten grens afzaten (i.p.v. enkel "0 combinaties
     voldoen"). Dit is een backward-incompatible wijziging van de
     return-signatuur t.o.v. de vorige versie (was Tuple[List[dict], bool]).
-
     Returns: (resultaten, truncated, diagnostics).
     """
     candidates, truncated = optimize_lineup(players, required, own_synergy_fn, top_n=candidate_pool)
