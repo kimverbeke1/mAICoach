@@ -1,32 +1,26 @@
+
 """
 lineup_lab.py — Opstelling-analyse (Fase 1: retrospectieve test-tool)
-
 Doel: een eerder gespeelde interclub-ontmoeting reconstrueren uit de al
 gescrapete Firestore-data, en berekenen wat de beste alternatieve
 opstelling(en) geweest zouden zijn op basis van historische partner-synergie.
-
 Belangrijke spelregel die hier hard gecodeerd is: een speler speelt op één
 en dezelfde dag nooit twee keer met dezelfde partner.
 
 PADEL_ANALYSIS_MATCHUP_EDGE_DIRECTION_FIX_2026-09-13: matchup_edge() gebruikt
 de projectbrede conventie HOGER = STERKER.
-
 PADEL_ANALYSIS_BOARD_DEDUPE_SAME_MATCHID_FIX_2026-09-13: dedupe-sleutel bevat
 ook de spelers van dat specifieke board, niet enkel match_id.
-
 PADEL_ANALYSIS_SYNERGY_CONFIDENCE_SHRINKAGE_2026-09-15: confidence-shrinkage
 i.p.v. een harde aan/uit-drempel voor koppelsynergie.
-
 PADEL_ANALYSIS_OFFICIAL_BOARD_ORDER_FIX_2026-09-17 /
 PADEL_ANALYSIS_SUM_BASED_PAIR_STRENGTH_2026-09-17: de bordvolgorde ligt
 VERPLICHT vast via de SOM van de officiële klassementen van de 2 spelers per
 duo (reglement art. 6.6), PER ROTATIE (2 gelijktijdige wedstrijden) — niet
 globaal over de hele ontmoeting.
-
 PADEL_ANALYSIS_ROTATION_RULES_2026-09-17: puntengrenzen per rotatie (art.
 2.1/9.3.3/9.3.4) sluiten ongeldige koppelverdelingen UIT (zie
 tournament_rules.py, optionele `tournament_rules_dict`-parameter).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17 (op verzoek
 van Kim, na het testen van de vorige versie — 3 samenhangende problemen)
@@ -95,7 +89,6 @@ de win_probability over alle borden) — een veel interpreteerbaarder getal dan
 de vorige, abstracte 'total_score'. 'total_score' (synergie+edge-som) blijft
 bestaan voor de interne rangschikking/sortering van kandidaten, maar wordt in
 de UI niet langer als hoofdgetal getoond (zie page_lineup_lab.py).
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_POINTS_BOUNDS_DIAGNOSTIC_2026-09-18 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -115,6 +108,25 @@ een verkeerd ingestelde afdeling is of een echte reglementaire
 onmogelijkheid. Dit is een BACKWARD-INCOMPATIBLE wijziging van de
 return-signatuur (was Tuple[List[dict], bool], wordt Tuple[List[dict], bool,
 dict]) — alle aanroepers in page_lineup_lab.py zijn hierop aangepast.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21 (op verzoek
+van Kim: "3 spelers i.p.v. 4" bij een ontmoeting)
+--------------------------------------------------------------------------
+BUG (root cause gevonden en gefixt): _encounter_key() groepeerde
+matchrecords op 4 velden (match_date, reeks_name, encounter,
+competition_name) — elk record wordt echter INDIVIDUEEL per speler
+gescraped. Een klein tekstverschil tussen 2 teamgenoten in reeks_name of
+competition_name (bv. een leeg veld bij de één, niet bij de ander) liet ze
+in APARTE encounter-groepen belanden, waardoor bij het reconstrueren van
+een ontmoeting maar een deel van het team (bv. 3 i.p.v. 4 spelers)
+teruggevonden werd.
+Fix: groepeer nog uitsluitend op (match_date, encounter) — die 2 velden
+identificeren een ontmoeting ondubbelzinnig en zijn niet gevoelig aan
+per-speler tekstverschillen in reeks_name/competition_name. Getest en
+bevestigd dat 4 teamgenoten met verschillende reeks_name/competition_name
+nu correct in dezelfde groep vallen. list_encounters() leidt het
+weergave-label (reeks/competitie) nu af uit de entries zelf i.p.v. uit de
+(nu kortere) key.
 """
 import heapq
 import itertools
@@ -123,7 +135,6 @@ import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 import firebase_service as fb
-
 
 # ─────────────────────────────────────────────
 # Data ophalen
@@ -149,11 +160,16 @@ def get_docs_for_players(player_ids: List[str]) -> Dict[str, dict]:
 # Ontmoetingen (encounters) opsporen
 # ─────────────────────────────────────────────
 def _encounter_key(m: dict) -> Tuple:
+    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21:
+    groepeer UITSLUITEND op (match_date, encounter). reeks_name en
+    competition_name worden bewust NIET meer in de sleutel opgenomen: ze
+    worden per speler individueel gescraped en kunnen tekstueel licht
+    verschillen tussen teamgenoten van dezelfde ontmoeting (bv. één leeg
+    veld), wat voorheen leidde tot valse, aparte encounter-groepen en dus
+    een onvolledig gereconstrueerd team (bv. 3 i.p.v. 4 spelers)."""
     return (
         m.get("match_date") or "",
-        m.get("reeks_name") or "",
         m.get("encounter") or "",
-        m.get("competition_name") or "",
     )
 
 
@@ -169,9 +185,22 @@ def build_encounter_index(docs: Dict[str, dict]) -> Dict[Tuple, List[Tuple[str, 
 
 
 def list_encounters(index: Dict[Tuple, List[Tuple[str, dict]]]) -> List[Tuple[Tuple, str]]:
+    """PADEL_ANALYSIS_ENCOUNTER_KEY_TEAMMATE_MISMATCH_FIX_2026-09-21: de key
+    bevat nu enkel nog (date, encounter). reeks_name/competition_name voor
+    het weergave-label worden afgeleid uit de entries zelf (eerste
+    niet-lege waarde die we tegenkomen), niet meer uit de key."""
     items = []
     for key, entries in index.items():
-        date, reeks, encounter, competition = key
+        date, encounter = key
+        reeks = None
+        competition = None
+        for _pid, m in entries:
+            if not reeks:
+                reeks = m.get("reeks_name")
+            if not competition:
+                competition = m.get("competition_name")
+            if reeks and competition:
+                break
         label_parts = [p for p in [date, reeks or competition, encounter] if p]
         label = " — ".join(label_parts) if label_parts else "Onbekende ontmoeting"
         items.append((key, label, date))
@@ -335,7 +364,6 @@ def optimize_lineup(
         raise ValueError("Som van 'required' moet even zijn (elk board = 2 spelers).")
     if total_slots == 0:
         return [], False
-
     sorted_partners = {
         p: sorted((q for q in players if q != p), key=lambda q: -synergy_fn(p, q))
         for p in players
@@ -343,7 +371,6 @@ def optimize_lineup(
     best_possible_pair_score = max(
         (synergy_fn(a, b) for a, b in itertools.combinations(players, 2)), default=0.0
     )
-
     heap: List[Tuple[float, tuple, list]] = []
     seen_keys = set()
     calls = [0]
@@ -443,6 +470,7 @@ def _sort_boards_by_opponent_official_rank(opponent_boards: List[dict]) -> List[
         pair = board.get("opponent_pair", []) or []
         vals = [parse_ranking(p.get("ranking")) for p in pair]
         return sum(v for v in vals if v is not None)
+
     return sorted(opponent_boards, key=strength, reverse=True)
 
 
@@ -470,7 +498,6 @@ def evaluate_rotation(
     sum_b = _pair_strength_sum(duo_b, official_ranks)
     ordered = [duo_a, duo_b] if sum_a >= sum_b else [duo_b, duo_a]
     total_points = sum_a + sum_b
-
     valid, reason = True, f"{total_points:.0f} punten (geen reglement-check actief)"
     if rules is not None:
         try:
@@ -478,7 +505,6 @@ def evaluate_rotation(
             valid, reason = _tr.rotation_points_bounds_ok(total_points, rules)
         except Exception:
             valid, reason = True, f"{total_points:.0f} punten (reglement-check niet beschikbaar)"
-
     return {
         "ordered_pairs": ordered,
         "total_points": total_points,
@@ -501,7 +527,6 @@ def filter_and_order_lineup_by_rotations(
     ordered_pairs: List[frozenset] = []
     rotation_results = []
     all_valid = True
-
     for group in rotations_raw:
         if len(group) < 2:
             ordered_pairs.extend(group)
@@ -515,7 +540,6 @@ def filter_and_order_lineup_by_rotations(
         rotation_results.append(result)
         if not result["valid"]:
             all_valid = False
-
     return {
         "ordered_pairs": ordered_pairs,
         "rotations": rotation_results,
@@ -547,7 +571,6 @@ def effective_simulation_rating(
     bord terug op officieel"-conventie — die liet de edge/simulatie
     STRUCTUREEL vaak terugvallen op klassement zodra ook maar 1 van de 4
     spelers geen padelstat had (heel gebruikelijk voor tegenstanders).
-
     Returns None als GEEN van beide bronnen een waarde heeft voor deze
     speler (de aanroeper moet dat geval afhandelen — geen educated guess)."""
     if padelstat_ratings:
@@ -565,15 +588,12 @@ def estimate_win_probability(our_avg: Optional[float], their_avg: Optional[float
     """PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17: RUWE,
     Elo-achtige logistische schatting van de winkans voor ONS op dit ene
     bord, gebaseerd op het (ongeknipte) verschil in effectieve rating.
-
         p = 1 / (1 + 10^(-(our_avg - their_avg) / scale))
-
     `scale` bepaalt hoe snel de winkans oploopt met het ratingverschil — een
     KLEINERE scale maakt elk verschil impactvoller. scale=300 is een
     vertrekpunt, GEEN gevalideerde, empirisch bepaalde waarde voor padel: dit
     is uitdrukkelijk een HEURISTIEK, geen statistisch onderbouwd model (zie
     ook de verplichte UI-caveat in page_lineup_lab.py).
-
     Returns None als (een van) beide gemiddelden onbekend zijn — de
     aanroeper toont dan 'onbekend' i.p.v. een verzonnen getal."""
     if our_avg is None or their_avg is None:
@@ -646,18 +666,15 @@ def generate_all_opponent_lineups(
     ids = [str(p["user_id"]) for p in opponent_players]
     name_by_id = {str(p["user_id"]): p.get("name", str(p["user_id"])) for p in opponent_players}
     rank_by_id = {pid: (opponent_official_ranks or {}).get(pid) for pid in ids}
-
     needed = 2 * total_boards
     if needed <= 0 or len(ids) < needed:
         return [], {
             "total_theoretical": 0, "truncated": False,
             "players_used": len(ids), "resting_combinations": 0,
         }
-
     resting_groups = list(itertools.combinations(ids, needed))
     all_lineups: List[List[dict]] = []
     total_theoretical = 0
-
     for playing_ids in resting_groups:
         matchings = _all_perfect_matchings(list(playing_ids))
         for matching in matchings:
@@ -673,7 +690,6 @@ def generate_all_opponent_lineups(
             ordered_groups = [groups[k] for k in known_keys]
             if None in groups:
                 ordered_groups.append(groups[None])
-
             group_perms = [list(itertools.permutations(g)) for g in ordered_groups]
             for combo in itertools.product(*group_perms):
                 ordered_pairs = [pair for grp in combo for pair in grp]
@@ -694,7 +710,6 @@ def generate_all_opponent_lineups(
                         },
                     ]})
                 all_lineups.append(boards)
-
     meta = {
         "total_theoretical": total_theoretical,
         "truncated": total_theoretical > len(all_lineups),
@@ -757,18 +772,15 @@ def optimize_lineup_vs_scenario(
     }
     if not candidates:
         return [], truncated, diagnostics
-
     sorted_boards = _sort_boards_by_opponent_official_rank(opponent_boards)
     n_boards = len(sorted_boards)
     # Reglement-ordening: UITSLUITEND officieel klassement. Bij ontbreken
     # (None meegegeven) val terug op player_ratings ENKEL als noodgreep voor
     # achterwaartse compatibiliteit — zie docstring hierboven.
     regulation_ranks = player_official_ranks if player_official_ranks is not None else player_ratings
-
     results = []
     for synergy_total, pairs in candidates:
         pair_list = list(pairs)
-
         rotation_eval = filter_and_order_lineup_by_rotations(
             pair_list, regulation_ranks, rules=tournament_rules_dict,
         )
@@ -778,13 +790,11 @@ def optimize_lineup_vs_scenario(
         if tournament_rules_dict is not None and not rotation_eval["all_valid"]:
             diagnostics["candidates_excluded_by_rules"] += 1
             continue  # buiten de puntengrens -> uitsluiten, niet tonen.
-
         ordered_our_pairs = rotation_eval["ordered_pairs"]
         n = min(len(ordered_our_pairs), n_boards)
         if n == 0:
             continue
         ordered_our_pairs = ordered_our_pairs[:n]
-
         total = 0.0
         expected_boards_won = 0.0
         assignment = []
@@ -793,7 +803,6 @@ def optimize_lineup_vs_scenario(
             syn = own_synergy_fn(p1, p2)
             board = sorted_boards[board_idx]
             opp_pair = board.get("opponent_pair", []) or []
-
             # SIMULATIE: per speler effectieve rating (padelstat bij
             # voorkeur, officieel als terugval) — GEEN alles-of-niets meer
             # per bord.
@@ -812,12 +821,10 @@ def optimize_lineup_vs_scenario(
             their_eff_known = [v for v in their_eff if v is not None]
             our_avg = (sum(our_eff_known) / len(our_eff_known)) if our_eff_known else None
             their_avg = (sum(their_eff_known) / len(their_eff_known)) if their_eff_known else None
-
             edge = matchup_edge(our_eff, their_eff)
             win_prob = estimate_win_probability(our_avg, their_avg, scale=win_probability_scale)
             if win_prob is not None:
                 expected_boards_won += win_prob
-
             total += syn + edge
             assignment.append({
                 "our_pair": (p1, p2),
@@ -836,7 +843,6 @@ def optimize_lineup_vs_scenario(
             "rotations": rotation_eval["rotations"],
             "all_valid": rotation_eval["all_valid"],
         })
-
     # PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17: sorteer
     # op expected_boards_won (het interpreteerbare, aan Kim getoonde getal)
     # i.p.v. het abstracte total_score — bij gelijke expected_boards_won
