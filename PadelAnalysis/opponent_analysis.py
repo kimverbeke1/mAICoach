@@ -234,10 +234,10 @@ def _build_report(
             global_docs=global_docs,
         )
 
-        # Het huidige officiële klassement uit dezelfde, zonet uitgevoerde
-        # padelstat-opzoeking is de meest actuele snapshot en moet daarom in
-        # de ploeganalyse voorrang krijgen op oudere TVL-historiek/fallbacks.
-        # "Beste ooit" blijft uitsluitend uit echte TVL-historiek komen.
+        # Het huidige officiele klassement uit dezelfde, zonet uitgevoerde
+        # padelstat-opzoeking is de meest actuele snapshot en krijgt hier dus
+        # voorrang op oudere TVL-historiek/fallbacks. "Beste ooit" blijft
+        # uitsluitend uit echte TVL-historiek komen - nooit uit een snapshot.
         try:
             snapshot = fb.get_official_klassement_via_padelstat(player_id) or {}
         except Exception:

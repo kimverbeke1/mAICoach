@@ -166,33 +166,6 @@ Bijkomend, 2 gerelateerde gaten gedicht in dezelfde sessie:
     is None" — een check die dus NOOIT kon afgaan (dode code). Nu gebruikt
     de sandbox _pair_official_sum_safe() om de completeness apart bij te
     houden, zodat de "❓ onbekend"-waarschuwing daadwerkelijk verschijnt.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_OWN_ROSTER_FROM_UITSLAGENBLAD_2026-09-22 (op verzoek van Kim:
-"Om te weten welke eigen spelers je moet tonen moet je kijken wie van de
-eigen spelers de vorige wedstrijd gespeeld heeft. heb je daar eigenlijk de
-juiste link voor. Je kan dat zien bij de details per match: bij de kolom van
-de ploeg van de geselecteerde speler staan al die spelers")
---------------------------------------------------------------------------
-ROOT CAUSE (definitief): ALLE vorige pogingen - partner_user_id,
-(match_date, encounter)-tekst, kalenderdatum, club-veld, gedeelde
-tegenstander-identiteit - leidden onze ploegsamenstelling INDIRECT af uit
-losse, PER SPELER APART gescrapete matchrecords. Die bron is structureel
-onvolledig: een teamgenoot die zelf nog niet (volledig) gescrapet is,
-bestaat daar simpelweg niet. Vandaar telkens 1 of 3 spelers i.p.v. 4.
-FIX: de ploegkolom wordt nu RECHTSTREEKS uit het uitslagenblad van de
-ontmoeting zelf gelezen - dezelfde bron die de tegenstander-opstelling al
-gebruikt (opponent_scout.scout_opponent() -> extract_opponent_lineup()),
-maar aangeroepen met ONS eigen ploeg_id i.p.v. dat van de tegenstander.
-Dat is exact de kolom die Kim in het matchdetail ziet staan en vereist
-GEEN profiel, GEEN club-veld en GEEN partner_user_id per teamgenoot.
-_recent_own_lineup_roster() vervangt daarmee _recent_own_lineup_player_ids()
-volledig. Teamgenoten zonder eigen profiel worden expliciet als
-"(nog geen profiel)" aan de selectie toegevoegd i.p.v. weggefilterd.
-Bijkomend voordeel voor de traagheid die Kim meldde: de vorige aanpak deed
-ll.get_docs_for_players() over ALLE profielen in de database bij elke
-render; die brede uitlezing is hiermee volledig verdwenen. Het resultaat
-wordt bovendien per ontmoeting in st.session_state gecacht, met een
-expliciete "Ploeg opnieuw ophalen"-knop ernaast.
 """
 import itertools
 import streamlit as st
@@ -385,22 +358,50 @@ def _own_team_name(fixtures: list, own_ploeg_id: str) -> str:
     return ""
 
 
-def _recent_own_lineup_roster(sel_player_id: str, fixtures: list, own_ploeg_id: str) -> dict:
+def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, before_date: str) -> dict:
+    """Scout een ploeg over AL hun gespeelde ontmoetingen (niet enkel de
+    laatste). Gebruikt dezelfde uitslagenblad-bron als de gewone
+    tegenstander-analyse, maar met een onbeperkte lookback.
+
+    Resultaat wordt per (ploeg, datum) in st.session_state gecacht: het
+    ophalen doet 1 HTTP-call per ontmoeting met een beleefdheidspauze, dus
+    dit mag niet bij elke rerun opnieuw gebeuren.
+    """
+    if osc is None or not fixtures or not ploeg_id:
+        return {}
+    cache_key = f"full_scout_v1_{ploeg_id}_{before_date}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    try:
+        played = osc.get_opponent_previous_fixtures(fixtures, str(ploeg_id), before_date, lookback=99)
+        n = len(played)
+        if not n:
+            st.session_state[cache_key] = {}
+            return {}
+        bundle = osc.scout_opponent(
+            fixtures, team_name, str(ploeg_id), before_date,
+            lookback=n, min_players=0, max_lookback=n,
+        )
+    except Exception:
+        bundle = {}
+    st.session_state[cache_key] = bundle
+    return bundle
+
+
+def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
     """Wie speelde er in ONZE vorige interclubontmoeting?
 
     Leest dit rechtstreeks uit het uitslagenblad van die ontmoeting, via
     dezelfde functie die de tegenstander-opstelling al ophaalt
-    (opponent_scout.scout_opponent) - maar dan met ONS eigen ploeg_id. Dat
-    is exact de ploegkolom die je in het matchdetail ziet staan: alle
-    spelers van de ploeg, ongeacht of hun eigen profiel al gescrapet is,
-    of hun club-veld ingevuld is, of hun partner_user_id correct opgelost
-    raakte.
+    (opponent_scout.scout_opponent) - maar met ONS eigen ploeg_id. Dat is
+    exact de ploegkolom uit het matchdetail: alle spelers van de ploeg,
+    ongeacht of hun eigen profiel al gescrapet is, hun club-veld ingevuld
+    is, of hun partner_user_id correct opgelost raakte.
 
-    Alle eerdere methodes (partner_user_id, gedeelde tegenstander-
-    identiteit, club-veld, kalenderdatum) leidden de ploeg INDIRECT af uit
-    losse, per speler apart gescrapete matchrecords - precies de reden dat
-    er telkens 1 of 3 spelers uitkwamen in plaats van 4. Deze bron is de
-    ontmoeting zelf en heeft die afleiding niet nodig.
+    Alle eerdere methodes (partner_user_id, encounter-tekst, kalenderdatum,
+    club-veld, gedeelde tegenstander-identiteit) leidden de ploeg INDIRECT
+    af uit losse, per speler apart gescrapete matchrecords - precies de
+    reden dat er telkens 1 of 3 spelers uitkwamen in plaats van 4.
 
     Geeft {player_id: naam} terug; leeg bij een onbekende ploeg/fout.
     """
@@ -417,16 +418,12 @@ def _recent_own_lineup_roster(sel_player_id: str, fixtures: list, own_ploeg_id: 
         return st.session_state[cache_key]
     try:
         own_bundle = osc.scout_opponent(
-            fixtures,
-            _own_team_name(fixtures, own_ploeg_id),
-            str(own_ploeg_id),
-            before_date,
-            lookback=1,
+            fixtures, _own_team_name(fixtures, own_ploeg_id),
+            str(own_ploeg_id), before_date, lookback=1,
         )
         roster = {
             str(p["user_id"]): (p.get("name") or str(p["user_id"]))
-            for p in (own_bundle.get("unique_players") or [])
-            if p.get("user_id")
+            for p in (own_bundle.get("unique_players") or []) if p.get("user_id")
         }
     except Exception:
         roster = {}
@@ -640,8 +637,23 @@ def _render_previous_opponent_lineup(bundle: dict) -> None:
                 st.dataframe(rows, use_container_width=True, hide_index=True)
         if not toonde_iets:
             st.info("Geen match-detail beschikbaar voor de gekende eerdere ontmoeting(en).")
-def _render_match1_frequency_opponent(bundle: dict) -> None:
-    previous_fixtures = bundle.get("previous_fixtures") or []
+def _render_match1_frequency_opponent(bundle: dict, full_bundle: dict = None) -> None:
+    """Match 1 / Match 2-frequentie per tegenstander-speler.
+
+    PADEL_ANALYSIS_FREQUENCY_ALL_FIXTURES_2026-09-22 (op verzoek van Kim:
+    "je rekent maar 1 match mee om te bekijken hoeveel keer iemand match 1
+    en match 2 gespeeld heeft. je moet alle matchen meenemen"):
+    ROOT CAUSE: deze functie las `bundle["previous_fixtures"]`, en die
+    bundle wordt door render_scout_header() opgebouwd met lookback=1 (enkel
+    de laatste ontmoeting; scout_opponent() breidt dat enkel uit zolang de
+    ROSTER te klein is, niet om statistiek op te bouwen). Alle ontmoetingen
+    daarvoor werden dus nooit geteld.
+    FIX: er wordt nu een APARTE bundle over ALLE gespeelde ontmoetingen
+    meegegeven (`full_bundle`, zie _scout_team_all_fixtures()); valt terug
+    op de oorspronkelijke bundle als die niet beschikbaar is.
+    """
+    source = full_bundle if (full_bundle or {}).get("previous_fixtures") else bundle
+    previous_fixtures = (source or {}).get("previous_fixtures") or []
     boards_met_positie = [
         b for fx in previous_fixtures for b in (fx.get("boards") or [])
         if b.get("board_position") is not None and len(b.get("opponent_pair") or []) == 2
@@ -662,17 +674,24 @@ def _render_match1_frequency_opponent(bundle: dict) -> None:
                 tellingen[uid]["match1"] += 1
             else:
                 tellingen[uid]["match2"] += 1
+    n_fixtures = len(previous_fixtures)
+    n_boards = len(boards_met_positie)
     with st.expander(
-        f"📊 Tegenstander — match 1 / match 2-frequentie per rotatie (over {len(previous_fixtures)} eerdere ontmoeting(en))",
+        f"\U0001F4CA Tegenstander \u2014 match 1 / match 2-frequentie per rotatie "
+        f"(over {n_fixtures} ontmoeting(en), {n_boards} dubbel(s))",
         expanded=False,
     ):
         st.caption(
             "Hoe vaak elke tegenstander-speler de EERSTE match van een rotatie speelde (Match 1, "
-            "Match 3, ...) versus de TWEEDE match van een rotatie (Match 2, Match 4, ...), in hun "
-            "eerdere, gekende wedstrijden dit seizoen. Puur beschrijvend — geen voorspelling."
+            "Match 3, ...) versus de TWEEDE match van een rotatie (Match 2, Match 4, ...), over "
+            "ALLE gekende, al gespeelde ontmoetingen van deze ploeg dit seizoen. Puur "
+            "beschrijvend \u2014 geen voorspelling."
         )
-        if len(previous_fixtures) <= 1:
-            st.caption("⚠️ Slechts 1 eerdere ontmoeting gekend — gebaseerd op één enkel datapunt.")
+        if n_fixtures <= 1:
+            st.caption(
+                "\u26A0\uFE0F Slechts 1 ontmoeting gekend \u2014 gebaseerd op \u00e9\u00e9n enkel datapunt. Meer "
+                "ontmoetingen verschijnen hier automatisch zodra deze ploeg er gespeeld heeft."
+            )
         rows = []
         for uid, counts in sorted(tellingen.items(), key=lambda kv: -kv[1]["match1"]):
             totaal = counts["match1"] + counts["match2"]
@@ -682,8 +701,11 @@ def _render_match1_frequency_opponent(bundle: dict) -> None:
                 "Speler": namen.get(uid, uid),
                 "Match 1 (of 3, 5, ...)": f"{counts['match1']}x ({int(pct1)}%)",
                 "Match 2 (of 4, 6, ...)": f"{counts['match2']}x ({int(pct2)}%)",
+                "Totaal dubbels": totaal,
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
 def _most_recent_opponent_player_ids(bundle: dict) -> set:
     previous_fixtures = bundle.get("previous_fixtures") or []
     if not previous_fixtures:
@@ -2128,8 +2150,24 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "EFFECTIEF al eens speelde dit seizoen.\n\n"
             + _WIN_PROB_DISCLAIMER
         )
+    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
+    own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
+
+    # Aparte bundle over ALLE gespeelde ontmoetingen van de tegenploeg, enkel
+    # voor de match1/match2-statistiek (de gewone bundle bevat er maar 1).
+    try:
+        opp_team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id) if fixtures else []
+        next_match = ss.get_next_match(opp_team_fixtures) if opp_team_fixtures else None
+        before_date = (next_match or {}).get("date_text") or ""
+    except Exception:
+        before_date = ""
+    full_opp_bundle = _scout_team_all_fixtures(
+        fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,
+    ) if fixtures else {}
+
     _render_previous_opponent_lineup(bundle)
-    _render_match1_frequency_opponent(bundle)
+    _render_match1_frequency_opponent(bundle, full_bundle=full_opp_bundle)
+
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
     own_labels = [_display_name(p) for p in own_candidates]
     own_label_to_id = {
@@ -2137,13 +2175,11 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         for p in own_candidates if p.get("player_id") is not None
     }
 
-    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
-    own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
-    roster = _recent_own_lineup_roster(sel_player_id, fixtures, own_ploeg_id)
+    roster = _recent_own_lineup_roster(fixtures, own_ploeg_id)
 
     # Teamgenoten die in het uitslagenblad staan maar nog geen eigen profiel
-    # hebben, worden hier expliciet toegevoegd i.p.v. stilzwijgend weggefilterd
-    # - anders mis je ze in de selectie precies wanneer je ze nodig hebt.
+    # hebben, worden expliciet toegevoegd i.p.v. stilzwijgend weggefilterd -
+    # anders mis je ze precies wanneer je ze nodig hebt.
     known_ids = set(own_label_to_id.values())
     for pid, naam in roster.items():
         if pid in known_ids:
@@ -2154,8 +2190,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
 
     col_roster, col_refresh = st.columns([3, 1])
     with col_refresh:
-        if st.button("🔄 Ploeg opnieuw ophalen", key=f"refresh_own_roster_{sel_player_id}"):
-            for key in [k for k in st.session_state if str(k).startswith("own_roster_v2_")]:
+        if st.button("\U0001F504 Ploeg opnieuw ophalen", key=f"refresh_own_roster_{sel_player_id}"):
+            for key in [k for k in list(st.session_state) if str(k).startswith(("own_roster_v2_", "full_scout_v1_"))]:
                 st.session_state.pop(key, None)
             _load_encounter_index.clear()
             st.rerun()
@@ -2175,16 +2211,16 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             )
         if len(default_labels) < 4:
             st.warning(
-                f"⚠️ Slechts {len(default_labels)} speler(s) gevonden in het uitslagenblad van "
-                "onze vorige ontmoeting. Dat wijst op een onvolledig geparseerd uitslagenblad "
-                "of een effectief kleinere ploeg die dag. Vul de selectie hieronder handmatig aan."
+                f"\u26A0\uFE0F Slechts {len(default_labels)} speler(s) gevonden in het uitslagenblad van "
+                "onze vorige ontmoeting. Dat wijst op een onvolledig geparseerd uitslagenblad of "
+                "een effectief kleinere ploeg die dag. Vul de selectie hieronder handmatig aan."
             )
     else:
         default_labels = own_labels[: min(8, len(own_labels))]
         with col_roster:
             st.caption(
-                "⚠️ Onze vorige ontmoeting kon niet opgehaald worden (nog geen poule-schema "
-                "geladen, of geen gespeelde wedstrijd gevonden). Selecteer de spelers hieronder zelf."
+                "\u26A0\uFE0F Onze vorige ontmoeting kon niet opgehaald worden (nog geen poule-schema "
+                "geladen, of nog geen gespeelde wedstrijd). Selecteer de spelers hieronder zelf."
             )
 
     available_labels = st.multiselect(
