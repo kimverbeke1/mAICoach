@@ -1,3 +1,4 @@
+
 """
 page_lineup_lab.py — "🧩 Opstelling-analyse"-pagina (Volgende match,
 Opstelling-scenario's, Rotatieplanner, Opgeslagen analyses).
@@ -100,12 +101,9 @@ Tussenstap: kandidaten werden beperkt tot profielen met dezelfde
 de huidige tegenstander-roster. Bleek (zie volgende, DEFINITIEVE fix) OOK
 niet robuust genoeg: het `club`-veld in player_profiles is NIET voor elke
 teamgenoot betrouwbaar ingevuld (enkel bewust toegevoegde/bewerkte
-profielen hebben dit consistent — zie PadelAnalysis_Stappenplan.docx,
-Fase 1.1, waar exact hetzelfde patroon ("X ontbreekt bij sommige
-matchrecords → groepering faalt") al eerder werd vastgesteld voor
-partner_user_id). Met een onvolledig ingevuld club-veld filterde de
-club-check bijna alle échte teamgenoten weg — vandaar Kim's melding "nu
-maar 1 ploeggenoot, geen 4".
+profielen hebben dit consistent). Met een onvolledig ingevuld club-veld
+filterde de club-check bijna alle échte teamgenoten weg — vandaar Kim's
+melding "nu maar 1 ploeggenoot, geen 4".
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SHARED_OPPONENT_TEAMMATE_MATCH_FIX_2026-09-21 (op verzoek
 van Kim, chat 2026-09-21: "in de laatste versie vind je nu maar 1
@@ -115,32 +113,59 @@ ROOT CAUSE (bevestigd): ELKE eerdere poging matchte teamgenoten via een
 veld dat NIET betrouwbaar voor alle 4 teamgenoten is ingevuld:
 (match_date, encounter)-tekst → verschilt subtiel per apart gescrapete
 speler; kalenderdatum alleen → discrimineert niet tussen teams;
-`club`-veld → notoir onvolledig ingevuld (zelfde bekende patroon als
-partner_user_id, zie hierboven). Elke fix loste het ene probleem op door
-een ANDER, even fragiel mechanisme te introduceren.
+`club`-veld → notoir onvolledig ingevuld.
 FIX (definitief): _recent_own_lineup_player_ids() matcht teamgenoten nu op
 GEDEELDE TEGENSTANDER-IDENTITEIT op dezelfde kalenderdatum — een veld dat
 WEL bij elke individuele match aanwezig is (opp1_user_id/opp2_user_id EN,
-als extra redundantie, opp1_name/opp2_name, want dit zijn de daadwerkelijke
-tegenstander(s) die de scraper voor DIE SPECIFIEKE match noteerde, dus
-nooit "leeg" zoals partner_user_id of club dat kunnen zijn):
-  1. Bepaal sel_player_id's meest recente interclub-matchdatum (zoals
-     voorheen), én verzamel sel_player_id's EIGEN tegenstander-identiteit
-     voor die datum (opp1_user_id/opp2_user_id, met opp1_name/opp2_name als
-     redundante fallback via _clean_name() voor het geval een ID ontbreekt).
+als extra redundantie, opp1_name/opp2_name):
+  1. Bepaal sel_player_id's meest recente interclub-matchdatum, én
+     verzamel sel_player_id's EIGEN tegenstander-identiteit voor die datum.
   2. Een kandidaat-profiel hoort bij ONS team op die datum als en slechts
      als het, in zijn/haar EIGEN match op DIEZELFDE datum, minstens 1
      tegenstander-ID (of -naam) DEELT met sel_player_id's tegenstander-set.
-     Dit werkt omdat een interclub-ontmoeting altijd 1 team tegen 1 ander
-     team is: al onze teamgenoten spelen op die datum tegen spelers van
-     DEZELFDE tegenstander-ploeg, terwijl een ANDER team (met toevallig
-     dezelfde speeldag) een VOLLEDIG ANDERE tegenstander-set heeft — dus
-     GEEN overlap.
 Dit vereist GEEN club-veld en GEEN partner_user_id — enkel de
 opponent-velden die de scraper per match altijd meeneemt. `exclude_ids`
 (huidige tegenstander-roster) blijft bestaan als extra, expliciete
-garantie, maar is met deze fix strikt genomen al overbodig (een
-tegenstander deelt per definitie GEEN tegenstander-ID's met zichzelf).
+garantie, maar is met deze fix strikt genomen al overbodig.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21 (op verzoek van Kim:
+"ik merk nog een probleem in de opstellingen. bij de ploeg van Anneleen
+Gallant stel je anneleen op in de 1ste rotatie terwijl zij P100 is en
+andere ploeggenoten P200" — en later bevestigd dat de eerdere fix van dit
+exacte probleem, PADEL_ANALYSIS_MISSING_RANK_ORDER_FIX_2026-09-19, NOOIT in
+dit bestand was aangekomen)
+--------------------------------------------------------------------------
+ROOT CAUSE (preciezer dan de 2026-09-19-fix begreep): _rotation_order_
+variants() berekende `rank_data_incomplete` WEL correct via
+_rotation_has_missing_official_rank(), en toonde dus terecht een "❓
+onzeker"-label zodra 1 van de 4 spelers een onbekend officieel klassement
+had. MAAR: de eigenlijke VOLGORDE (compliant_first/compliant_second) werd
+ONGEWIJZIGD nog steeds berekend via _rank_pairs_with_padelstat_tiebreak()
+-> _pair_official_sum(), die een ontbrekend klassement nog altijd
+stilzwijgend als 0 telt. Als bv. 1 van de 2 P200-speelsters in het ANDERE
+duo een tijdelijk ontbrekend officieel klassement had, werd DAT duo's som
+ten onrechte (200+0=200) LAGER berekend dan Anneleen's duo (100+200=300) —
+en Anneleen's (zwakkere) duo werd NOG STEEDS als "eerste" (rotatie 1)
+variant gepresenteerd, enkel met een klein "❓ onzeker"-label erbij dat
+makkelijk over het hoofd te zien is.
+FIX: wanneer rank_data_incomplete=True, wordt de rotatie nu — net zoals bij
+een ECHT gelijkspel — behandeld als "beide volgordes mogelijk, geen van
+beide bevestigd": _rotation_order_variants() genereert dan BEIDE
+volgordes (huidige en omgekeerde), ELK met is_regulation_compliant=None en
+een duidelijk "❓ onzeker, ONVOLLEDIGE data"-label. Zo verschijnt Anneleen's
+duo NOOIT meer als de enige, ogenschijnlijk-bevestigde "eerste" optie
+zodra data ontbreekt.
+Bijkomend, 2 gerelateerde gaten gedicht in dezelfde sessie:
+  - _render_rotation_points_caption() (Rotatieplanner) toonde voorheen enkel
+    ✅/❌, nooit een ❓ — zelfs als lineup_lab.py's evaluate_rotation() een
+    "rank_data_incomplete"-vlag teruggaf. Nu expliciet gecontroleerd en
+    getoond.
+  - De Sandbox se reglement-check (_render_lineup_sandbox()) gebruikte
+    _pair_official_sum() (die NOOIT None teruggeeft, enkel 0 bij een
+    ontbrekend klassement) en controleerde vervolgens "if s1 is None or s2
+    is None" — een check die dus NOOIT kon afgaan (dode code). Nu gebruikt
+    de sandbox _pair_official_sum_safe() om de completeness apart bij te
+    houden, zodat de "❓ onbekend"-waarschuwing daadwerkelijk verschijnt.
 """
 import itertools
 import streamlit as st
@@ -160,8 +185,6 @@ try:
     import tournament_rules as tr
 except Exception:  # noqa: BLE001  pragma: no cover
     tr = None
-
-
 # ─────────────────────────────────────────────
 # Volgende match + scout-header
 # ─────────────────────────────────────────────
@@ -170,8 +193,6 @@ def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
-
-
 def _render_manual_url_fallback(sel_player_id, sel_label, key_prefix, expanded=True):
     if manual_poule_input is not None:
         manual_poule_input.render(
@@ -192,8 +213,6 @@ def _render_manual_url_fallback(sel_player_id, sel_label, key_prefix, expanded=T
         _save_poule_url(sel_player_id, u)
         st.session_state[load_key] = True
         st.rerun()
-
-
 def _render_schema_refresh_button(sel_player_id: str) -> None:
     if is_scraping_available():
         return
@@ -207,8 +226,6 @@ def _render_schema_refresh_button(sel_player_id: str) -> None:
             key_prefix=f"vm_schema_{sel_player_id}", player_ids=str(sel_player_id),
             mode="missing", label="🔄 Schema nu verversen",
         )
-
-
 def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches):
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
@@ -236,8 +253,6 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches):
                 st.rerun()
         return None
     return own_ploeg_id
-
-
 def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
     override_url_key = f"manual_reeks_url_{sel_player_id}"
@@ -329,8 +344,6 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nofix")
         return None
     return _finish(fixtures, reeks_url)
-
-
 def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list, exclude_ids: set = None) -> set:
     """PADEL_ANALYSIS_SHARED_OPPONENT_TEAMMATE_MATCH_FIX_2026-09-21: zie
     module-docstring voor de volledige toelichting/geschiedenis.
@@ -407,8 +420,6 @@ def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list, exclude_id
         return player_ids - exclude_ids
     except Exception:
         return set()
-
-
 def _opponent_padelstat_ratings(bundle: dict) -> dict:
     """SIMULATIE-schaal (padelstat) voor tegenstander-spelers."""
     out = {}
@@ -423,8 +434,6 @@ def _opponent_padelstat_ratings(bundle: dict) -> dict:
         if rating is not None:
             out[str(uid)] = rating
     return out
-
-
 def _opponent_official_ranks(player_ids: list) -> dict:
     """REGLEMENT-schaal (uitsluitend officieel klassement) voor tegenstander-
     spelers. Geen padelstat-fallback."""
@@ -437,8 +446,6 @@ def _opponent_official_ranks(player_ids: list) -> dict:
         if rank is not None:
             out[str(pid)] = rank
     return out
-
-
 def _build_own_official_ranks_strict(available_ids: list) -> dict:
     """PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17: bouwt
     het REGLEMENT-dict voor ONZE spelers, UITSLUITEND op basis van het echte
@@ -452,8 +459,6 @@ def _build_own_official_ranks_strict(available_ids: list) -> dict:
         if rank is not None:
             out[pid] = rank
     return out
-
-
 def _render_official_rank_warning(available_ids: list, official_ranks_strict: dict, name_lookup: dict) -> None:
     """Toont EXPLICIET welke spelers geen gekend officieel klassement hebben."""
     missing = ll.has_missing_official_rank(available_ids, official_ranks_strict)
@@ -466,8 +471,6 @@ def _render_official_rank_warning(available_ids: list, official_ranks_strict: di
             "meegeteld, wat de uitkomst kan vertekenen. Ververs het klassement van deze speler(s) "
             "voor een betrouwbaar resultaat."
         )
-
-
 def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
     """Behouden voor eventueel toekomstig gebruik."""
     if rules is None or not diagnostics:
@@ -484,8 +487,6 @@ def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
         f"puntengrens per rotatie (**{lo}–{hi}**). De berekende punten per rotatie voor deze "
         f"spelers/dit scenario lagen tussen **{pmin:.0f}** en **{pmax:.0f}**."
     )
-
-
 # ─────────────────────────────────────────────
 # Reglement-selector
 # ─────────────────────────────────────────────
@@ -498,8 +499,6 @@ def _load_saved_rules_selection(sel_player_id: str, ploeg_id: str) -> dict:
     if str(ploeg_id) in by_team:
         return by_team.get(str(ploeg_id)) or {}
     return profile.get("lineup_rules_selection") or {}
-
-
 def _save_rules_selection(sel_player_id: str, ploeg_id: str, tournament: str, category: str, afdeling) -> None:
     try:
         fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(sel_player_id)).set(
@@ -510,8 +509,6 @@ def _save_rules_selection(sel_player_id: str, ploeg_id: str, tournament: str, ca
         )
     except Exception:
         pass
-
-
 def _render_tournament_rules_selector(ploeg_id: str, sel_player_id: str, available_official_ranks: list = None):
     if tr is None:
         st.caption("⚠️ tournament_rules.py niet gevonden — reglement-gebaseerde puntenfilter niet beschikbaar.")
@@ -574,8 +571,6 @@ def _render_tournament_rules_selector(ploeg_id: str, sel_player_id: str, availab
         if saved.get("tournament") != tournament or saved.get("category") != category or saved.get("afdeling") != afdeling:
             _save_rules_selection(sel_player_id, ploeg_id, tournament, category, afdeling)
         return rules, f"{tournament} — {category}, afdeling {afdeling}"
-
-
 # ─────────────────────────────────────────────
 # Tegenstander-referentie
 # ─────────────────────────────────────────────
@@ -615,8 +610,6 @@ def _render_previous_opponent_lineup(bundle: dict) -> None:
                 st.dataframe(rows, use_container_width=True, hide_index=True)
         if not toonde_iets:
             st.info("Geen match-detail beschikbaar voor de gekende eerdere ontmoeting(en).")
-
-
 def _render_match1_frequency_opponent(bundle: dict) -> None:
     previous_fixtures = bundle.get("previous_fixtures") or []
     boards_met_positie = [
@@ -661,8 +654,6 @@ def _render_match1_frequency_opponent(bundle: dict) -> None:
                 "Match 2 (of 4, 6, ...)": f"{counts['match2']}x ({int(pct2)}%)",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
-
-
 def _most_recent_opponent_player_ids(bundle: dict) -> set:
     previous_fixtures = bundle.get("previous_fixtures") or []
     if not previous_fixtures:
@@ -676,8 +667,6 @@ def _most_recent_opponent_player_ids(bundle: dict) -> set:
             if uid:
                 ids.add(str(uid))
     return ids
-
-
 # ─────────────────────────────────────────────
 # Rotatieplanner - combinatoriek (1 rotatie tegelijk, ONGEWIJZIGD)
 # ─────────────────────────────────────────────
@@ -690,11 +679,7 @@ def _count_perfect_matchings(n: int) -> int:
         result *= k
         k -= 2
     return result
-
-
 _ROTATION_EXHAUSTIVE_LIMIT = 400
-
-
 def _generate_rotation_candidates(
     available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
@@ -753,8 +738,6 @@ def _generate_rotation_candidates(
         }
     results.sort(key=lambda r: (-(r["expected_boards_won"] if r["expected_boards_won"] is not None else -1), -r["score"]))
     return results[:max_results], total_possible, diagnostics
-
-
 def _lineup_options_for_ai(candidates: list, name_lookup: dict) -> list:
     out = []
     for cand in candidates:
@@ -771,25 +754,28 @@ def _lineup_options_for_ai(candidates: list, name_lookup: dict) -> list:
                 assignment.append({"our_pair": (p1, p2), "synergy": 0.0, "edge": 0.0, "opponent_board": {"opponent_pair": []}})
         out.append({"total_score": cand["score"], "assignment": assignment})
     return out
-
-
 def _render_rotation_points_caption(rotations: list) -> None:
     if not rotations:
         return
     for i, rot in enumerate(rotations, start=1):
         if rot.get("total_points") is None:
             continue
+        # PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21: de
+        # Rotatieplanner gebruikt lineup_lab.py's evaluate_rotation(), die een
+        # "rank_data_incomplete"-vlag kan teruggeven — dit moet HIER expliciet
+        # als ❓ getoond worden, niet stilzwijgend als ✅/❌ behandeld worden,
+        # exact dezelfde reden als bij de Opstelling-scenario's-tabel
+        # (Anneleen-bug).
+        if rot.get("rank_data_incomplete"):
+            st.caption(f"❓ Rotatie {i}: {rot.get('reason', '')} — ⚠️ minstens 1 speler heeft nog geen bekend officieel klassement, deze volgorde is NIET betrouwbaar geverifieerd.")
+            continue
         icon = "✅" if rot.get("valid", True) else "❌"
         st.caption(f"{icon} Rotatie {i}: {rot.get('reason', '')}")
-
-
 _WIN_PROB_DISCLAIMER = (
     "⚠️ De winkans-schatting is een RUWE HEURISTIEK (een logistische functie op het "
     "ratingverschil), GEEN gevalideerd of empirisch getoetst voorspellingsmodel — gebruik dit als "
     "richtinggevend signaal, niet als harde garantie."
 )
-
-
 def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) -> None:
     for a in assignment:
         p1, p2 = a["our_pair"]
@@ -810,8 +796,6 @@ def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) 
             f"**{name_lookup_global.get(p1,p1)} / {name_lookup_global.get(p2,p2)}** "
             f"(synergie {a['synergy']}) — vs **{opp_names}**: {wp_txt}{rating_txt}"
         )
-
-
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
@@ -904,8 +888,6 @@ def _render_rotation_planner(
     if st.button(f"✅ Bevestig rotatie {next_rotation_num}", key=f"rot_confirm_v3_{ploeg_id}_{next_rotation_num}", type="primary"):
         st.session_state[locked_key] = locked_rotations + [chosen["ordered_pairs"]]
         st.rerun()
-
-
 # ─────────────────────────────────────────────
 # Rotatie-bewuste enumeratie
 # ─────────────────────────────────────────────
@@ -921,8 +903,6 @@ def _all_perfect_matchings_generic(seq: list) -> list:
         for sub in _all_perfect_matchings_generic(remaining):
             out.append([frozenset({first, partner})] + sub)
     return out
-
-
 def _enumerate_rotation_aware_pairings(
     player_ids: list, required_counts: dict, call_budget: int = 300_000,
 ) -> tuple:
@@ -978,8 +958,6 @@ def _enumerate_rotation_aware_pairings(
                     return
     backtrack(0, dict(required_counts), set(), [])
     return results, truncated[0]
-
-
 def _default_opponent_max_per_player(chosen_opp_ids: list, needed_slots: int) -> dict:
     n = len(chosen_opp_ids)
     if n == 0:
@@ -987,26 +965,18 @@ def _default_opponent_max_per_player(chosen_opp_ids: list, needed_slots: int) ->
     base = needed_slots // n
     extra = needed_slots % n
     return {pid: base + (1 if i < extra else 0) for i, pid in enumerate(chosen_opp_ids)}
-
-
 # ─────────────────────────────────────────────
 # Bordvolgorde: officiële regel + padelstat-tie-breaker
 # ─────────────────────────────────────────────
 def _pair_official_sum(pair, official_ranks: dict) -> float:
     return sum((official_ranks.get(pid) or 0) for pid in pair)
-
-
 def _pair_official_sum_safe(pair, official_ranks: dict) -> tuple:
     known = [official_ranks.get(pid) for pid in pair]
     is_compleet = all(v is not None for v in known)
     total = sum((v or 0) for v in known)
     return total, is_compleet
-
-
 def _pair_padelstat_sum(pair, padelstat_ratings: dict) -> float:
     return sum((padelstat_ratings.get(pid) or 0) for pid in pair)
-
-
 def _rank_pairs_with_padelstat_tiebreak(
     pairs: list, official_ranks: dict, padelstat_ratings: dict,
 ) -> list:
@@ -1015,14 +985,10 @@ def _rank_pairs_with_padelstat_tiebreak(
         padelstat_sum = _pair_padelstat_sum(pair, padelstat_ratings)
         return (official_sum, padelstat_sum)
     return sorted(pairs, key=sort_key, reverse=True)
-
-
 def _rotation_has_missing_official_rank(duo_a, duo_b, official_ranks: dict) -> bool:
     _, complete_a = _pair_official_sum_safe(duo_a, official_ranks)
     _, complete_b = _pair_official_sum_safe(duo_b, official_ranks)
     return not (complete_a and complete_b)
-
-
 def _order_rotations_with_tiebreak(
     rotation_structure: list, official_ranks: dict, padelstat_ratings: dict, rules=None,
 ) -> dict:
@@ -1051,8 +1017,6 @@ def _order_rotations_with_tiebreak(
         if not valid:
             all_valid = False
     return {"ordered_pairs": ordered_pairs, "rotations": rotation_results, "all_valid": all_valid}
-
-
 def _build_opponent_boards_and_points(
     rotation_structure: list, name_by_id: dict, rank_by_id: dict, padelstat_by_id: dict,
 ) -> list:
@@ -1067,8 +1031,6 @@ def _build_opponent_boards_and_points(
              "ranking": (f"P{int(rank_by_id[p2])}" if rank_by_id.get(p2) is not None else None)},
         ]})
     return boards
-
-
 def _generate_theoretical_opponent_boards_with_repeats(
     chosen_opp_players: list, opponent_max_per_player: dict, opponent_official_ranks: dict,
     opponent_padelstat_ratings: dict, max_variants: int,
@@ -1087,8 +1049,6 @@ def _generate_theoretical_opponent_boards_with_repeats(
         "players_used": len(ids),
     }
     return all_boards, meta
-
-
 def _historical_opponent_boards_list(bundle: dict) -> list:
     out = []
     for fx_bundle in bundle.get("previous_fixtures", []) or []:
@@ -1100,8 +1060,6 @@ def _historical_opponent_boards_list(bundle: dict) -> list:
         label = fx.get("date_text") or "onbekende datum"
         out.append((label, sorted_boards))
     return out
-
-
 def _opponent_lineup_key(boards: list):
     pairs = []
     for b in boards:
@@ -1111,8 +1069,6 @@ def _opponent_lineup_key(boards: list):
     if not pairs:
         return None
     return tuple(pairs)
-
-
 def _collect_unique_opponent_lineups(historical_boards_with_labels: list, theoretical_boards: list) -> dict:
     unique: dict = {}
     for label, boards in historical_boards_with_labels:
@@ -1129,18 +1085,36 @@ def _collect_unique_opponent_lineups(historical_boards_with_labels: list, theore
         if key not in unique:
             unique[key] = {"boards": boards, "is_historical": False, "historical_labels": []}
     return unique
-
-
 # ─────────────────────────────────────────────
 # Best/worst-case variant-enumeratie
 # ─────────────────────────────────────────────
 def _rotation_order_variants(
     duo_a, duo_b, official_ranks: dict, padelstat_ratings: dict, rules=None,
 ) -> dict:
-    sum_a = _pair_official_sum(duo_a, official_ranks)
-    sum_b = _pair_official_sum(duo_b, official_ranks)
+    """PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21 (op verzoek van
+    Kim: "bij de ploeg van Anneleen Gallant stel je anneleen op in de 1ste
+    rotatie terwijl zij P100 is en andere ploeggenoten P200"):
+    ROOT CAUSE (vervolg op de 2026-09-19-fix): de vorige versie berekende
+    `rank_data_incomplete` wel correct, maar liet de VOLGORDE zelf
+    (compliant_first/compliant_second) nog steeds bepalen door
+    _rank_pairs_with_padelstat_tiebreak() -> _pair_official_sum(), die een
+    ontbrekend klassement nog steeds als 0 telt. Zo kon een duo met een
+    TIJDELIJK ontbrekend klassement bij een teamgenoot ten onrechte als
+    "zwakker" (0-fallback) berekend worden, waardoor het ANDERE (in
+    werkelijkheid zwakkere) duo alsnog als "eerste, sterkste" variant
+    gepresenteerd werd - enkel met een klein "❓ onzeker"-label erbij, wat
+    licht over het hoofd te zien is.
+    FIX: is rank_data_incomplete=True, dan behandelen we deze rotatie nu
+    EXACT zoals een echt gelijkspel: BEIDE volgordes worden gegenereerd,
+    ELK met is_regulation_compliant=None (geen van beide is bevestigd) en
+    een expliciet "❓ onzeker — ONVOLLEDIGE data"-label. Zo verschijnt de
+    mogelijk-verkeerde volgorde NOOIT meer als de enige, schijnbaar
+    bevestigde default-optie: beide opties staan naast elkaar, duidelijk
+    als onbevestigd gelabeld, tot het klassement ververst is."""
+    sum_a, complete_a = _pair_official_sum_safe(duo_a, official_ranks)
+    sum_b, complete_b = _pair_official_sum_safe(duo_b, official_ranks)
     total_points = sum_a + sum_b
-    rank_data_incomplete = _rotation_has_missing_official_rank(duo_a, duo_b, official_ranks)
+    rank_data_incomplete = not (complete_a and complete_b)
     valid, reason = True, f"{total_points:.0f} punten (geen reglement-check actief)"
     if rules is not None:
         lo, hi = rules["punten_min"], rules["punten_max"]
@@ -1150,30 +1124,52 @@ def _rotation_order_variants(
             valid, reason = False, f"{total_points:.0f} > max {hi}"
         else:
             valid, reason = True, f"{total_points:.0f} punten (toegelaten: {lo}-{hi})"
-    is_tie = (sum_a == sum_b)
     ranked = _rank_pairs_with_padelstat_tiebreak([duo_a, duo_b], official_ranks, padelstat_ratings)
-    compliant_first, compliant_second = ranked[0], ranked[1]
-    sum_first = _pair_official_sum(compliant_first, official_ranks)
-    sum_second = _pair_official_sum(compliant_second, official_ranks)
-    punten_txt = f"officieel {sum_first:.0f} vs {sum_second:.0f} punten"
+    first_guess, second_guess = ranked[0], ranked[1]
+    punten_txt = f"officieel {sum_a:.0f} vs {sum_b:.0f} punten"
     if rank_data_incomplete:
-        punten_txt += " — ⚠️ gebaseerd op een ONVOLLEDIG officieel klassement (min. 1 speler ontbreekt, geteld als 0)"
+        # PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21: BEIDE
+        # volgordes zijn hier onbevestigd - geen enkele mag als "eerste,
+        # bevestigde" keuze getoond worden.
+        onvolledig_txt = (
+            f"{punten_txt} — ❓ ONVOLLEDIG officieel klassement (min. 1 speler ontbreekt): "
+            "welk duo écht sterkst is, kan NIET betrouwbaar bepaald worden"
+        )
+        variants = [
+            {
+                "ordered_pairs": [first_guess, second_guess],
+                "is_regulation_compliant": None,
+                "rank_data_incomplete": True,
+                "swap_label": onvolledig_txt + " — vermoedelijke volgorde o.b.v. padelstat, NIET bevestigd",
+                "total_points": total_points, "valid": valid, "reason": reason,
+            },
+            {
+                "ordered_pairs": [second_guess, first_guess],
+                "is_regulation_compliant": None,
+                "rank_data_incomplete": True,
+                "swap_label": onvolledig_txt + " — omgekeerde volgorde, EVENZEER niet bevestigd",
+                "total_points": total_points, "valid": valid, "reason": reason,
+            },
+        ]
+        return {"variants": variants}
+    is_tie = (sum_a == sum_b)
+    compliant_first, compliant_second = first_guess, second_guess
     first_label = (
         f"gelijke officiële sterkte ({punten_txt}) — aanbevolen o.b.v. padelstat" if is_tie
         else f"{punten_txt} — sterkste eerst (art. 6.6)"
     )
     variants = [{
         "ordered_pairs": [compliant_first, compliant_second],
-        "is_regulation_compliant": True if not rank_data_incomplete else None,
-        "rank_data_incomplete": rank_data_incomplete,
+        "is_regulation_compliant": True,
+        "rank_data_incomplete": False,
         "swap_label": first_label,
         "total_points": total_points, "valid": valid, "reason": reason,
     }]
     if is_tie:
         variants.append({
             "ordered_pairs": [compliant_second, compliant_first],
-            "is_regulation_compliant": True if not rank_data_incomplete else None,
-            "rank_data_incomplete": rank_data_incomplete,
+            "is_regulation_compliant": True,
+            "rank_data_incomplete": False,
             "swap_label": f"gelijke officiële sterkte ({punten_txt}) — alternatieve, even geldige keuze",
             "total_points": total_points, "valid": valid, "reason": reason,
         })
@@ -1181,7 +1177,7 @@ def _rotation_order_variants(
         variants.append({
             "ordered_pairs": [compliant_second, compliant_first],
             "is_regulation_compliant": False,
-            "rank_data_incomplete": rank_data_incomplete,
+            "rank_data_incomplete": False,
             "swap_label": (
                 f"⚠️ NIET reglementair ({punten_txt}, omgedraaid): het sterkere duo moet "
                 "normaliter eerst spelen (art. 6.6)"
@@ -1189,8 +1185,6 @@ def _rotation_order_variants(
             "total_points": total_points, "valid": valid, "reason": reason,
         })
     return {"variants": variants}
-
-
 def _enumerate_own_variant_combinations(
     rotation_structure: list, official_ranks: dict, padelstat_ratings: dict,
     rules=None, include_non_compliant: bool = False,
@@ -1201,12 +1195,17 @@ def _enumerate_own_variant_combinations(
             per_rotation_variant_lists.append([{
                 "ordered_pairs": list(rotation), "is_regulation_compliant": True,
                 "swap_label": "", "total_points": None, "valid": True, "reason": "onvolledige rotatie",
+                "rank_data_incomplete": False,
             }])
             continue
         duo_a, duo_b = rotation[0], rotation[1]
         result = _rotation_order_variants(duo_a, duo_b, official_ranks, padelstat_ratings, rules=rules)
         variants = result["variants"]
         if not include_non_compliant:
+            # PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21: bij
+            # ontbrekende rankdata zijn NU beide varianten is_regulation_
+            # compliant=None — "None is not False" dus deze blijven ALTIJD
+            # zichtbaar in de standaardweergave, precies zoals bij een tie.
             variants = [v for v in variants if v["is_regulation_compliant"] is not False]
         per_rotation_variant_lists.append(variants)
     combinations = []
@@ -1233,8 +1232,6 @@ def _enumerate_own_variant_combinations(
             "rank_data_incomplete": any_rank_data_incomplete,
         })
     return combinations
-
-
 def _compute_matchup(
     own_ordered_pairs: list, opp_boards: list,
     synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
@@ -1283,13 +1280,9 @@ def _compute_matchup(
         "expected_boards_won": round(expected_boards_won, 2),
         "total_score": round(total_score, 3),
     }
-
-
 _MATCHUP_DISPLAY_DEFAULT_N = 15
 _MAX_TOTAL_MATCHUPS = 800
 _THEORETICAL_MAX_VARIANTS = 300
-
-
 def _build_all_valid_matchups(
     unique_opponent_lineups: dict,
     available_ids: list, max_per_player: dict,
@@ -1361,17 +1354,11 @@ def _build_all_valid_matchups(
         "own_valid": len(valid_own_options),
     }
     return all_matchups, truncated, total_seen, diagnostics
-
-
 def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
-
-
 _TABLE_CHAR_WIDTH_PX = 6.6
 _TABLE_COL_MIN_WIDTH = 90
 _TABLE_COL_MAX_WIDTH = 240
-
-
 def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
     max_len = 0
     for v in values:
@@ -1380,18 +1367,12 @@ def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, 
         max_len = max(max_len, len(str(v)))
     width = int(max_len * _TABLE_CHAR_WIDTH_PX) + 24
     return max(min_width, min(max_width, width))
-
-
 def _compliance_badge(fully_compliant: bool, rank_data_incomplete: bool = False) -> str:
     if rank_data_incomplete:
         return "❓ onzeker"
     return "✅" if fully_compliant else "⚠️ NIET"
-
-
 def _own_lineup_group_key(assignment: list) -> frozenset:
     return frozenset(frozenset(a["our_pair"]) for a in assignment)
-
-
 def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
     rows = []
     board_column_names: list = []
@@ -1426,8 +1407,6 @@ def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
         row["Vorige keer"] = ("🟢 " + ", ".join(m["historical_labels"])) if m["is_historical"] else ""
         rows.append(row)
     return rows, board_column_names
-
-
 def _matchup_table_column_config(table_rows: list, board_column_names: list) -> tuple:
     column_config = {
         "#": st.column_config.NumberColumn("#", width="small"),
@@ -1452,8 +1431,6 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         column_order += [f"{col_base} — Ons duo", f"{col_base} — Tegenstander", f"{col_base} %"]
     column_order += ["Toelichting", "Vorige keer"]
     return column_config, column_order
-
-
 def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_global: dict) -> None:
     if not all_matchups:
         return
@@ -1504,8 +1481,6 @@ def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_glo
                 column_config=column_config, column_order=column_order,
             )
     st.divider()
-
-
 def _render_all_valid_matchups(
     bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
@@ -1796,8 +1771,6 @@ def _render_all_valid_matchups(
         doc_id = fb.save_lineup_analysis(sel_player_id, payload)
         st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
     return all_matchups
-
-
 def _recent_own_lineup_boards(sel_player_id: str, profiles: list) -> list:
     try:
         profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
@@ -1820,8 +1793,6 @@ def _recent_own_lineup_boards(sel_player_id: str, profiles: list) -> list:
         return pairs
     except Exception:
         return []
-
-
 def _most_recent_opponent_boards_for_sandbox(bundle: dict) -> list:
     previous_fixtures = bundle.get("previous_fixtures") or []
     if not previous_fixtures:
@@ -1834,8 +1805,6 @@ def _most_recent_opponent_boards_for_sandbox(bundle: dict) -> list:
         if len(pair) == 2:
             pairs.append([p.get("name", "?") for p in pair])
     return pairs
-
-
 def _apply_sandbox_preset(
     ploeg_key: str, n_rotations: int, own_pair_labels: list = None, opp_pair_labels: list = None,
 ) -> None:
@@ -1851,8 +1820,6 @@ def _apply_sandbox_preset(
                 pair = opp_pair_labels[slot: slot + 2] if slot + 2 <= len(opp_pair_labels) else []
                 st.session_state[key] = list(pair)
             slot += 2
-
-
 def _smart_prefill_sandbox_defaults(
     ploeg_key: str, available_ids: list, official_ranks_strict: dict,
     name_lookup_global: dict, n_rotations: int,
@@ -1870,13 +1837,19 @@ def _smart_prefill_sandbox_defaults(
     )
     labels_sorted = [name_lookup_global.get(pid, pid) for pid in ids_sorted]
     _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=labels_sorted)
-
-
 def _render_lineup_sandbox(
     bundle, opp, available_ids, name_lookup_global,
     player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
     profiles=None, sel_player_id=None,
 ) -> None:
+    """PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21: het reglement-
+    check-blok onderaan gebruikte _pair_official_sum() (die NOOIT None
+    teruggeeft, enkel 0 bij een ontbrekend klassement) en controleerde dan
+    "if s1 is None or s2 is None" — een check die dus NOOIT kon afgaan (dode
+    code). Nu wordt de completeness apart bijgehouden via
+    _pair_official_sum_safe(), zodat de "❓ onbekend"-waarschuwing
+    daadwerkelijk verschijnt zodra een speler in de sandbox een ontbrekend
+    officieel klassement heeft."""
     st.markdown('<div class="section-header">🧪 Sandbox: bouw je eigen opstelling</div>', unsafe_allow_html=True)
     st.caption(
         "Stel zelf, rotatie per rotatie en match per match, een opstelling samen: kies wie van ONS team en "
@@ -2040,10 +2013,17 @@ def _render_lineup_sandbox(
                 "'Bereken sandbox' om bij te werken."
             )
     rows = []
+    row_completeness: dict = {}
     for (rot_no, match_no), a in zip(rotation_meta, computed["assignment"]):
         p1, p2 = a["our_pair"]
-        our_sum = _pair_official_sum(frozenset({p1, p2}), official_ranks_strict)
+        # PADEL_ANALYSIS_MISSING_RANK_ORDER_BIAS_FIX_2026-09-21: gebruik de
+        # SAFE-variant (zie docstring van deze functie hierboven) i.p.v.
+        # _pair_official_sum() (altijd 0-fallback, nooit None), waardoor de
+        # onderstaande "if s1 is None or s2 is None"-check voorheen dode
+        # code was.
+        our_sum, our_complete = _pair_official_sum_safe(frozenset({p1, p2}), official_ranks_strict)
         wp = a.get("win_probability")
+        row_completeness[(rot_no, match_no)] = our_complete
         rows.append({
             "Rotatie": rot_no, "Match": match_no,
             "Ons duo": f"{name_lookup_global.get(p1, p1)}+{name_lookup_global.get(p2, p2)}",
@@ -2066,7 +2046,9 @@ def _render_lineup_sandbox(
         rot_rows = [row for row in rows if row["Rotatie"] == r]
         if len(rot_rows) == 2:
             s1, s2 = rot_rows[0]["Officieel (ons)"], rot_rows[1]["Officieel (ons)"]
-            if s1 is None or s2 is None:
+            compleet_1 = row_completeness.get((r, rot_rows[0]["Match"]), True)
+            compleet_2 = row_completeness.get((r, rot_rows[1]["Match"]), True)
+            if not (compleet_1 and compleet_2):
                 st.warning(
                     f"⚠️ Rotatie {r}: officieel klassement onbekend voor minstens 1 speler — de "
                     "reglement-check (art. 6.6) kan hier NIET betrouwbaar uitgevoerd worden."
@@ -2085,8 +2067,6 @@ def _render_lineup_sandbox(
     if total_ebw is not None:
         st.metric("Verwacht totaal aantal gewonnen matchen (deze sandbox-opstelling)", f"{total_ebw:.2f} / {len(own_ordered_pairs)}")
     st.divider()
-
-
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
     st.divider()
     st.markdown('<div class="section-header">🧮 Opstelling-analyse</div>', unsafe_allow_html=True)
@@ -2110,7 +2090,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "van art. 6.6 zijn en dient enkel om het best-case/worst-case-bereik van een koppelkeuze in "
             "te schatten, NOOIT als effectieve wedstrijdopstelling. ❓ onzeker = minstens 1 speler heeft "
             "nog geen bekend officieel klassement, waardoor de volgorde NIET betrouwbaar geverifieerd kon "
-            "worden (ververs eerst het klassement van deze speler(s)).\n"
+            "worden (ververs eerst het klassement van deze speler(s)) — in dit geval worden BEIDE mogelijke "
+            "volgordes getoond, geen van beide als bevestigd.\n"
             "- **Rotatie-veiligheid**: een speler kan nooit in 2 GELIJKTIJDIGE matchen van dezelfde "
             "rotatie staan.\n"
             "- **🟢 Vorige keer**: deze matchup komt overeen met een opstelling die de tegenstander "
@@ -2134,13 +2115,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             _load_encounter_index.clear()
             st.success("Cache geleegd — de pagina herlaadt met een verse groepering.")
             st.rerun()
-    # PADEL_ANALYSIS_SHARED_OPPONENT_TEAMMATE_MATCH_FIX_2026-09-21: de
-    # huidige tegenstander-roster (bundle["unique_players"]) wordt hier nog
-    # steeds expliciet als exclude_ids meegegeven, als extra garantie —
-    # ook al is dat met de nieuwe matching-methode (gedeelde tegenstander-
-    # identiteit) strikt genomen al overbodig (een tegenstander deelt per
-    # definitie geen tegenstander-ID's met zichzelf). Zie module-docstring
-    # voor de volledige toelichting van deze definitieve fix.
     current_opponent_ids = {
         str(p.get("user_id")) for p in (bundle.get("unique_players") or []) if p.get("user_id")
     }
@@ -2151,10 +2125,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         if sel_label_self and sel_label_self not in default_labels:
             default_labels.append(sel_label_self)
         st.caption(f"Standaard vooraf geselecteerd: jullie vorige interclubontmoeting ({len(default_labels)} speler(s)).")
-        # PADEL_ANALYSIS_DATE_ONLY_TEAMMATE_MATCH_FIX_2026-09-21 (op verzoek
-        # van Kim: "hou ook rekening dat het er minimum 4 moeten zijn. dus
-        # 1,2,3 is altijd mis!"): een interclub-doublematch bestaat ALTIJD
-        # uit minstens 2 gelijktijdige borden (4 spelers).
         if len(default_labels) < 4:
             st.warning(
                 f"⚠️ Slechts {len(default_labels)} speler(s) automatisch gevonden voor jullie laatste "
@@ -2241,8 +2211,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
         profiles=profiles, sel_player_id=sel_player_id,
     )
-
-
 def _render_saved_lineup_analyses(name_lookup_global: dict):
     st.markdown('<div class="section-header">💾 Opgeslagen opstelling-analyses</div>', unsafe_allow_html=True)
     st.caption("Analyses die je eerder opsloeg.")
@@ -2279,8 +2247,6 @@ def _render_saved_lineup_analyses(name_lookup_global: dict):
         fb.delete_lineup_analysis(analysis["_doc_id"])
         st.success("Analyse verwijderd.")
         st.rerun()
-
-
 def page_lineup_lab():
     st.header("🧩 Opstelling-analyse")
     profiles = _get_all_profiles()
