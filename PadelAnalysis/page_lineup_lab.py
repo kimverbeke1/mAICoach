@@ -345,81 +345,109 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         return None
     return _finish(fixtures, reeks_url)
 def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list, exclude_ids: set = None) -> set:
-    """PADEL_ANALYSIS_SHARED_OPPONENT_TEAMMATE_MATCH_FIX_2026-09-21: zie
-    module-docstring voor de volledige toelichting/geschiedenis.
-    Bepaalt "wie speelde er in de meest recente interclub-ontmoeting van ons
-    team" via GEDEELDE TEGENSTANDER-IDENTITEIT op dezelfde kalenderdatum —
-    GEEN club-veld, GEEN partner_user_id, GEEN tekstuele matching op vrije
-    velden ("encounter") nodig, want die bleken elk (zie geschiedenis
-    hierboven) niet voor elke teamgenoot betrouwbaar ingevuld.
-    Stap 1: meest recente interclub-matchdatum + sel_player_id's EIGEN
-    tegenstander-identiteit (opp1_user_id/opp2_user_id, met opp1_name/
-    opp2_name als redundante fallback) op die datum.
-    Stap 2: elk ander profiel dat, in zijn/haar EIGEN interclub-match op
-    DIEZELFDE datum, minstens 1 tegenstander deelt met sel_player_id's
-    tegenstander-set, hoort bij ons team — een interclub-ontmoeting is
-    altijd exact 1 team tegen 1 ander team, dus teamgenoten spelen op
-    dezelfde datum tegen dezelfde tegenstander-ploeg, terwijl een ander
-    team (toevallig dezelfde speeldag) een compleet andere tegenstander-
-    set heeft.
-    `exclude_ids` (optioneel — de huidige tegenstander-roster) wordt nog
-    steeds toegepast als expliciete, extra garantie, al is dat met deze
-    matching-methode strikt genomen al overbodig."""
-    exclude_ids = {str(x) for x in (exclude_ids or set())}
+    """Neem de eigen spelers rechtstreeks uit de meest recente ontmoeting
+    van de geselecteerde speler. Alle matchregels van die ontmoeting vormen
+    samen de ploegkolom: geselecteerde speler + alle partner_user_id's.
+
+    ID's worden overal naar str genormaliseerd. Dat voorkomt dat Firestore-
+    profiel-ID's als int niet matchen met match-ID's als string, de concrete
+    oorzaak waardoor de multiselect soms alleen de geselecteerde speler zag.
+    Alleen wanneer partner-ID's ontbreken, blijft de gedeelde-tegenstander-
+    methode als fallback actief.
+    """
+    selected_id = str(sel_player_id)
+    excluded = {str(x) for x in (exclude_ids or set())}
     try:
-        sel_doc = fb.get_player(sel_player_id) or {}
-        own_ic_matches = [m for m in (sel_doc.get("matches") or []) if m.get("match_type") == "interclub"]
-        dated_own = [(m, _parse_match_date(m.get("match_date"))) for m in own_ic_matches]
-        dated_own = [(m, d) for m, d in dated_own if d]
-        if not dated_own:
-            return set()
-        most_recent_date = max(d for _, d in dated_own)
-        sel_matches_that_date = [m for m, d in dated_own if d == most_recent_date]
-        own_opp_ids = set()
-        own_opp_names = set()
-        for m in sel_matches_that_date:
+        sel_doc = fb.get_player(selected_id) or {}
+        matches = [
+            m for m in (sel_doc.get("matches") or [])
+            if m.get("match_type") == "interclub" and _parse_match_date(m.get("match_date"))
+        ]
+        if not matches:
+            return {selected_id} - excluded
+
+        latest_date = max(_parse_match_date(m.get("match_date")) for m in matches)
+        latest = [m for m in matches if _parse_match_date(m.get("match_date")) == latest_date]
+
+        # Indien beschikbaar: beperk verder tot dezelfde ontmoeting/uitslagenblad.
+        encounter_values = [
+            str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip()
+            for m in latest
+            if str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip()
+        ]
+        if encounter_values:
+            chosen = max(set(encounter_values), key=encounter_values.count)
+            scoped = [
+                m for m in latest
+                if str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip() == chosen
+            ]
+            if scoped:
+                latest = scoped
+
+        own_ids = {selected_id}
+        for match in latest:
+            partner_id = match.get("partner_user_id")
+            if partner_id:
+                own_ids.add(str(partner_id))
+
+        known_profile_ids = {
+            str(p.get("player_id")) for p in profiles if p.get("player_id") is not None
+        }
+        direct = (own_ids & known_profile_ids) - excluded
+        if len(direct) >= 4:
+            return direct
+
+        # Fallback voor oudere records zonder volledige partner-ID's: zoek
+        # profielen die op dezelfde datum tegen minstens éénzelfde opponent
+        # speelden, en voeg die toe aan de rechtstreeks gevonden ploeggenoten.
+        own_opp_ids, own_opp_names = set(), set()
+        for match in latest:
             for id_key, name_key in (("opp1_user_id", "opp1_name"), ("opp2_user_id", "opp2_name")):
-                oid = m.get(id_key)
-                oname = m.get(name_key)
-                if oid:
-                    own_opp_ids.add(str(oid))
-                if oname:
-                    own_opp_names.add(_clean_name(oname))
-        player_ids = {str(sel_player_id)}
-        if not own_opp_ids and not own_opp_names:
-            # Geen enkele tegenstander-identiteit gekend voor sel_player_id's
-            # eigen match op deze datum — kan niet betrouwbaar matchen op
-            # gedeelde tegenstander. Terugval: enkel sel_player_id zelf,
-            # i.p.v. een minder betrouwbaar mechanisme te gebruiken.
-            return player_ids - exclude_ids
-        profile_ids = [p.get("player_id") for p in profiles if p.get("player_id")]
+                if match.get(id_key):
+                    own_opp_ids.add(str(match.get(id_key)))
+                if match.get(name_key):
+                    own_opp_names.add(_clean_name(match.get(name_key)))
+
+        profile_ids = [str(p.get("player_id")) for p in profiles if p.get("player_id") is not None]
         docs = ll.get_docs_for_players(profile_ids)
         for pid, doc in docs.items():
-            pid_str = str(pid)
-            if pid_str in exclude_ids or pid_str == str(sel_player_id):
+            pid = str(pid)
+            if pid in excluded or pid in direct:
                 continue
-            for m in doc.get("matches", []) or []:
-                if m.get("match_type") != "interclub":
+            for match in doc.get("matches", []) or []:
+                if match.get("match_type") != "interclub":
                     continue
-                d = _parse_match_date(m.get("match_date"))
-                if d != most_recent_date:
+                if _parse_match_date(match.get("match_date")) != latest_date:
                     continue
-                cand_opp_ids = set()
-                cand_opp_names = set()
-                for id_key, name_key in (("opp1_user_id", "opp1_name"), ("opp2_user_id", "opp2_name")):
-                    oid = m.get(id_key)
-                    oname = m.get(name_key)
-                    if oid:
-                        cand_opp_ids.add(str(oid))
-                    if oname:
-                        cand_opp_names.add(_clean_name(oname))
-                shares_opponent = bool(own_opp_ids & cand_opp_ids) or bool(own_opp_names & cand_opp_names)
-                if shares_opponent:
-                    player_ids.add(pid_str)
+                cand_ids = {
+                    str(match.get(k)) for k in ("opp1_user_id", "opp2_user_id") if match.get(k)
+                }
+                cand_names = {
+                    _clean_name(match.get(k)) for k in ("opp1_name", "opp2_name") if match.get(k)
+                }
+                if (own_opp_ids & cand_ids) or (own_opp_names & cand_names):
+                    direct.add(pid)
                     break
-        return player_ids - exclude_ids
+        return direct - excluded
     except Exception:
-        return set()
+        return {selected_id} - excluded
+
+def _current_official_rank_prefer_padelstat(player_id: str):
+    """Actueel officieel klassement: eerst de padelstat-snapshot van de
+    recentste refresh, daarna pas de tragere TVL-historiek als fallback."""
+    try:
+        snapshot = fb.get_official_klassement_via_padelstat(str(player_id)) or {}
+        value = snapshot.get("klassement")
+        if value is not None:
+            return float(value)
+    except Exception:
+        pass
+    try:
+        return _official_current_rank(str(player_id))
+    except Exception:
+        return None
+
+
 def _opponent_padelstat_ratings(bundle: dict) -> dict:
     """SIMULATIE-schaal (padelstat) voor tegenstander-spelers."""
     out = {}
@@ -440,7 +468,7 @@ def _opponent_official_ranks(player_ids: list) -> dict:
     out = {}
     for pid in player_ids:
         try:
-            rank = _official_current_rank(pid)
+            rank = _current_official_rank_prefer_padelstat(pid)
         except Exception:
             rank = None
         if rank is not None:
@@ -453,7 +481,7 @@ def _build_own_official_ranks_strict(available_ids: list) -> dict:
     out = {}
     for pid in available_ids:
         try:
-            rank = _official_current_rank(pid)
+            rank = _current_official_rank_prefer_padelstat(pid)
         except Exception:
             rank = None
         if rank is not None:
@@ -2102,7 +2130,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     _render_match1_frequency_opponent(bundle)
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
     own_labels = [_display_name(p) for p in own_candidates]
-    own_label_to_id = {_display_name(p): p.get("player_id") for p in own_candidates}
+    own_label_to_id = {_display_name(p): str(p.get("player_id")) for p in own_candidates if p.get("player_id") is not None}
     with st.expander("🔄 Ontmoetingen-cache verversen (enkel relevant voor de sandbox-preset 'Onze vorige opstelling')", expanded=False):
         st.caption(
             "Deze cache wordt NIET gebruikt om de 'standaard vooraf geselecteerd'-lijst hieronder te "
@@ -2120,8 +2148,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     }
     recent_ids = _recent_own_lineup_player_ids(sel_player_id, profiles, exclude_ids=current_opponent_ids)
     if recent_ids:
-        default_labels = [lbl for lbl, pid in own_label_to_id.items() if pid in recent_ids]
-        sel_label_self = next((lbl for lbl, pid in own_label_to_id.items() if pid == sel_player_id), None)
+        default_labels = [lbl for lbl, pid in own_label_to_id.items() if str(pid) in recent_ids]
+        sel_label_self = next((lbl for lbl, pid in own_label_to_id.items() if str(pid) == str(sel_player_id)), None)
         if sel_label_self and sel_label_self not in default_labels:
             default_labels.append(sel_label_self)
         st.caption(f"Standaard vooraf geselecteerd: jullie vorige interclubontmoeting ({len(default_labels)} speler(s)).")

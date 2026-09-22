@@ -177,7 +177,7 @@ except Exception:  # pragma: no cover
     def trigger_github_actions_scrape(**_kwargs):
         return False, "cloud_helpers ontbreekt"
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 8  # ongewijzigd datamodel; enkel rendering/cache-logica aangepast in v9-v16
+REPORT_SCHEMA_VERSION = 9  # padelstat-snapshot is voortaan autoritatief voor huidig officieel klassement
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -226,12 +226,36 @@ def _build_report(
 ) -> dict:
     players = []
     for player in bundle.get("unique_players", []) or []:
-        players.append(od.build_player_summary(
-            player["user_id"], player["name"], all_docs,
+        player_id = str(player["user_id"])
+        summary = od.build_player_summary(
+            player_id, player["name"], all_docs,
             current_reeks_url=current_reeks_url,
             current_spelgroep_id=current_spelgroep_id,
             global_docs=global_docs,
-        ))
+        )
+
+        # Het huidige officiële klassement uit dezelfde, zonet uitgevoerde
+        # padelstat-opzoeking is de meest actuele snapshot en moet daarom in
+        # de ploeganalyse voorrang krijgen op oudere TVL-historiek/fallbacks.
+        # "Beste ooit" blijft uitsluitend uit echte TVL-historiek komen.
+        try:
+            snapshot = fb.get_official_klassement_via_padelstat(player_id) or {}
+        except Exception:
+            snapshot = {}
+        snapshot_rank = snapshot.get("klassement")
+        if snapshot_rank is not None:
+            try:
+                summary["current_rank"] = int(snapshot_rank)
+            except (TypeError, ValueError):
+                pass
+        history_rows = summary.get("history") or []
+        summary["best_rank"] = max(
+            (row.get("rank") for row in history_rows if row.get("rank") is not None),
+            default=None,
+        )
+        if summary["best_rank"] is None:
+            summary["best_rank_when"] = None
+        players.append(summary)
     return {
         "opponent_name": opp.get("name"),
         "opponent_ploeg_id": opp.get("ploeg_id"),
