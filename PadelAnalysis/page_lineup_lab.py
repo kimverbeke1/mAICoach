@@ -823,10 +823,18 @@ def _render_rotation_points_caption(rotations: list) -> None:
             continue
         icon = "✅" if rot.get("valid", True) else "❌"
         st.caption(f"{icon} Rotatie {i}: {rot.get('reason', '')}")
+# PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: de vorige tekst stelde dat
+# de winkans "GEEN gevalideerd of empirisch getoetst" model was. Dat klopt
+# sinds de kalibratie met validate_winprob.py niet meer letterlijk, maar de
+# steekproef (44 matchen) is te klein om van een gevalideerd model te
+# spreken. De tekst vermeldt nu wat er effectief gemeten is, inclusief de
+# beperking - eerlijker in beide richtingen.
 _WIN_PROB_DISCLAIMER = (
-    "⚠️ De winkans-schatting is een RUWE HEURISTIEK (een logistische functie op het "
-    "ratingverschil), GEEN gevalideerd of empirisch getoetst voorspellingsmodel — gebruik dit als "
-    "richtinggevend signaal, niet als harde garantie."
+    "⚠️ De winkans is een logistische schatting op het verschil in speelsterkte, "
+    "gekalibreerd op 44 recent gespeelde dubbels (70% van de uitslagen juist voorspeld; "
+    "Brier 0.195 tegenover 0.25 voor een muntstuk). Bij uitgesproken favorieten en "
+    "underdogs is de schatting nog steeds aan de voorzichtige kant, en de steekproef is "
+    "klein — richtinggevend signaal dus, geen garantie."
 )
 def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) -> None:
     for a in assignment:

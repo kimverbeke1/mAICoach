@@ -71,7 +71,8 @@ hierboven):
     tegenstander-padelstat (zeer gebruikelijk, zie de rest van dit project)
     viel de edge daardoor STRUCTUREEL vaak terug op klassement, wat Kim
     terecht "niet waardevol" noemt).
-  - estimate_win_probability(our_avg, their_avg, scale=300.0): eenvoudige,
+  - estimate_win_probability(our_avg, their_avg, scale=DEFAULT_WIN_PROBABILITY_SCALE):
+    eenvoudige,
     Elo-achtige logistische schatting van de winkans voor ONS op 1 bord,
     gebaseerd op het (ongeknipte) ratingverschil — NIET de eerder gebruikte,
     naar [-1,1] afgeknipte 'edge'-waarde, want die verliest net de
@@ -649,16 +650,71 @@ def effective_simulation_rating(
     return None
 
 
-def estimate_win_probability(our_avg: Optional[float], their_avg: Optional[float], scale: float = 300.0) -> Optional[float]:
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22 (op verzoek van Kim: "ik zou
+# de winstkans formule willen aftoetsen op echt gespeelde matchen")
+# ─────────────────────────────────────────────
+# De vorige waarde (300) was een VERTREKPUNT, nooit empirisch getoetst. Ze is
+# nu wel getoetst, met validate_winprob.py, op 44 echt gespeelde, recente
+# dubbels (mei-september 2026; enkel recent, omdat enkel daar de padelstat-
+# cijfers nog representatief zijn).
+#
+# RESULTAAT MET scale=300: Brier 0.2034, log loss 0.5952, 70.5% accuraat.
+# Beter dan een muntstuk (Brier 0.25 / log loss 0.693), en zonder
+# systematische over- of onderschatting (gemiddeld voorspeld 55.1% tegenover
+# 50.0% werkelijk gewonnen).
+#
+# MAAR de kalibratie per kansklasse legde een duidelijk, eenzijdig patroon
+# bloot: de curve stond TE VLAK.
+#     voorspeld 30-40%  (n=4)  -> werkelijk   0%   (-37pp)
+#     voorspeld 40-50%  (n=7)  -> werkelijk  29%   (-19pp)
+#     voorspeld 50-60% (n=13)  -> werkelijk  54%    (-1pp)
+#     voorspeld 60-70% (n=14)  -> werkelijk  64%    (-0pp)
+#     voorspeld 70-80%  (n=4)  -> werkelijk 100%   (+28pp)
+# De twee grootste klassen zitten er dus vrijwel exact op, maar aan beide
+# uiteinden was de schatting te voorzichtig: de underdog werd overschat en
+# de favoriet onderschat. Ook zichtbaar in de ruwe cijfers: bij een
+# sterkteverschil van 50+ punten won de favoriet 19 van de 24 keer (79%),
+# terwijl deze functie daar gemiddeld ~65% voorspelde.
+#
+# WAAROM 207 EN NIET DE "BESTE" WAARDE: de log loss is minimaal rond scale
+# 136 (in de 10-macht-schaal van deze functie). Een bootstrap over dezelfde
+# 44 matchen geeft daarvoor echter een 90%-interval van ruwweg 80 tot 230 -
+# met dit aantal matchen is die optimale waarde dus nog niet scherp genoeg
+# om op vast te leggen. Bovendien is het verschil in log loss tussen 207 en
+# 136 klein (0.574 tegenover 0.561), terwijl 207 veel minder risico op
+# overfitting op een kleine steekproef geeft. 207 pakt het grootste deel van
+# de winst en blijft verdedigbaar.
+#     scale 300 (oud) : log loss 0.5952, Brier 0.2034
+#     scale 207 (nu)  : log loss 0.5737, Brier 0.1950
+#     scale 136 (fit) : log loss 0.5613, Brier 0.1913
+#
+# HERHAAL DEZE METING periodiek (python validate_winprob.py --days 120).
+# Wijst een grotere steekproef straks nog steeds richting ~136, dan kan deze
+# waarde verder omlaag. LET OP: dit meet de formule EN de kwaliteit van de
+# padelstat-cijfers samen; een zwak resultaat kan ook op verouderde
+# sterktes wijzen in plaats van op een verkeerde curve.
+DEFAULT_WIN_PROBABILITY_SCALE = 207.0
+
+
+def estimate_win_probability(
+    our_avg: Optional[float],
+    their_avg: Optional[float],
+    scale: float = DEFAULT_WIN_PROBABILITY_SCALE,
+) -> Optional[float]:
     """PADEL_ANALYSIS_SIMULATION_VS_REGULATION_SCALE_SPLIT_2026-09-17: RUWE,
     Elo-achtige logistische schatting van de winkans voor ONS op dit ene
     bord, gebaseerd op het (ongeknipte) verschil in effectieve rating.
         p = 1 / (1 + 10^(-(our_avg - their_avg) / scale))
     `scale` bepaalt hoe snel de winkans oploopt met het ratingverschil — een
-    KLEINERE scale maakt elk verschil impactvoller. scale=300 is een
-    vertrekpunt, GEEN gevalideerde, empirisch bepaalde waarde voor padel: dit
-    is uitdrukkelijk een HEURISTIEK, geen statistisch onderbouwd model (zie
-    ook de verplichte UI-caveat in page_lineup_lab.py).
+    KLEINERE scale maakt elk verschil impactvoller.
+
+    PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: de standaardwaarde is
+    sinds deze versie EMPIRISCH GEKALIBREERD (207, was 300) op 44 echt
+    gespeelde recente dubbels — zie de uitgebreide toelichting bij
+    DEFAULT_WIN_PROBABILITY_SCALE hierboven. Het blijft een eenvoudige
+    heuristiek met een bescheiden steekproef achter zich: richtinggevend,
+    geen garantie (zie ook de UI-caveat in page_lineup_lab.py).
     Returns None als (een van) beide gemiddelden onbekend zijn — de
     aanroeper toont dan 'onbekend' i.p.v. een verzonnen getal."""
     if our_avg is None or their_avg is None:
@@ -798,7 +854,7 @@ def optimize_lineup_vs_scenario(
     top_n: int = 3,
     candidate_pool: int = 30,
     tournament_rules_dict: Optional[dict] = None,
-    win_probability_scale: float = 300.0,
+    win_probability_scale: float = DEFAULT_WIN_PROBABILITY_SCALE,
 ) -> Tuple[List[dict], bool, dict]:
     """
     Zoekt, voor een SPECIFIEK tegenstander-scenario, de beste koppelvorming
