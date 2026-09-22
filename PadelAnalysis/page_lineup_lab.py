@@ -166,6 +166,33 @@ Bijkomend, 2 gerelateerde gaten gedicht in dezelfde sessie:
     is None" — een check die dus NOOIT kon afgaan (dode code). Nu gebruikt
     de sandbox _pair_official_sum_safe() om de completeness apart bij te
     houden, zodat de "❓ onbekend"-waarschuwing daadwerkelijk verschijnt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OWN_ROSTER_FROM_UITSLAGENBLAD_2026-09-22 (op verzoek van Kim:
+"Om te weten welke eigen spelers je moet tonen moet je kijken wie van de
+eigen spelers de vorige wedstrijd gespeeld heeft. heb je daar eigenlijk de
+juiste link voor. Je kan dat zien bij de details per match: bij de kolom van
+de ploeg van de geselecteerde speler staan al die spelers")
+--------------------------------------------------------------------------
+ROOT CAUSE (definitief): ALLE vorige pogingen - partner_user_id,
+(match_date, encounter)-tekst, kalenderdatum, club-veld, gedeelde
+tegenstander-identiteit - leidden onze ploegsamenstelling INDIRECT af uit
+losse, PER SPELER APART gescrapete matchrecords. Die bron is structureel
+onvolledig: een teamgenoot die zelf nog niet (volledig) gescrapet is,
+bestaat daar simpelweg niet. Vandaar telkens 1 of 3 spelers i.p.v. 4.
+FIX: de ploegkolom wordt nu RECHTSTREEKS uit het uitslagenblad van de
+ontmoeting zelf gelezen - dezelfde bron die de tegenstander-opstelling al
+gebruikt (opponent_scout.scout_opponent() -> extract_opponent_lineup()),
+maar aangeroepen met ONS eigen ploeg_id i.p.v. dat van de tegenstander.
+Dat is exact de kolom die Kim in het matchdetail ziet staan en vereist
+GEEN profiel, GEEN club-veld en GEEN partner_user_id per teamgenoot.
+_recent_own_lineup_roster() vervangt daarmee _recent_own_lineup_player_ids()
+volledig. Teamgenoten zonder eigen profiel worden expliciet als
+"(nog geen profiel)" aan de selectie toegevoegd i.p.v. weggefilterd.
+Bijkomend voordeel voor de traagheid die Kim meldde: de vorige aanpak deed
+ll.get_docs_for_players() over ALLE profielen in de database bij elke
+render; die brede uitlezing is hiermee volledig verdwenen. Het resultaat
+wordt bovendien per ontmoeting in st.session_state gecacht, met een
+expliciete "Ploeg opnieuw ophalen"-knop ernaast.
 """
 import itertools
 import streamlit as st
@@ -177,6 +204,10 @@ from dashboard_common import (
     _get_saved_schedule, _load_poule_fixtures, _load_poule_schedule_robust,
     _official_current_rank,
 )
+try:
+    import opponent_scout as osc
+except Exception:  # noqa: BLE001  pragma: no cover
+    osc = None
 try:
     import manual_poule_input
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -344,93 +375,64 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nofix")
         return None
     return _finish(fixtures, reeks_url)
-def _recent_own_lineup_player_ids(sel_player_id: str, profiles: list, exclude_ids: set = None) -> set:
-    """Neem de eigen spelers rechtstreeks uit de meest recente ontmoeting
-    van de geselecteerde speler. Alle matchregels van die ontmoeting vormen
-    samen de ploegkolom: geselecteerde speler + alle partner_user_id's.
+def _own_team_name(fixtures: list, own_ploeg_id: str) -> str:
+    """Teamnaam van onze eigen ploeg, afgeleid uit het poule-schema."""
+    for fx in fixtures or []:
+        if str(fx.get("home_ploeg_id")) == str(own_ploeg_id):
+            return fx.get("home_name") or ""
+        if str(fx.get("away_ploeg_id")) == str(own_ploeg_id):
+            return fx.get("away_name") or ""
+    return ""
 
-    ID's worden overal naar str genormaliseerd. Dat voorkomt dat Firestore-
-    profiel-ID's als int niet matchen met match-ID's als string, de concrete
-    oorzaak waardoor de multiselect soms alleen de geselecteerde speler zag.
-    Alleen wanneer partner-ID's ontbreken, blijft de gedeelde-tegenstander-
-    methode als fallback actief.
+
+def _recent_own_lineup_roster(sel_player_id: str, fixtures: list, own_ploeg_id: str) -> dict:
+    """Wie speelde er in ONZE vorige interclubontmoeting?
+
+    Leest dit rechtstreeks uit het uitslagenblad van die ontmoeting, via
+    dezelfde functie die de tegenstander-opstelling al ophaalt
+    (opponent_scout.scout_opponent) - maar dan met ONS eigen ploeg_id. Dat
+    is exact de ploegkolom die je in het matchdetail ziet staan: alle
+    spelers van de ploeg, ongeacht of hun eigen profiel al gescrapet is,
+    of hun club-veld ingevuld is, of hun partner_user_id correct opgelost
+    raakte.
+
+    Alle eerdere methodes (partner_user_id, gedeelde tegenstander-
+    identiteit, club-veld, kalenderdatum) leidden de ploeg INDIRECT af uit
+    losse, per speler apart gescrapete matchrecords - precies de reden dat
+    er telkens 1 of 3 spelers uitkwamen in plaats van 4. Deze bron is de
+    ontmoeting zelf en heeft die afleiding niet nodig.
+
+    Geeft {player_id: naam} terug; leeg bij een onbekende ploeg/fout.
     """
-    selected_id = str(sel_player_id)
-    excluded = {str(x) for x in (exclude_ids or set())}
+    if not fixtures or not own_ploeg_id or osc is None:
+        return {}
     try:
-        sel_doc = fb.get_player(selected_id) or {}
-        matches = [
-            m for m in (sel_doc.get("matches") or [])
-            if m.get("match_type") == "interclub" and _parse_match_date(m.get("match_date"))
-        ]
-        if not matches:
-            return {selected_id} - excluded
-
-        latest_date = max(_parse_match_date(m.get("match_date")) for m in matches)
-        latest = [m for m in matches if _parse_match_date(m.get("match_date")) == latest_date]
-
-        # Indien beschikbaar: beperk verder tot dezelfde ontmoeting/uitslagenblad.
-        encounter_values = [
-            str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip()
-            for m in latest
-            if str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip()
-        ]
-        if encounter_values:
-            chosen = max(set(encounter_values), key=encounter_values.count)
-            scoped = [
-                m for m in latest
-                if str(m.get("uitslagenblad_url") or m.get("encounter") or "").strip() == chosen
-            ]
-            if scoped:
-                latest = scoped
-
-        own_ids = {selected_id}
-        for match in latest:
-            partner_id = match.get("partner_user_id")
-            if partner_id:
-                own_ids.add(str(partner_id))
-
-        known_profile_ids = {
-            str(p.get("player_id")) for p in profiles if p.get("player_id") is not None
-        }
-        direct = (own_ids & known_profile_ids) - excluded
-        if len(direct) >= 4:
-            return direct
-
-        # Fallback voor oudere records zonder volledige partner-ID's: zoek
-        # profielen die op dezelfde datum tegen minstens éénzelfde opponent
-        # speelden, en voeg die toe aan de rechtstreeks gevonden ploeggenoten.
-        own_opp_ids, own_opp_names = set(), set()
-        for match in latest:
-            for id_key, name_key in (("opp1_user_id", "opp1_name"), ("opp2_user_id", "opp2_name")):
-                if match.get(id_key):
-                    own_opp_ids.add(str(match.get(id_key)))
-                if match.get(name_key):
-                    own_opp_names.add(_clean_name(match.get(name_key)))
-
-        profile_ids = [str(p.get("player_id")) for p in profiles if p.get("player_id") is not None]
-        docs = ll.get_docs_for_players(profile_ids)
-        for pid, doc in docs.items():
-            pid = str(pid)
-            if pid in excluded or pid in direct:
-                continue
-            for match in doc.get("matches", []) or []:
-                if match.get("match_type") != "interclub":
-                    continue
-                if _parse_match_date(match.get("match_date")) != latest_date:
-                    continue
-                cand_ids = {
-                    str(match.get(k)) for k in ("opp1_user_id", "opp2_user_id") if match.get(k)
-                }
-                cand_names = {
-                    _clean_name(match.get(k)) for k in ("opp1_name", "opp2_name") if match.get(k)
-                }
-                if (own_opp_ids & cand_ids) or (own_opp_names & cand_names):
-                    direct.add(pid)
-                    break
-        return direct - excluded
+        team_fixtures = ss.get_team_fixtures(fixtures, own_ploeg_id)
+        next_match = ss.get_next_match(team_fixtures)
     except Exception:
-        return {selected_id} - excluded
+        return {}
+    before_date = (next_match or {}).get("date_text") or ""
+    cache_key = f"own_roster_v2_{own_ploeg_id}_{before_date}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    try:
+        own_bundle = osc.scout_opponent(
+            fixtures,
+            _own_team_name(fixtures, own_ploeg_id),
+            str(own_ploeg_id),
+            before_date,
+            lookback=1,
+        )
+        roster = {
+            str(p["user_id"]): (p.get("name") or str(p["user_id"]))
+            for p in (own_bundle.get("unique_players") or [])
+            if p.get("user_id")
+        }
+    except Exception:
+        roster = {}
+    st.session_state[cache_key] = roster
+    return roster
+
 
 def _current_official_rank_prefer_padelstat(player_id: str):
     """Actueel officieel klassement: eerst de padelstat-snapshot van de
@@ -2130,41 +2132,65 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     _render_match1_frequency_opponent(bundle)
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
     own_labels = [_display_name(p) for p in own_candidates]
-    own_label_to_id = {_display_name(p): str(p.get("player_id")) for p in own_candidates if p.get("player_id") is not None}
-    with st.expander("🔄 Ontmoetingen-cache verversen (enkel relevant voor de sandbox-preset 'Onze vorige opstelling')", expanded=False):
-        st.caption(
-            "Deze cache wordt NIET gebruikt om de 'standaard vooraf geselecteerd'-lijst hieronder te "
-            "bepalen (die matcht sinds deze fix op GEDEELDE TEGENSTANDER-IDENTITEIT + kalenderdatum, "
-            "zonder afhankelijkheid van club-veld of partner_user_id). Enkel de sandbox-snelknop '📋 Onze "
-            "vorige opstelling' verderop gebruikt deze cache nog. Klik hieronder als je daar twijfelt over "
-            "de opgehaalde koppels."
-        )
-        if st.button("🔄 Ontmoetingen-cache nu verversen", key=f"clear_encounter_cache_{sel_player_id}"):
-            _load_encounter_index.clear()
-            st.success("Cache geleegd — de pagina herlaadt met een verse groepering.")
-            st.rerun()
-    current_opponent_ids = {
-        str(p.get("user_id")) for p in (bundle.get("unique_players") or []) if p.get("user_id")
+    own_label_to_id = {
+        _display_name(p): str(p.get("player_id"))
+        for p in own_candidates if p.get("player_id") is not None
     }
-    recent_ids = _recent_own_lineup_player_ids(sel_player_id, profiles, exclude_ids=current_opponent_ids)
-    if recent_ids:
-        default_labels = [lbl for lbl, pid in own_label_to_id.items() if str(pid) in recent_ids]
-        sel_label_self = next((lbl for lbl, pid in own_label_to_id.items() if str(pid) == str(sel_player_id)), None)
+
+    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
+    own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
+    roster = _recent_own_lineup_roster(sel_player_id, fixtures, own_ploeg_id)
+
+    # Teamgenoten die in het uitslagenblad staan maar nog geen eigen profiel
+    # hebben, worden hier expliciet toegevoegd i.p.v. stilzwijgend weggefilterd
+    # - anders mis je ze in de selectie precies wanneer je ze nodig hebt.
+    known_ids = set(own_label_to_id.values())
+    for pid, naam in roster.items():
+        if pid in known_ids:
+            continue
+        label = f"{naam} (nog geen profiel)"
+        own_labels.append(label)
+        own_label_to_id[label] = pid
+
+    col_roster, col_refresh = st.columns([3, 1])
+    with col_refresh:
+        if st.button("🔄 Ploeg opnieuw ophalen", key=f"refresh_own_roster_{sel_player_id}"):
+            for key in [k for k in st.session_state if str(k).startswith("own_roster_v2_")]:
+                st.session_state.pop(key, None)
+            _load_encounter_index.clear()
+            st.rerun()
+
+    if roster:
+        default_labels = [lbl for lbl, pid in own_label_to_id.items() if pid in roster]
+        sel_label_self = next(
+            (lbl for lbl, pid in own_label_to_id.items() if pid == str(sel_player_id)), None
+        )
         if sel_label_self and sel_label_self not in default_labels:
             default_labels.append(sel_label_self)
-        st.caption(f"Standaard vooraf geselecteerd: jullie vorige interclubontmoeting ({len(default_labels)} speler(s)).")
+        with col_roster:
+            st.caption(
+                f"Standaard vooraf geselecteerd: de opstelling van onze ploeg in de vorige "
+                f"interclubontmoeting ({len(default_labels)} speler(s)), rechtstreeks uit het "
+                "uitslagenblad van die ontmoeting."
+            )
         if len(default_labels) < 4:
             st.warning(
-                f"⚠️ Slechts {len(default_labels)} speler(s) automatisch gevonden voor jullie laatste "
-                "interclubontmoeting — een doublesronde bestaat normaliter uit minstens 4 spelers "
-                "(2 gelijktijdige borden). Mogelijke oorzaak: niet alle teamgenoten van die ontmoeting "
-                "hebben zelf al een gescrapete matchrecord voor deze datum, of hun matchrecord mist zowel "
-                "de tegenstander-ID's als -namen. Ververs (via de per-speler-knop) de ontbrekende "
-                "teamgenoot/teamgenoten, of vul de selectie hieronder handmatig aan."
+                f"⚠️ Slechts {len(default_labels)} speler(s) gevonden in het uitslagenblad van "
+                "onze vorige ontmoeting. Dat wijst op een onvolledig geparseerd uitslagenblad "
+                "of een effectief kleinere ploeg die dag. Vul de selectie hieronder handmatig aan."
             )
     else:
         default_labels = own_labels[: min(8, len(own_labels))]
-    available_labels = st.multiselect("Beschikbare eigen spelers", own_labels, default=default_labels, key="scenario_available_players")
+        with col_roster:
+            st.caption(
+                "⚠️ Onze vorige ontmoeting kon niet opgehaald worden (nog geen poule-schema "
+                "geladen, of geen gespeelde wedstrijd gevonden). Selecteer de spelers hieronder zelf."
+            )
+
+    available_labels = st.multiselect(
+        "Beschikbare eigen spelers", own_labels, default=default_labels,
+        key="scenario_available_players",
+    )
     if len(available_labels) < 2:
         st.info("Selecteer minstens 2 spelers.")
         return
@@ -2200,6 +2226,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     official_ranks_strict = official_ranks_for_suggestion
     _render_official_rank_warning(available_ids, official_ranks_strict, name_lookup_global)
     opponent_ratings = _opponent_padelstat_ratings(bundle)
+    for _lbl, _pid in own_label_to_id.items():
+        name_lookup_global.setdefault(_pid, _lbl)
+
     all_matchups = _render_all_valid_matchups(
         bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
         player_ratings, official_ranks_strict, opponent_ratings, report,
