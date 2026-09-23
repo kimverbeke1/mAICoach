@@ -283,6 +283,11 @@ def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_per
                     logger.exception("Selectie mislukt voor %s",label); results.append({"label":label,"value":value,"niveau_data":[],"begin_klassement":None,"vorig_klassement":None,"berekend_klassement":None,"verklaring":None,"periodeomschrijving":label,"error":str(e)}); _progress(progress_callback,i,total,label,"error")
             return results
         finally: ctx.close(); browser.close()
+# PADEL_ANALYSIS_DOMINANT_LEVEL_FIX_2026-09-23: versiestempel, zodat in de
+# logoutput meteen zichtbaar is of de gefixte versie effectief draait.
+KLASSEMENT_PARSER_VERSION = "2026-09-23-official-first"
+
+
 def klassement_to_history_summary(periods):
     """
     Compacte historiek voor dashboard.py.
@@ -295,12 +300,12 @@ def klassement_to_history_summary(periods):
 
     PADEL_ANALYSIS_DOMINANT_LEVEL_FIX_2026-09-23 (op verzoek van Kim: "de
     ganse klassementshistoriek komt niet van padelstat [...] dus daar kan
-    brondata ook nog verkeerd zitten" - klopt, en dit was de oorzaak)
-    --------------------------------------------------------------------
+    brondata ook nog verkeerd zitten" - dat klopt, en dit was de oorzaak)
+    ----------------------------------------------------------------------
     ROOT CAUSE: voor de NIEUWSTE periode (i == 0) stond _dominant_level()
     VOORAAN in de or-keten. Die functie geeft echter NIET het klassement
-    terug, maar het niveau waarop de speler de MEESTE MATCHEN speelde -
-    een frequentietelling over niveau_data. Zolang er ook maar 1 rij in
+    terug, maar het niveau waarop de speler de MEESTE MATCHEN speelde - een
+    frequentietelling over niveau_data. Zolang er ook maar 1 rij in
     niveau_data stond, won die telling het altijd van het echte, uit de
     pagina geparste cijfer (selected_period_klassement), dat pas op de
     TWEEDE plaats in dezelfde keten stond en dus nooit aan bod kwam.
@@ -314,12 +319,12 @@ def klassement_to_history_summary(periods):
     opponent_dossier.py, waar dit eerder al als "virtueel vs officieel"
     zichtbaar werd maar de oorzaak hier bleef zitten.
 
-    FIX: selected_period_klassement (het cijfer dat _extract_selected_
-    period_klassement_from_html() letterlijk van de pagina leest) komt nu
-    EERST. _dominant_level() blijft bestaan als LAATSTE terugval, voor het
-    geval de pagina geen enkel expliciet klassementsveld bevat - maar dan
-    wordt "klassement_is_afgeleid" op die rij gezet, zodat de app een
-    afgeleide schatting nooit meer als officieel cijfer kan tonen.
+    FIX: selected_period_klassement (het cijfer dat de parser letterlijk van
+    de pagina leest) komt nu EERST. _dominant_level() blijft bestaan als
+    LAATSTE terugval, voor het geval de pagina geen enkel expliciet
+    klassementsveld bevat - maar dan wordt "klassement_is_afgeleid" op die
+    rij gezet, zodat de app een afgeleide schatting nooit meer als officieel
+    cijfer kan tonen.
 
     Oudere periodes (i > 0) blijven ongewijzigd: die gebruikten al
     vorig_klassement van de eerstvolgende nieuwere periode, een echt
@@ -374,10 +379,10 @@ def klassement_to_history_summary(periods):
         # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19:
         # opponent_dossier._history_rows() leest dit veld en toont het apart
         # als "Virtueel klassement", naast (nooit in plaats van) het
-        # officiele cijfer. Sinds bovenstaande fix is het dominante niveau
-        # geen klassement meer maar wel nog steeds een bruikbare indicatie
-        # van het niveau waarop effectief gespeeld werd - dus wordt het hier
-        # expliciet als zodanig meegegeven i.p.v. weggegooid.
+        # officiele cijfer. Het dominante niveau is geen klassement, maar
+        # wel nog altijd een bruikbare indicatie van het niveau waarop
+        # effectief gespeeld werd - dus expliciet als zodanig meegegeven
+        # i.p.v. weggegooid.
         virtueel = _dominant_level(p) if i == 0 else None
 
         out.append({
