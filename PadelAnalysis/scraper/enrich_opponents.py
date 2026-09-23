@@ -127,54 +127,57 @@ gerichte "ververs deze speler"-actie ook effectief ENKEL die speler
 ververst, zoals bedoeld.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_DISCOVERY_OPT_IN_2026-09-23 (na een concreet incident)
+PADEL_ANALYSIS_DISCOVERY_HARD_GUARD_2026-09-23 (definitieve oplossing)
 --------------------------------------------------------------------------
-WAT ER GEBEURDE: een run die enkel bedoeld was om het KLASSEMENT van de
-BESTAANDE spelers te herstellen -
+WAT ER TWEE KEER GEBEURDE: een run die enkel het KLASSEMENT van de BESTAANDE
+spelers moest herstellen -
 
     python enrich_opponents.py --all --no-padelstat --refresh --klassement-max 50
 
-- maakte in enkele minuten ~1468 NIEUWE spelersprofielen aan. Oorzaak:
-enrich() had do_discover=True als DEFAULT en de CLI bood enkel een
-"--no-discover"-vlag om dat uit te zetten. Discovery gebeurde dus tenzij je
-er expliciet aan dacht ze af te zetten - en samen met "--all" (vertrek van
-ALLE gekende profielen) betekent dat: doorloop de volledige interclub-
-matchgeschiedenis van iedereen en maak een profiel voor elke tegenstander
-en partner die er nog geen had.
+- maakte ~1468 NIEUWE spelersprofielen aan.
 
-Dit is exact het ghost-profiel-probleem dat eerder al aangepakt werd in
-ci_scrape_all.py (PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20,
-waar ENABLE_DISCOVERY naar default False ging) - maar die fix zat ENKEL in
-de CI-route, niet hier in de functie/CLI die handmatige runs gebruiken.
-Hetzelfde gat, een andere ingang. Nu op dezelfde manier gedicht.
+WAAROM HET ZICH HERHAALDE, en dat is het belangrijkste inzicht: de eerste
+fix bestond enkel uit het omdraaien van een DEFAULT (do_discover=False) en
+een CLI-vlag. Die aanpak heeft twee zwaktes. Ze werkt niet als het bestand
+niet gedeployed raakt (precies wat er gebeurde - aan de logoutput was dat
+niet te zien), en ze pakt de ONDERLIGGENDE oorzaak niet aan: dat "--all"
+veel te breed is.
 
-FIX, drie onderdelen:
-  1. enrich(do_discover=...) heeft nu default False. Profielen aanmaken is
-     ingrijpend en moeilijk terug te draaien; het mag nooit een neveneffect
-     zijn van een commando dat je om een heel andere reden draait.
-  2. De CLI-vlag is omgedraaid naar "--discover" (expliciete opt-in). De
-     oude "--no-discover" blijft aanvaard maar doet niets, zodat bestaande
-     scripts niet stilzwijgend van gedrag veranderen.
-  3. Staat discovery toch aan, dan logt enrich() eerst een luide
-     waarschuwing, zodat het opvalt voor het te laat is.
+DE ECHTE OORZAAK: "--all" vertrekt van ALLE gekende profielen. Maar een
+groot deel daarvan zijn zelf al eerder ONTDEKTE TEGENSTANDERS. Hun
+matchgeschiedenis bevat hun eigen tegenstanders - mensen die met jouw ploeg
+niets te maken hebben. Discovery vanuit die profielen levert dus
+tegenstanders-VAN-tegenstanders op, en dat groeit exponentieel: 38
+vertrekpunten leverden 1468 profielen op.
 
-OPRUIMEN van profielen uit zo'n run: cleanup_discovered_profiles.py (naast
-dit bestand). Dat filtert op added_by="auto_opponent_discovery" plus het
-discovered_at-tijdstempel dat ensure_profiles() hieronder zet - dus exact de
-profielen die deze functie aanmaakte, en niets anders.
+VIER ONAFHANKELIJKE MAATREGELEN, zodat het nooit meer van 1 default afhangt:
+
+  1. SCOPE (de kern, _filter_direct_seeds()): discovery vertrekt NOOIT nog
+     vanuit een profiel dat zelf automatisch ontdekt is. Enkel jouw eigen,
+     handmatig toegevoegde spelers dienen als vertrekpunt. Gevonden spelers
+     zijn dan per definitie RECHTSTREEKSE tegenstanders. Deze filter zit in
+     het pad zelf en is niet met een vlag te omzeilen.
+  2. OPT-IN: enrich(do_discover=...) staat standaard op False en de CLI
+     vraagt een expliciete "--discover".
+  3. TWEEDE POORT: ensure_profiles() maakt enkel iets aan met een expliciete
+     allow_create=True - ook als er ergens nog oude code draait.
+  4. HARDE LIMIET: meer dan MAX_NEW_PROFILES_PER_RUN (40) nieuwe profielen
+     in 1 run annuleert de VOLLEDIGE aanmaak, i.p.v. ze half uit te voeren.
+
+Bovendien logt het script nu bij elke start zijn ENRICH_VERSION, zodat
+meteen zichtbaar is welke versie draait - het ontbreken daarvan maakte de
+vorige twee keer onnodig moeilijk te diagnosticeren.
+
+OPRUIMEN: cleanup_discovered_profiles.py (naast dit bestand), dry-run by
+default, filtert op added_by="auto_opponent_discovery" + discovered_at.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23 (op verzoek van Kim: "ik heb
-redelijk wat spelers gevonden die geen ploeg hadden en ondertussen allemaal
-gecontroleerd. Kan je bekijken hoe dat kan gebeuren")
+PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23
 --------------------------------------------------------------------------
-Dezelfde run verklaart ook dat: enrich() gaf de `club` NOOIT door aan
-ensure_profiles(), dus elk automatisch ontdekt profiel kwam clubloos
-binnen. En een speler zonder club wordt sinds
+Dezelfde run verklaarde ook de clubloze profielen: enrich() gaf de `club`
+nooit door aan ensure_profiles(). Een speler zonder club wordt sinds
 PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20 nooit automatisch
-ververst - die profielen blijven dus permanent leeg. Zie ensure_profiles()
-hieronder voor de volledige analyse, inclusief wat hier principieel NIET
-op te lossen valt (matchrecords bevatten geen clubveld).
+ververst, dus die profielen bleven permanent leeg. Zie ensure_profiles().
 """
 from __future__ import annotations
 
@@ -211,6 +214,25 @@ PADELSTAT_STALE_AFTER_DAYS = 14
 KLASSEMENT_MAX_PER_RUN = 8
 KLASSEMENT_MAX_PERIODS = 10
 KLASSEMENT_PAUSE_SECONDS = 2.0
+
+
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_DISCOVERY_HARD_GUARD_2026-09-23
+# ---------------------------------------------------------------------------
+# Versiestempel. Wordt bij ELKE run als eerste regel gelogd, zodat je in de
+# output meteen ziet WELKE versie van dit bestand effectief draait. Reden:
+# de discovery-fix van eerder vandaag bleek twee keer niet gedeployed, en dat
+# was aan de logoutput niet te zien - je zag enkel opnieuw 1468 profielen
+# verschijnen zonder enig spoor van de nieuwe code.
+ENRICH_VERSION = "2026-09-23-hard-guard"
+
+# Harde bovengrens op het aantal NIEUWE profielen dat een enkele run mag
+# aanmaken. Wordt die overschreden, dan stopt de run ZONDER iets aan te maken
+# (zie ensure_profiles()). Dit is een vangnet los van alle vlaggen: zelfs als
+# discovery per ongeluk toch aan staat, kan een run nooit meer honderden
+# profielen aanmaken voor je het doorhebt. Bewust laag: legitieme discovery
+# via team-analyse gaat over 1 tegenstanderploeg, dus ~4-12 spelers.
+MAX_NEW_PROFILES_PER_RUN = 40
 
 
 def _norm_id(value) -> str:
@@ -250,10 +272,55 @@ def _known_profile_ids() -> set:
     return {_norm_id(p.get("player_id")) for p in profiles if p.get("player_id")}
 
 
+def _is_auto_discovered(player_id: str) -> bool:
+    """True als dit profiel zelf ooit automatisch ontdekt is."""
+    try:
+        prof = fb.get_player_profile(player_id) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    return str(prof.get("added_by") or "") == "auto_opponent_discovery"
+
+
+def _filter_direct_seeds(player_ids: list) -> list:
+    """PADEL_ANALYSIS_DIRECT_OPPONENTS_ONLY_2026-09-23 (op verzoek van Kim:
+    "De bedoeling is om enkel maar de rechtstreekse tegenstander als profiel
+    te hebben en geen tegenstanders van tegenstanders").
+
+    DIT IS DE KERN VAN HET PROBLEEM, en waarom het zich telkens herhaalde:
+    "--all" vertrekt van ALLE gekende profielen. Maar een groot deel daarvan
+    zijn zelf al eerder ONTDEKTE TEGENSTANDERS. Hun matchgeschiedenis bevat
+    dus hun eigen tegenstanders - mensen die met jouw ploeg niets te maken
+    hebben. Discovery vanuit die profielen levert per definitie
+    tegenstanders-van-tegenstanders op, en dat groeit exponentieel: 38
+    profielen leverden er zo 1468 op.
+
+    De structurele regel is daarom: NOOIT vertrekken vanuit een profiel dat
+    zelf automatisch ontdekt is. Enkel spelers die JIJ hebt toegevoegd (of
+    die via team-analyse bewust zijn opgenomen) mogen als vertrekpunt
+    dienen. Dan zijn de gevonden spelers per definitie RECHTSTREEKSE
+    tegenstanders van jouw eigen spelers - precies wat je wil.
+
+    Deze filter werkt ongeacht welke vlaggen er meegegeven worden; hij zit
+    in het pad zelf en is dus niet per ongeluk te omzeilen.
+    """
+    direct, afgeleid = [], []
+    for pid in player_ids:
+        (afgeleid if _is_auto_discovered(str(pid)) else direct).append(str(pid))
+    if afgeleid:
+        logger.info(
+            f"[enrich] {len(afgeleid)} vertrekpunt(en) overgeslagen omdat het zelf automatisch "
+            "ontdekte tegenstanders zijn - discovery vanuit die profielen zou tegenstanders-"
+            "VAN-tegenstanders opleveren (PADEL_ANALYSIS_DIRECT_OPPONENTS_ONLY_2026-09-23). "
+            f"Er wordt vertrokken van {len(direct)} eigen/handmatig toegevoegde speler(s)."
+        )
+    return direct
+
+
 def discover_opponent_players(
     player_ids: list,
     include_partners: bool = True,
     interclub_only: bool = True,
+    direct_only: bool = True,
 ) -> dict:
     """Vind spelers die in de matchen van `player_ids` voorkomen als
     tegenstander (of partner) maar nog geen eigen profiel hebben.
@@ -261,8 +328,14 @@ def discover_opponent_players(
     PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16: interclub_only=True
     (standaard) beperkt de scan tot match_type == "interclub".
 
+    PADEL_ANALYSIS_DIRECT_OPPONENTS_ONLY_2026-09-23: direct_only=True
+    (standaard) negeert vertrekpunten die zelf automatisch ontdekt zijn -
+    zie _filter_direct_seeds() hierboven voor de volledige uitleg.
+
     Returns {player_id: display_name} voor de ONTBREKENDE spelers.
     """
+    if direct_only:
+        player_ids = _filter_direct_seeds(player_ids)
     known = _known_profile_ids()
     found: dict[str, str] = {}
     overgeslagen_tornooi = 0
@@ -302,51 +375,82 @@ def discover_opponent_players(
 # ---------------------------------------------------------------------------
 # 2. Profielen aanmaken
 # ---------------------------------------------------------------------------
-def ensure_profiles(players: dict, club: Optional[str] = None) -> list:
+def ensure_profiles(
+    players: dict,
+    club: Optional[str] = None,
+    allow_create: bool = False,
+    max_new: int = MAX_NEW_PROFILES_PER_RUN,
+) -> list:
     """Maak player_profiles-documenten aan voor {player_id: naam}.
 
     PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16: discovered_at wordt
     hier gezet, enkel bij eerste aanmaak.
 
-    PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23 (op verzoek van Kim: "ik heb
-    redelijk wat spelers gevonden die geen ploeg hadden [...] Kan je bekijken
-    hoe dat kan gebeuren")
+    PADEL_ANALYSIS_DISCOVERY_HARD_GUARD_2026-09-23
     ----------------------------------------------------------------------
-    OORZAAK: deze functie heeft al langer een `club`-parameter, maar enrich()
-    riep ze aan ZONDER die mee te geven - dus bleef `club` altijd None en
-    werd het veld nooit gezet. Elk profiel uit die route kwam structureel
-    clubloos binnen.
+    Deze functie heeft nu TWEE onafhankelijke veiligheden, omdat een default-
+    waarde alleen aantoonbaar niet volstond (de fix van vanochtend raakte
+    twee keer niet gedeployed en het probleem herhaalde zich identiek):
 
-    WAAROM DAT ERNSTIG IS: sinds PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_
-    2026-09-20 weigert refresh_padelstat_only.py een speler zonder gekende
-    club zelfs maar OP TE ZOEKEN op padelstats.be (voorzorg tegen
-    gelijknamige spelers bij andere clubs). Zo'n profiel wordt dus PERMANENT
-    overgeslagen bij elke verversing, zonder zichtbare oorzaak - het blijft
-    gewoon leeg.
+      1. allow_create moet EXPLICIET True zijn. Standaard False. Roept iets
+         deze functie per ongeluk aan - of draait er ergens nog oude code die
+         de nieuwe parameter niet kent - dan wordt er niets aangemaakt en
+         verschijnt er een duidelijke uitleg in de log.
+      2. max_new begrenst het aantal profielen per run (standaard
+         MAX_NEW_PROFILES_PER_RUN = 40). Wordt die grens overschreden, dan
+         wordt de aanmaak VOLLEDIG GEANNULEERD - niet gedeeltelijk
+         uitgevoerd. Honderden profielen tegelijk is nooit een legitieme
+         situatie: echte discovery via team-analyse gaat over 1 ploeg, dus
+         een handvol spelers. Zo'n aantal betekent per definitie dat de
+         scope fout zit, en dan is half aanmaken erger dan niets doen.
 
-    WAT HIER NIET OP TE LOSSEN IS: discover_opponent_players() leidt
-    tegenstanders af uit matchrecords, en die bevatten enkel opp1_user_id/
-    opp1_name - GEEN ploeg- of clubveld. Bij discovery uit matchgeschiedenis
-    is de club dus principieel onbekend en kan geen enkele parameter dat
-    verhelpen. Enkel de UI-route (team-analyse per specifieke tegenstander-
-    ploeg) kent de teamnaam wel en kan die doorgeven.
-
-    Daarom loggen we nu EXPLICIET wanneer er clubloze profielen aangemaakt
-    worden, inclusief de gevolgen - i.p.v. dit stil te laten gebeuren en het
-    pas weken later te ontdekken in de spelerslijst.
+    PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23 (op verzoek van Kim: "ik heb
+    redelijk wat spelers gevonden die geen ploeg hadden")
+    ----------------------------------------------------------------------
+    De `club`-parameter bestond al, maar enrich() gaf ze nooit mee - dus bleef
+    ze altijd None en werd het veld nooit gezet. Gevolg: elk profiel uit die
+    route kwam clubloos binnen, en een speler zonder club wordt sinds
+    PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_2026-09-20 NOOIT automatisch
+    ververst (voorzorg tegen gelijknamige spelers). Die profielen bleven dus
+    permanent leeg, zonder zichtbare oorzaak. Er wordt nu expliciet gelogd
+    wanneer profielen zonder club aangemaakt worden.
 
     Returns de lijst van aangemaakte player_id's.
     """
+    players = players or {}
+    if not players:
+        return []
+
+    if not allow_create:
+        logger.warning(
+            f"[enrich] ensure_profiles() aangeroepen voor {len(players)} speler(s) ZONDER "
+            "allow_create=True - er wordt NIETS aangemaakt "
+            "(PADEL_ANALYSIS_DISCOVERY_HARD_GUARD_2026-09-23). Dit is de veilige standaard: "
+            "profielen aanmaken moet altijd een bewuste keuze zijn."
+        )
+        return []
+
+    if len(players) > max_new:
+        logger.error(
+            f"[enrich] GESTOPT: er zouden {len(players)} nieuwe profielen aangemaakt worden, "
+            f"meer dan de limiet van {max_new} (MAX_NEW_PROFILES_PER_RUN). Er is NIETS "
+            "aangemaakt.\n"
+            "    Zo'n aantal betekent vrijwel zeker dat de scope fout zit - bijvoorbeeld "
+            "discovery vanuit tegenstander-profielen, wat tegenstanders-VAN-tegenstanders "
+            "oplevert.\n"
+            "    Bedoel je dit toch? Verhoog dan bewust --max-new-profiles."
+        )
+        return []
+
     aangemaakt = []
     discovered_at = _utc_now_iso()
     club = (club or "").strip() or None
-    if players and not club:
+    if not club:
         logger.warning(
             f"[enrich] LET OP: de {len(players)} profielen hieronder worden ZONDER club "
             "aangemaakt. Spelers zonder gekende club worden NOOIT automatisch ververst "
-            "(padelstat/officieel klassement) - zie PADEL_ANALYSIS_CLUB_REQUIRED_TO_SCRAPE_"
-            "2026-09-20. Geef --club/CLUB mee, of vul de club per speler in via de app "
-            "(Spelers -> Club/ploeg)."
+            "(padelstat/officieel klassement). Geef --club mee, of vul de club per speler "
+            "in via de app (Spelers -> Club/ploeg)."
         )
     for player_id, naam in (players or {}).items():
         payload = {
@@ -515,12 +619,9 @@ def run_padelstat_for_players(
             # PADEL_ANALYSIS_ENRICH_SNAPSHOT_FIX_2026-09-23: matched_klassement
             # en club_confirmed werden hier niet doorgegeven, waardoor
             # save_padelstat_rating() intern NOOIT
-            # save_official_klassement_from_padelstat() aanriep. Gevolg:
-            # "officieel klassement via padelstat: 0" in elke CI-run, geen
-            # snapshot om te tonen, en dus viel de UI terug op de vertekende
-            # TVL-historiek (Baete Evelien toonde P100 i.p.v. de officiele
-            # P200). refresh_padelstat_only.py deed dit al wel correct - dat
-            # verklaarde het verschil tussen beide routes.
+            # save_official_klassement_from_padelstat() aanriep -> "officieel
+            # klassement via padelstat: 0" in elke CI-run, geen snapshot, en
+            # dus viel de UI terug op de vertekende TVL-historiek.
             klassement = (
                 gevonden.get("matched_klassement")
                 or gevonden.get("klassement")
@@ -675,10 +776,11 @@ def enrich(
     interclub_only: bool = True,
     priority_ids: Optional[set] = None,
     # PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23: werd voorheen nooit
-    # doorgegeven aan ensure_profiles(); zie daar voor de volledige uitleg.
-    # Valt terug op de CLUB-omgevingsvariabele, zodat de GitHub Actions-route
-    # dezelfde hint kan gebruiken als refresh_padelstat_only.py.
+    # doorgegeven aan ensure_profiles(). Valt terug op de CLUB-
+    # omgevingsvariabele, zodat de GitHub Actions-route dezelfde hint kan
+    # gebruiken als refresh_padelstat_only.py.
     club: Optional[str] = None,
+    max_new_profiles: int = MAX_NEW_PROFILES_PER_RUN,
 ) -> dict:
     """Volledige verrijkingsstap: tegenstanders ontdekken + profielen aanmaken
     + padelstats ophalen/verversen + klassementshistoriek ophalen.
@@ -697,21 +799,20 @@ def enrich(
     """
     resultaat: dict = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
     if do_discover:
-        # PADEL_ANALYSIS_DISCOVERY_OPT_IN_2026-09-23: luid en expliciet, zodat
-        # dit nooit meer onopgemerkt honderden profielen kan aanmaken.
         logger.warning(
-            "[enrich] DISCOVERY STAAT AAN - er worden NIEUWE spelersprofielen aangemaakt voor "
-            "elke tegenstander/partner zonder profiel. Is dat niet de bedoeling: onderbreek nu "
-            "(Ctrl+C) en draai opnieuw zonder --discover."
+            "[enrich] DISCOVERY STAAT AAN - er kunnen NIEUWE spelersprofielen aangemaakt worden. "
+            "Is dat niet de bedoeling: onderbreek nu (Ctrl+C) en draai opnieuw zonder --discover."
         )
         club_hint = (club or os.environ.get("CLUB") or "").strip() or None
         ontbrekend = discover_opponent_players(player_ids, interclub_only=interclub_only)
         if ontbrekend:
             logger.info(
-                f"[enrich] {len(ontbrekend)} tegenstander(s)/partner(s) zonder profiel gevonden "
-                f"(interclub_only={interclub_only})."
+                f"[enrich] {len(ontbrekend)} rechtstreekse tegenstander(s)/partner(s) zonder "
+                f"profiel gevonden (interclub_only={interclub_only})."
             )
-            resultaat["nieuwe_profielen"] = ensure_profiles(ontbrekend, club=club_hint)
+            resultaat["nieuwe_profielen"] = ensure_profiles(
+                ontbrekend, club=club_hint, allow_create=True, max_new=max_new_profiles,
+            )
         else:
             logger.info("[enrich] Alle gekende tegenstanders hebben al een profiel.")
     doelgroep = list(dict.fromkeys(
@@ -775,27 +876,33 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
+    # PADEL_ANALYSIS_DISCOVERY_HARD_GUARD_2026-09-23: als allereerste regel,
+    # zodat je in de output meteen ziet of de nieuwe versie effectief draait.
+    logger.info(f"[enrich] enrich_opponents.py versie {ENRICH_VERSION} "
+                f"(discovery standaard UIT, max {MAX_NEW_PROFILES_PER_RUN} nieuwe profielen/run)")
+
     parser = argparse.ArgumentParser(
         description="Tegenstanders als speler aanmaken + padelstats/klassement ophalen."
     )
     parser.add_argument("player_ids", nargs="*", help="Eigen spelers om vanuit te vertrekken.")
     parser.add_argument("--all", action="store_true", help="Vertrek van ALLE gekende profielen.")
-    # PADEL_ANALYSIS_DISCOVERY_OPT_IN_2026-09-23: was "--no-discover", dus
-    # discovery stond AAN tenzij je eraan dacht ze uit te zetten. Omgedraaid
-    # naar een expliciete opt-in.
+    # PADEL_ANALYSIS_DISCOVERY_OPT_IN_2026-09-23: was "--no-discover" (dus
+    # discovery AAN tenzij je eraan dacht ze uit te zetten). Omgedraaid naar
+    # een expliciete opt-in.
     parser.add_argument("--discover", action="store_true",
-                        help="Maak WEL nieuwe profielen aan voor tegenstanders/partners zonder "
-                             "profiel (standaard UIT - dit kan er honderden tegelijk aanmaken).")
+                        help="Maak WEL nieuwe profielen aan voor RECHTSTREEKSE tegenstanders/"
+                             "partners zonder profiel (standaard UIT).")
     parser.add_argument("--no-discover", action="store_true",
-                        help="Verouderd/genegeerd: discovery staat sinds 2026-09-23 standaard al "
-                             "uit. Blijft aanvaard zodat bestaande scripts niet breken.")
-    # PADEL_ANALYSIS_DISCOVERY_CLUB_2026-09-23: club-hint voor nieuw ontdekte
-    # profielen, analoog aan de CLUB-omgevingsvariabele in
-    # refresh_padelstat_only.py.
+                        help="Verouderd/genegeerd: discovery staat sinds 2026-09-23 standaard "
+                             "al uit. Blijft aanvaard zodat bestaande scripts niet breken.")
     parser.add_argument("--club", default=None,
                         help="Club/ploeg die op NIEUW ontdekte profielen gezet wordt. Zonder dit "
                              "(of de CLUB-omgevingsvariabele) blijven die profielen clubloos en "
                              "worden ze NOOIT automatisch ververst.")
+    parser.add_argument("--max-new-profiles", type=int, default=MAX_NEW_PROFILES_PER_RUN,
+                        help=f"Harde limiet op nieuwe profielen per run (standaard "
+                             f"{MAX_NEW_PROFILES_PER_RUN}). Wordt die overschreden, dan wordt er "
+                             "NIETS aangemaakt.")
     parser.add_argument("--no-padelstat", action="store_true", help="Geen padelstats ophalen.")
     parser.add_argument("--no-klassement", action="store_true", help="Geen klassementshistoriek ophalen.")
     parser.add_argument("--include-tournament", action="store_true",
@@ -844,6 +951,7 @@ if __name__ == "__main__":
         ids,
         do_discover=args.discover and not args.no_discover,
         club=args.club,
+        max_new_profiles=args.max_new_profiles,
         do_padelstat=not args.no_padelstat,
         padelstat_refresh=args.refresh,
         padelstat_max=args.max,
