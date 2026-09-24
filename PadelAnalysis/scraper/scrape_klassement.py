@@ -7,7 +7,38 @@ import argparse, json, logging, re, time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 / hersteld 2026-09-24: LAZY
+# Playwright-import.
+# ---------------------------------------------------------------------------
+# Playwright stond hier vroeger als MODULE-NIVEAU import. Gevolg: elke
+# UI-module die dit bestand importeerde (opponent_dossier.py, en via de
+# importketen dus ook dashboard_common.py en elke pagina) crashte meteen op
+# Streamlit Community Cloud, waar Playwright niet geinstalleerd is. Daardoor
+# kon build_klassement_url() hieronder - dat zelf geen browser nodig heeft -
+# nergens in de UI gebruikt worden.
+#
+# Nu wordt Playwright pas geimporteerd binnen scrape_klassement() zelf, op
+# het moment dat er ook echt gescrapet wordt. De rest van dit bestand
+# (URL-opbouw, parsers, klassement_to_history_summary) is puur tekst- en
+# HTML-verwerking en blijft overal veilig importeerbaar.
+#
+# PlaywrightTimeoutError begint als een onschuldige placeholder en wordt
+# door _lazy_playwright() vervangen door de echte klasse. _goto() - de enige
+# plek die hem gebruikt - draait uitsluitend binnen scrape_klassement(), dus
+# altijd NA die herbinding.
+PlaywrightTimeoutError = Exception
+
+
+def _lazy_playwright():
+    """Importeert Playwright pas wanneer er effectief gescrapet wordt, en
+    bindt meteen de echte TimeoutError-klasse. Geeft sync_playwright terug."""
+    global PlaywrightTimeoutError
+    from playwright.sync_api import TimeoutError as _Timeout, sync_playwright as _sync
+    PlaywrightTimeoutError = _Timeout
+    return _sync
+
+
 logger=logging.getLogger(__name__)
 BASE_URL="https://www.tennisenpadelvlaanderen.be"
 KLASSEMENT_PARAMS={"tab":"calcPadel","tspid":"80","tdpid":"80","ppid":"81","tscid":"80","pcid":"81"}
@@ -15,6 +46,73 @@ MAX_REASONABLE_MATCHES_PER_LEVEL=250
 
 def _build_url(player_id:str)->str: return f"{BASE_URL}/nl/berekening-klassement?{urlencode({'userId':str(player_id),**KLASSEMENT_PARAMS})}"
 def _clean(t:Optional[str])->str: return re.sub(r"\s+"," ",t or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_KLASSEMENT_LINK_2026-09-19 / hersteld 2026-09-24
+# ---------------------------------------------------------------------------
+def build_klassement_url(player_id) -> str:
+    """De URL van de officiele TVL-klassementberekeningspagina van een speler.
+
+    Publieke, PLAYWRIGHT-VRIJE variant van _build_url(). Bewust apart, omdat
+    opponent_dossier.klassement_link_url() deze functie op module-niveau
+    gebruikt om in de UI een "Bekijk officieel klassement op TVL"-knop te
+    tonen. Dankzij de lazy import hierboven kan dat nu ook op Streamlit
+    Community Cloud, waar geen Playwright beschikbaar is.
+
+    Altijd exact DEZELFDE URL als de scraper zelf bezoekt, zodat wat je in
+    de app ziet en wat er gescrapet werd niet uit elkaar kunnen lopen.
+    """
+    return _build_url(str(player_id))
+
+
+# Seizoenswoord -> maand waarin die klassementsperiode begint. TVL berekent
+# 2x per jaar; deze maanden zijn een BENADERING, uitsluitend bedoeld om de
+# periodes CHRONOLOGISCH te kunnen ordenen. Ze worden nooit als exacte
+# officiele datum gepresenteerd.
+_PERIOD_START_MONTH = {
+    "start": 1, "begin": 1, "winter": 1,
+    "lente": 3, "voorjaar": 3,
+    "zomer": 7, "summer": 7,
+    "najaar": 9, "herfst": 9,
+}
+
+
+def period_start_date(label) -> Optional[str]:
+    """Zet een periode-label om naar een ISO-datum ("Zomerklassement 2026"
+    -> "2026-07-01"), of None als dat niet betrouwbaar kan.
+
+    PADEL_ANALYSIS_PERIOD_START_DATE_RESTORE_2026-09-24
+    ----------------------------------------------------------------------
+    Deze functie WERD AL AANGEROEPEN op twee plaatsen (_parse() en
+    klassement_to_history_summary()), telkens defensief afgeschermd met
+
+        period_start_date(label)
+
+    maar ze was nergens gedefinieerd. Die check gaf dus ALTIJD None, en het
+    veld "datum" bleef in elke historiekrij leeg.
+
+    Waarom dat merkbaar is: opponent_dossier._history_rows() sorteert bij
+    voorkeur op die datum en valt zonder datum terug op een tekstuele
+    periode-vergelijking. Twee periodes in hetzelfde jaar ("Startklassement
+    2026" en "Zomerklassement 2026") krijgen daar dezelfde sorteersleutel en
+    worden dan alfabetisch geordend - wat er toevallig juist uitkomt, maar
+    op geen enkele inhoudelijke regel berust.
+
+    Er wordt NOOIT een jaartal verzonnen: staat er geen jaar in het label,
+    dan is het resultaat None en blijft de bestaande terugval gelden.
+    """
+    tekst = _clean(label).lower()
+    if not tekst:
+        return None
+    jaar = re.search(r"(20\d{2})", tekst)
+    if not jaar:
+        return None
+    maand = next((m for woord, m in _PERIOD_START_MONTH.items() if woord in tekst), None)
+    if maand is None:
+        return None
+    return f"{jaar.group(1)}-{maand:02d}-01"
+
 def _progress(cb,i,total,label,status):
     if not cb: return
     for args in ((i,total,label,status),(i,total,label),(i,total)):
@@ -322,7 +420,7 @@ def _parse(html, selected_label=None):
 
     return {
         "niveau_data": niveaus,
-        "datum": period_start_date(selected_label) if "period_start_date" in globals() else None,
+        "datum": period_start_date(selected_label),
         "begin_klassement": begin_klassement,
         "selected_period_klassement": selected_period_klassement,
         "vorig_klassement": vorig,
@@ -332,6 +430,9 @@ def _parse(html, selected_label=None):
 
 def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_periods=1.2,progress_callback=None,debug=False):
     url=_build_url(player_id); results=[]
+    # PADEL_ANALYSIS_LAZY_PLAYWRIGHT_2026-09-24: hier, en enkel hier, is een
+    # echte browser nodig.
+    sync_playwright = _lazy_playwright()
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=headless); ctx=browser.new_context(viewport={"width":1440,"height":1100},user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         page=ctx.new_page(); page.set_default_timeout(15000)
@@ -355,7 +456,7 @@ def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_per
         finally: ctx.close(); browser.close()
 # PADEL_ANALYSIS_DOMINANT_LEVEL_FIX_2026-09-23: versiestempel, zodat in de
 # logoutput meteen zichtbaar is of de gefixte versie effectief draait.
-KLASSEMENT_PARSER_VERSION = "2026-09-24-wrapper-fix"
+KLASSEMENT_PARSER_VERSION = "2026-09-24-wrapper-fix+url+datum"
 
 
 def klassement_to_history_summary(periods):
