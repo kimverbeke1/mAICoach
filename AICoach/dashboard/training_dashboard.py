@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+#training_dashboard.py
 from pathlib import Path
 import sys
+
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +25,7 @@ from AICoach.dashboard.ui_helpers import (
     render_assistant_answer,
     render_selected_values,
 )
-from AICoach.persistent_data import mirror_all_to_local
+from AICoach.persistent_data import gcs_status, mirror_all_to_local
 from AICoach.saved_insights import render_saved_insights, save_insight
 
 
@@ -91,8 +93,8 @@ def _inject_css() -> None:
 # maximaal 1x per 5 minuten per sessie.
 #
 # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15 (kritieke bugfix, dit blok):
-# BUG (opgelost, gemeld door Kim): op de cloud toonde Dashboard wél data,
-# maar Recovery én Activiteiten bleven LEEG. Oorzaak lag NIET hier maar in
+# BUG (opgelost, gemeld door Kim): op de cloud toonde Dashboard wel data,
+# maar Recovery en Activiteiten bleven LEEG. Oorzaak lag NIET hier maar in
 # persistent_data.py: alleen history/ werd naar GCS gespiegeld, terwijl
 # wellness.json (bron voor HRV/slaap in Recovery) en activities.json (bron
 # voor de Activiteiten-tab) uitsluitend lokaal bestonden - en dus achterbleven
@@ -101,12 +103,37 @@ def _inject_css() -> None:
 # mirror_all_to_local() aan in plaats van mirror_history_to_local(), zodat
 # alle drie de bronnen worden teruggezet. Zie persistent_data.py voor de
 # volledige toelichting en de nieuwe save_wellness()/save_activities().
+#
+# MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24 (op verzoek van Kim, na een
+# concreet incident: Cloud Storage-facturering stond uit, waardoor GCS
+# wekenlang onbereikbaar was)
+# --------------------------------------------------------------------------
+# BUG (opgelost): _refresh_local_data_from_storage() ving een falende
+# mirror_all_to_local() enkel op als die een EXCEPTIE gooide. Maar bij
+# onbereikbare GCS (bv. door uitgeschakelde facturering) gooit die functie
+# nergens een fout - ze geeft gewoon overal 0 terug (zie
+# persistent_data.mirror_*_to_local()). Gevolg: geen enkele foutmelding in de
+# UI, enkel een dashboard dat stilzwijgend de oude, lokaal reeds aanwezige
+# data bleef tonen. Precies dat patroon maakte het incident weken lang
+# onopgemerkt.
+#
+# FIX: na een mirror-poging die overal 0 teruggeeft, wordt nu actief
+# gcs_status() geraadpleegd. Is GCS effectief onbereikbaar, dan verschijnt
+# een duidelijke waarschuwing MET de concrete oorzaak (bv. "billing not
+# enabled") in dezelfde expander die eerder al voor exceptions bestond -
+# in plaats van enkel stilzwijgend niets te doen.
+#
+# De "Nu verversen"-knop roept bovendien clear_bucket_cache() aan: de
+# GCS-verbinding wordt procesbreed gecached (zie gcs_store.get_bucket()),
+# dus na het herstellen van bv. facturering zou de lopende Streamlit-sessie
+# dat zonder deze reset nooit oppikken - enkel een volledige herstart van de
+# app zou geholpen hebben.
 # --------------------------------------------------------------------------- #
 _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-sync-workflow
 
 
 def _refresh_local_data_from_storage() -> None:
-    """Spiegelt history, wellness én activities van GCS terug naar lokale
+    """Spiegelt history, wellness en activities van GCS terug naar lokale
     bestanden. GEEN intervals.icu-aanroep - enkel een lezing van reeds
     bestaande, door de uur-gebaseerde GitHub Actions-workflow bijgewerkte
     opslag.
@@ -115,7 +142,12 @@ def _refresh_local_data_from_storage() -> None:
     st.session_state), in plaats van bij elke rerun - dat verklaarde eerder de
     trage paginawissels. Faalt de lezing (bv. GCS onbereikbaar), dan wordt dat
     opgevangen en blijft de app de reeds lokaal aanwezige data tonen; de
-    volgende poging gebeurt bij het verstrijken van de cache-termijn."""
+    volgende poging gebeurt bij het verstrijken van de cache-termijn.
+
+    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een mirror die overal 0
+    teruggeeft (zonder exceptie) wordt nu ALSNOG als mogelijk probleem
+    onderzocht via gcs_status() - zie het uitgebreide commentaarblok
+    hierboven voor waarom dat nodig bleek."""
     import time
     last_refreshed = st.session_state.get("_data_mirror_last_refreshed_at")
     now = time.monotonic()
@@ -128,6 +160,18 @@ def _refresh_local_data_from_storage() -> None:
     else:
         st.session_state.pop("data_refresh_error", None)
         st.session_state["_last_mirror_result"] = result
+        # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geen exceptie, maar
+        # ook helemaal niets teruggekregen? Dan is een stille GCS-storing
+        # minstens even waarschijnlijk als "gewoon nog geen nieuwe data" -
+        # dus actief nagaan i.p.v. te zwijgen.
+        if not any(result.values()):
+            status = gcs_status()
+            if status["bucket_name"] and not status["available"]:
+                st.session_state["data_refresh_warning"] = status
+            else:
+                st.session_state.pop("data_refresh_warning", None)
+        else:
+            st.session_state.pop("data_refresh_warning", None)
     st.session_state["_data_mirror_last_refreshed_at"] = now
 
 
@@ -214,11 +258,11 @@ def render_health_app() -> None:
     training_dashboard.py) als de gecombineerde app (via
     AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan."""
     try:
-        st.set_page_config(page_title="mAICoach", page_icon="🏃", layout="wide")
+        st.set_page_config(page_title="mAICoach", page_icon="\U0001F3C3", layout="wide")
     except Exception:
         pass
     _inject_css()
-    st.title("🏃 mAICoach")
+    st.title("\U0001F3C3 mAICoach")
     _refresh_local_data_from_storage()
     context = build_context()
     st.caption(
@@ -230,8 +274,24 @@ def render_health_app() -> None:
         "(via GitHub Actions) - hier steeds de laatst beschikbare synchronisatie."
     )
     if st.session_state.get("data_refresh_error"):
-        with st.expander("⚠️ Kon de opslag niet verversen (details)"):
+        with st.expander("\u26A0\uFE0F Kon de opslag niet verversen (details)"):
             st.code(st.session_state["data_refresh_error"])
+    # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een stille (niet-
+    # exceptie-gebaseerde) GCS-storing krijgt hier dezelfde zichtbaarheid als
+    # een harde fout hierboven, met de concrete oorzaak erbij.
+    if st.session_state.get("data_refresh_warning"):
+        status = st.session_state["data_refresh_warning"]
+        with st.expander("\u26A0\uFE0F Cloud-opslag lijkt onbereikbaar (details)", expanded=True):
+            st.warning(
+                "Er kon niets uit de cloud-opslag teruggehaald worden. Mogelijk is dit "
+                "gewoon een korte, voorbijgaande storing - maar controleer bij twijfel "
+                "de onderstaande foutmelding."
+            )
+            st.code(
+                f"Bucket: {status['bucket_name']}\n"
+                f"Credentials-bron: {status['credentials_source']}\n"
+                f"Foutmelding: {status['error']}"
+            )
     with st.expander("Gegevens verversen"):
         st.caption(
             "Haalt de laatst door de uur-gebaseerde achtergrondtaak gesynchroniseerde "
@@ -245,9 +305,19 @@ def render_health_app() -> None:
                 f"{last_result.get('activities', 0)} activiteiten."
             )
         if st.button("Nu verversen"):
+            # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: de GCS-verbinding
+            # wordt procesbreed gecached (@lru_cache in gcs_store.get_bucket()).
+            # Zonder deze reset zou het herstellen van bv. facturering pas na
+            # een volledige herstart van de Streamlit-app effect hebben.
+            try:
+                from AICoach.gcs_store import clear_bucket_cache
+                clear_bucket_cache()
+            except Exception:  # noqa: BLE001
+                pass
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state.pop("dashboard_selected_date", None)
+            st.session_state.pop("data_refresh_warning", None)
             # Forceert een nieuwe GCS-lezing, ook al is de 5-minuten-termijn
             # nog niet verstreken.
             st.session_state.pop("_data_mirror_last_refreshed_at", None)

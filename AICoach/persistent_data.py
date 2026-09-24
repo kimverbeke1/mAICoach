@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#persistent_data.py
 """Persistente cache voor mAICoach-data (history, wellness, activities en
 activity streams) op GCS.
 
@@ -9,47 +10,89 @@ spiegelt die data naar Google Cloud Storage, met een automatische lokale fallbac
 wanneer GCS niet beschikbaar is.
 
 Objectindeling in de bucket:
-- history_bulk.json                     (NIEUW, v2 - alle dagen in ÉÉN object)
+- history_bulk.json                     (NIEUW, v2 - alle dagen in EEN object)
 - history/<YYYY-MM-DD>.json             (LEGACY, v1 - alleen nog gelezen)
 - wellness/wellness.json                (NIEUW)
 - activities/activities.json            (NIEUW)
 - activity_streams/<activity_id>.csv
 
 MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15 (kritieke bugfix):
-BUG (opgelost, gemeld door Kim): op de cloud toonde het Dashboard-tabblad wél
+BUG (opgelost, gemeld door Kim): op de cloud toonde het Dashboard-tabblad wel
 data, maar de tabbladen Recovery en Activiteiten bleven LEEG. Oorzaak: deze
 module persisteerde uitsluitend history/ (en activity_streams/). wellness.json
 en activities.json werden NERGENS naar GCS weggeschreven - ze bleven puur
 lokale bestanden.
+
 Zolang de Streamlit-app zelf nog de sync uitvoerde, viel dat niet op: die
 schreef die bestanden lokaal weg in dezelfde container die ze daarna ook las.
 Sinds MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14 draait de sync echter in
 een APARTE GitHub Actions-runner. Die runner schrijft wellness.json en
 activities.json lokaal weg en wordt daarna VERNIETIGD - die twee bestanden
 bereiken de Streamlit-container dus nooit meer. Enkel history/ overleefde,
-omdat dat als enige wél naar GCS werd gespiegeld.
+omdat dat als enige wel naar GCS werd gespiegeld.
+
 Dat verklaarde precies het waargenomen patroon:
-  Dashboard    -> leest data/history/*.json      -> wél in GCS  -> werkte
+  Dashboard    -> leest data/history/*.json      -> wel in GCS  -> werkte
   Recovery     -> leest data/wellness/wellness.json -> niet in GCS -> leeg
   Activiteiten -> leest data/activities/activities.json -> niet in GCS -> leeg
+
 Fix: save_wellness()/save_activities() + mirror_wellness_to_local()/
 mirror_activities_to_local() hieronder, aangeroepen vanuit sync_latest.py
 (schrijven) en training_dashboard.py (terugspiegelen bij het laden).
 
 MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15 (performance-fix):
 BUG (opgelost, gemeld door Kim: "altijd traag, niet alleen bij koude start"):
-save_history_bulk() schreef ÉÉN GCS-object PER DAG, en mirror_history_to_local()
+save_history_bulk() schreef EEN GCS-object PER DAG, en mirror_history_to_local()
 haalde die via list_texts() weer op. Bij 736 gesynchroniseerde dagen betekende
 dat 736 afzonderlijke blob.download_as_text()-netwerkaanroepen bij ELKE
 spiegeling - inherent traag over het netwerk, ongeacht caching aan de
 app-kant. Lokaal viel dat niet op (gcs_available() is daar False, dus 0
 downloads), op de cloud wel.
-Fix: history wordt nu als ÉÉN bulk-object (history_bulk.json) geschreven en
-gelezen - één upload, één download. De oude per-dag-objecten onder history/
+
+Fix: history wordt nu als EEN bulk-object (history_bulk.json) geschreven en
+gelezen - een upload, een download. De oude per-dag-objecten onder history/
 worden nog steeds GELEZEN als fallback (backwards compatible met reeds
 bestaande data in de bucket), maar er worden geen nieuwe meer geschreven.
 Na de eerstvolgende sync-run staat alles in het bulk-object en is de
 spiegeling een enkele netwerkaanroep.
+
+--------------------------------------------------------------------------
+MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24 (op verzoek van Kim, na een
+concreet incident)
+--------------------------------------------------------------------------
+WAT ER GEBEURDE: Kim's Cloud Storage-project had geen actieve facturering
+meer ("You can use Cloud Storage after you enable billing"). Alle GCS-
+aanroepen faalden dus stil (zie gcs_store.get_bucket(), dat elke fout
+opvangt en None teruggeeft). Maar de GitHub Actions-sync bleef WEKENLANG
+"succesvol" ogen:
+
+    activities: {'oldest': ..., 'newest': '2026-09-24', 'downloaded': 152,
+                 'stored': 152, 'persisted': 152}
+    wellness:   {..., 'persisted': 731}
+    history:    {'days': 731}
+
+ROOT CAUSE: save_wellness()/save_activities()/save_history_bulk() gaven
+altijd len(records) terug - het aantal LOKAAL geschreven records op de
+(nadien vernietigde) GitHub Actions-runner - ongeacht of de GCS-schrijf-
+actie erna uberhaupt lukte. "persisted: 152" zag er in de log uit als
+"152 records naar de cloud weggeschreven", maar betekende in werkelijkheid
+enkel "152 records lokaal weggeschreven op een wegwerp-runner". Vandaar dat
+de app bij elke cold start weer op nul begon: er stond simpelweg nooit iets
+in de bucket.
+
+FIX: de drie save_*-functies hieronder geven nu een dict terug met zowel
+het lokale aantal als een EXPLICIETE gcs_synced-vlag (en, bij falen, de
+concrete foutmelding via gcs_store.diagnose()). sync_latest.py gebruikt dat
+om, zodra GCS niet bereikbaar is, een luide, niet te missen waarschuwing in
+de GitHub Actions-log te tonen EN de run als mislukt te laten eindigen -
+in plaats van groen te blijven terwijl er niets bewaard wordt.
+
+BELANGRIJK: de OUDE aanroepers die nog een kaal getal verwachtten (str(),
+optellen, ...) zouden hierdoor breken. Er bestond er maar een: sync_latest.py,
+en die is in dezelfde ronde meegepatcht. Is er ergens nog een andere
+aanroeper die een int verwacht, dan geeft int(resultaat) een TypeError in
+plaats van stil een verkeerd getal te gebruiken - dat is bewust: beter een
+zichtbare fout dan een nieuwe stille aanname.
 """
 from __future__ import annotations
 
@@ -58,6 +101,7 @@ import json
 
 from AICoach.gcs_store import (
     delete_object,
+    diagnose as gcs_diagnose,
     gcs_available,
     list_texts,
     object_exists,
@@ -73,7 +117,7 @@ ACTIVITIES_FILE = ROOT / "data" / "activities" / "activities.json"
 
 HISTORY_PREFIX = "history/"
 STREAMS_PREFIX = "activity_streams/"
-# MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: alle history-dagen in één object.
+# MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: alle history-dagen in een object.
 HISTORY_BULK_PATH = "history_bulk.json"
 # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15: nieuwe objectpaden.
 WELLNESS_PATH = "wellness/wellness.json"
@@ -83,6 +127,14 @@ ACTIVITIES_PATH = "activities/activities.json"
 def backend() -> str:
     """Geeft 'gcs' of 'lokaal' terug."""
     return "gcs" if gcs_available() else "lokaal"
+
+
+def gcs_status() -> dict:
+    """MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: doorgeefluik naar
+    gcs_store.diagnose(), zodat aanroepers hier (sync_latest.py,
+    training_dashboard.py) geen aparte import nodig hebben en de
+    diagnostische laag op een plek blijft."""
+    return gcs_diagnose()
 
 
 def _write_local_json(path: Path, payload) -> None:
@@ -102,29 +154,42 @@ def _read_local_json(path: Path, default):
 # --------------------------------------------------------------------------- #
 # History
 # --------------------------------------------------------------------------- #
-def save_history_day(date_key: str, summary: dict) -> None:
-    """Bewaar één dag. Schrijft altijd lokaal; op GCS wordt de dag in het
+def save_history_day(date_key: str, summary: dict) -> dict:
+    """Bewaar een dag. Schrijft altijd lokaal; op GCS wordt de dag in het
     bulk-object bijgewerkt (lees-wijzig-schrijf), zodat er geen losse
-    per-dag-objecten meer bijkomen."""
+    per-dag-objecten meer bijkomen.
+
+    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geeft nu
+    {"stored_locally": bool, "gcs_synced": bool} terug i.p.v. niets, zodat
+    een mislukte GCS-schrijfactie hier niet langer onopgemerkt blijft."""
     date_key = str(date_key)[:10]
     if not date_key:
-        return
+        return {"stored_locally": False, "gcs_synced": False}
     _write_local_json(HISTORY_DIR / f"{date_key}.json", summary)
+    gcs_synced = False
     if gcs_available():
         bulk = _read_history_bulk_remote() or {}
         bulk[date_key] = summary
-        write_text(
+        gcs_synced = write_text(
             HISTORY_BULK_PATH,
             json.dumps(bulk, ensure_ascii=False),
             content_type="application/json",
         )
+    return {"stored_locally": True, "gcs_synced": gcs_synced}
 
 
-def save_history_bulk(summaries_by_date: dict) -> int:
-    """MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: schrijft alle dagen als ÉÉN
-    GCS-object in plaats van één object per dag (was: 736 afzonderlijke
+def save_history_bulk(summaries_by_date: dict) -> dict:
+    """MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: schrijft alle dagen als EEN
+    GCS-object in plaats van een object per dag (was: 736 afzonderlijke
     uploads/downloads bij Kim). Lokale per-dag-bestanden blijven behouden,
-    want data_loaders.load_history() leest data/history/*.json rechtstreeks."""
+    want data_loaders.load_history() leest data/history/*.json rechtstreeks.
+
+    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: gaf voorheen enkel
+    len(cleaned) terug - het lokale aantal, ongeacht of write_text() naar
+    GCS effectief slaagde. Dat liet een gefaalde GCS-schrijfactie (bv. door
+    de billing-storing) in de sync-log verschijnen als "history: {'days':
+    731}", wat aanvoelde als succes terwijl er niets in de bucket
+    terechtkwam. Geeft nu expliciet beide cijfers terug."""
     cleaned = {}
     for date_key, summary in summaries_by_date.items():
         key = str(date_key)[:10]
@@ -132,13 +197,15 @@ def save_history_bulk(summaries_by_date: dict) -> int:
             continue
         cleaned[key] = summary
         _write_local_json(HISTORY_DIR / f"{key}.json", summary)
+
+    gcs_synced = False
     if cleaned and gcs_available():
-        write_text(
+        gcs_synced = write_text(
             HISTORY_BULK_PATH,
             json.dumps(cleaned, ensure_ascii=False),
             content_type="application/json",
         )
-    return len(cleaned)
+    return {"stored_locally": len(cleaned), "gcs_synced": gcs_synced}
 
 
 def _read_history_bulk_remote():
@@ -206,8 +273,9 @@ def mirror_history_to_local() -> int:
     """Schrijf de GCS-history naar lokale JSON-bestanden, zodat bestaande code
     die data/history/*.json rechtstreeks leest (data_loaders.load_history) na
     een koude start werkt.
+
     MATCHFITAI_HISTORY_BULK_OBJECT_2026-09-15: leest nu bij voorkeur het
-    bulk-object (één netwerkaanroep i.p.v. één per dag)."""
+    bulk-object (een netwerkaanroep i.p.v. een per dag)."""
     if not gcs_available():
         return 0
     remote = _read_history_bulk_remote()
@@ -227,37 +295,47 @@ def mirror_history_to_local() -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Wellness + activities (elk één JSON-bestand)
+# Wellness + activities (elk een JSON-bestand)
 # MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15
 # --------------------------------------------------------------------------- #
-def save_wellness(records) -> int:
+def save_wellness(records) -> dict:
     """Bewaar de volledige wellness-lijst (bron voor HRV/slaap in de
-    Recovery-tab). Schrijft lokaal én - indien beschikbaar - naar GCS."""
+    Recovery-tab). Schrijft lokaal en - indien beschikbaar - naar GCS.
+
+    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geeft nu
+    {"stored_locally": int, "gcs_synced": bool} terug i.p.v. kaal
+    len(records) - zie de moduledocstring voor waarom dat onderscheid
+    cruciaal is."""
     if not isinstance(records, list):
-        return 0
+        return {"stored_locally": 0, "gcs_synced": False}
     _write_local_json(WELLNESS_FILE, records)
+    gcs_synced = False
     if gcs_available():
-        write_text(
+        gcs_synced = write_text(
             WELLNESS_PATH,
             json.dumps(records, ensure_ascii=False),
             content_type="application/json",
         )
-    return len(records)
+    return {"stored_locally": len(records), "gcs_synced": gcs_synced}
 
 
-def save_activities(records) -> int:
+def save_activities(records) -> dict:
     """Bewaar de volledige activiteitenlijst (bron voor de Activiteiten-tab).
-    Schrijft lokaal én - indien beschikbaar - naar GCS."""
+    Schrijft lokaal en - indien beschikbaar - naar GCS.
+
+    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: zie save_wellness()
+    hierboven - zelfde reden, zelfde vorm."""
     if not isinstance(records, list):
-        return 0
+        return {"stored_locally": 0, "gcs_synced": False}
     _write_local_json(ACTIVITIES_FILE, records)
+    gcs_synced = False
     if gcs_available():
-        write_text(
+        gcs_synced = write_text(
             ACTIVITIES_PATH,
             json.dumps(records, ensure_ascii=False),
             content_type="application/json",
         )
-    return len(records)
+    return {"stored_locally": len(records), "gcs_synced": gcs_synced}
 
 
 def mirror_wellness_to_local() -> int:
@@ -297,8 +375,8 @@ def mirror_activities_to_local() -> int:
 
 
 def mirror_all_to_local() -> dict:
-    """Spiegel history, wellness én activities in één keer terug naar lokaal.
-    Dit is wat de Streamlit-app bij het laden moet aanroepen: vóór deze fix
+    """Spiegel history, wellness en activities in een keer terug naar lokaal.
+    Dit is wat de Streamlit-app bij het laden moet aanroepen: voor deze fix
     werd enkel history gespiegeld, waardoor Recovery en Activiteiten op de
     cloud leeg bleven (zie moduledocstring)."""
     return {
