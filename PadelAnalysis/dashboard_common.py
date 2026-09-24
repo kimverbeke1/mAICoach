@@ -552,14 +552,25 @@ def _official_current_rank(player_id: str) -> Optional[float]:
     # cijfer bepalen, en die mengt het officiele met het virtuele klassement
     # (Kim werd zo P300 getoond terwijl hij officieel P200 is). De historiek
     # blijft enkel terugval zolang er nog geen snapshot bestaat.
+    # PADEL_ANALYSIS_OFFICIAL_RANK_TVL_FIRST_2026-09-25: de TVL-historiek is opnieuw de PRIMAIRE bron.
+    # De padelstat-snapshot komt uit de zoekkaart ("P200 - CLUB",
+    # matched_klassement) en loopt aantoonbaar achter: speler 1790766
+    # kreeg daar P200 terwijl scrape_klassement.py (versie
+    # 2026-09-23-official-first) correct P300 leest als
+    # selected_period_klassement. De snapshot blijft enkel terugval
+    # zolang er nog GEEN historiek bestaat voor deze speler.
+    rows = od._history_rows(ranking_doc)
+    if rows and rows[0].get("rank") is not None:
+        try:
+            return float(rows[0]["rank"])
+        except (TypeError, ValueError):
+            pass
+
     snapshot = _official_rank_from_padelstat_snapshot(player_id)
     if snapshot is not None:
         return snapshot
 
-    rows = od._history_rows(ranking_doc)
-    return float(rows[0]["rank"]) if rows else None
-
-
+    return None
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24
 # ─────────────────────────────────────────────

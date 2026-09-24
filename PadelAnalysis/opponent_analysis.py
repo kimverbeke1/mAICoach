@@ -177,7 +177,7 @@ except Exception:  # pragma: no cover
     def trigger_github_actions_scrape(**_kwargs):
         return False, "cloud_helpers ontbreekt"
 REPORTS_COLLECTION = "team_scouting_reports"
-REPORT_SCHEMA_VERSION = 9  # padelstat-snapshot is voortaan autoritatief voor huidig officieel klassement
+REPORT_SCHEMA_VERSION = 10  # TVL officieel klassement is weer autoritatief; padelstat-snapshot enkel als terugval
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -243,7 +243,10 @@ def _build_report(
         except Exception:
             snapshot = {}
         snapshot_rank = snapshot.get("klassement")
-        if snapshot_rank is not None:
+        # PADEL_ANALYSIS_OFFICIAL_RANK_TVL_FIRST_2026-09-25: enkel nog terugval. Voorheen overschreef deze regel
+        # het TVL-klassement ALTIJD met de padelstat-zoekkaartwaarde,
+        # waardoor elke speler het achterlopende cijfer toonde.
+        if snapshot_rank is not None and summary.get("current_rank") is None:
             try:
                 summary["current_rank"] = int(snapshot_rank)
             except (TypeError, ValueError):
