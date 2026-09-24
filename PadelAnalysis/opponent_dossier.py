@@ -498,6 +498,68 @@ def _form_string(matches: list[dict], limit: int = 8) -> str:
 # ─────────────────────────────────────────────
 # Spelerssamenvatting (plat, opslagbaar in Firestore)
 # ─────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24
+# ─────────────────────────────────────────────
+def _official_rank_from_padelstat_snapshot(player_id) -> Optional[float]:
+    """Het HUIDIGE, OFFICIELE klassement uit de padelstat-snapshot.
+
+    Dit is de enige bron die bewezen correct is voor beide geteste spelers
+    (zie de toelichting in apply_klassement_source_fix.py). De TVL-
+    historiekpagina mengt het officiele en het virtuele klassement door
+    elkaar: bij de ene speler klopt selected_period_klassement, bij de
+    andere vorig_klassement - er is geen regel die voor iedereen werkt.
+
+    Geeft None terug zodra er nog geen snapshot is; de aanroeper valt dan
+    terug op de historiek. Bewust foutbestendig: een onverwachte
+    firebase_service-vorm mag nooit een pagina laten crashen.
+    """
+    if not player_id:
+        return None
+    pid = str(player_id)
+
+    # 1) Expliciete accessor, indien aanwezig.
+    for naam in ("get_official_klassement_via_padelstat",
+                 "get_official_klassement",
+                 "get_official_rank_via_padelstat"):
+        functie = getattr(fb, naam, None)
+        if not callable(functie):
+            continue
+        try:
+            data = functie(pid) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(data, (int, float)):
+            return float(data)
+        if isinstance(data, dict):
+            for veld in ("klassement", "official_klassement", "rank", "value"):
+                waarde = data.get(veld)
+                if waarde is not None:
+                    try:
+                        return float(_parse_rank(waarde) if isinstance(waarde, str) else waarde)
+                    except (TypeError, ValueError):
+                        pass
+
+    # 2) Rechtstreeks van het profieldocument, onder het veld dat
+    #    save_official_klassement_from_padelstat() wegschrijft.
+    veldnaam = getattr(fb, "OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD",
+                       "official_klassement_via_padelstat")
+    try:
+        profiel = fb.get_player_profile(pid) or {}
+    except Exception:  # noqa: BLE001
+        profiel = {}
+    ruw = profiel.get(veldnaam)
+    if isinstance(ruw, dict):
+        ruw = ruw.get("klassement") or ruw.get("value")
+    if ruw is not None:
+        try:
+            return float(_parse_rank(ruw) if isinstance(ruw, str) else ruw)
+        except (TypeError, ValueError):
+            pass
+    return None
+
 def build_player_summary(
     player_id: str,
     name: str,
@@ -543,11 +605,30 @@ def build_player_summary(
     # fallbacks hieronder, die berusten op tegenstander-matchrecords en dus
     # geen "virtueel_klassement"-concept kennen).
     current_virtual_rank = _current_virtual_rank(history_rows)
-    current_rank = current_rank or _current_rank_fallback(player_id, matches, rank_search_docs)
-    best_rank = best_rank or _best_rank_opportunistic(player_id, rank_search_docs)
-    # 'beste' is het HOOGSTE getal (hoger = sterker), niet het laagste.
-    if current_rank is not None and (best_rank is None or current_rank > best_rank):
-        best_rank = current_rank
+    # PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24: het huidige
+    # officiele klassement komt nu uit de padelstat-snapshot - dezelfde
+    # voorrangsregel als dashboard_common._official_current_rank(), zodat
+    # Spelers, Mijn profiel, Team-analyse en Opstelling-analyse gegarandeerd
+    # hetzelfde cijfer tonen. De TVL-historiek blijft terugval.
+    snapshot_rank = _official_rank_from_padelstat_snapshot(player_id)
+    if snapshot_rank is not None:
+        current_rank = int(snapshot_rank)
+    else:
+        current_rank = current_rank or _current_rank_fallback(
+            player_id, matches, rank_search_docs
+        )
+
+    # "Beste ooit" komt UITSLUITEND uit de echte, gescrapete klassement_
+    # history. De vorige regel viel terug op _best_rank_opportunistic(), die
+    # losse opp1_ranking/opp2_ranking-tekstvelden uit matchrecords van ANDERE
+    # spelers maximaliseerde - een enkele foute waarde daar maakte "beste
+    # ooit" en de bijbehorende datum permanent verkeerd. Bovendien werd het
+    # huidige cijfer erin meegenomen, waardoor een fout "huidig" zich ook
+    # naar "beste ooit" voortplantte. Liever eerlijk "Onbekend" dan een
+    # cijfer dat niet te verantwoorden is.
+    best_rank = max((row["rank"] for row in history_rows), default=None)
+    if best_rank is None:
+        best_when = None
     # PADEL_ANALYSIS_PADELSTAT_ONLY_2026-09-13: 'playing strength' komt nu
     # UITSLUITEND uit de gecachete padelstats.be-waarde. Geen eigen
     # berekening meer als fallback - is er niets gecached, dan blijft dit

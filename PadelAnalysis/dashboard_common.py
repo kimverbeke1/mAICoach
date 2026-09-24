@@ -467,6 +467,68 @@ def _get_saved_schedule(player_id: str):
     if not isinstance(fixtures, list):
         fixtures = []
     return fixtures, prof.get("interclub_schedule_scraped_at")
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24
+# ─────────────────────────────────────────────
+def _official_rank_from_padelstat_snapshot(player_id) -> Optional[float]:
+    """Het HUIDIGE, OFFICIELE klassement uit de padelstat-snapshot.
+
+    Dit is de enige bron die bewezen correct is voor beide geteste spelers
+    (zie de toelichting in apply_klassement_source_fix.py). De TVL-
+    historiekpagina mengt het officiele en het virtuele klassement door
+    elkaar: bij de ene speler klopt selected_period_klassement, bij de
+    andere vorig_klassement - er is geen regel die voor iedereen werkt.
+
+    Geeft None terug zodra er nog geen snapshot is; de aanroeper valt dan
+    terug op de historiek. Bewust foutbestendig: een onverwachte
+    firebase_service-vorm mag nooit een pagina laten crashen.
+    """
+    if not player_id:
+        return None
+    pid = str(player_id)
+
+    # 1) Expliciete accessor, indien aanwezig.
+    for naam in ("get_official_klassement_via_padelstat",
+                 "get_official_klassement",
+                 "get_official_rank_via_padelstat"):
+        functie = getattr(fb, naam, None)
+        if not callable(functie):
+            continue
+        try:
+            data = functie(pid) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(data, (int, float)):
+            return float(data)
+        if isinstance(data, dict):
+            for veld in ("klassement", "official_klassement", "rank", "value"):
+                waarde = data.get(veld)
+                if waarde is not None:
+                    try:
+                        return float(od._parse_rank(waarde) if isinstance(waarde, str) else waarde)
+                    except (TypeError, ValueError):
+                        pass
+
+    # 2) Rechtstreeks van het profieldocument, onder het veld dat
+    #    save_official_klassement_from_padelstat() wegschrijft.
+    veldnaam = getattr(fb, "OFFICIAL_KLASSEMENT_VIA_PADELSTAT_FIELD",
+                       "official_klassement_via_padelstat")
+    try:
+        profiel = fb.get_player_profile(pid) or {}
+    except Exception:  # noqa: BLE001
+        profiel = {}
+    ruw = profiel.get(veldnaam)
+    if isinstance(ruw, dict):
+        ruw = ruw.get("klassement") or ruw.get("value")
+    if ruw is not None:
+        try:
+            return float(od._parse_rank(ruw) if isinstance(ruw, str) else ruw)
+        except (TypeError, ValueError):
+            pass
+    return None
+
 def _official_current_rank(player_id: str) -> Optional[float]:
     """PADEL_ANALYSIS_MATCH1_STRONGEST_RULE_2026-09-14:
     Geeft het OFFICIËLE, HUIDIGE TVL-klassement terug voor een eigen speler -
@@ -484,6 +546,16 @@ def _official_current_rank(player_id: str) -> Optional[float]:
     except Exception:
         profile_doc = {}
     ranking_doc = doc if doc.get("klassement_history") else profile_doc
+
+    # PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24: de padelstat-
+    # snapshot krijgt voorrang. De TVL-historiek bleef hier het zichtbare
+    # cijfer bepalen, en die mengt het officiele met het virtuele klassement
+    # (Kim werd zo P300 getoond terwijl hij officieel P200 is). De historiek
+    # blijft enkel terugval zolang er nog geen snapshot bestaat.
+    snapshot = _official_rank_from_padelstat_snapshot(player_id)
+    if snapshot is not None:
+        return snapshot
+
     rows = od._history_rows(ranking_doc)
     return float(rows[0]["rank"]) if rows else None
 def _render_player_ranking_summary(player_id: str) -> None:
