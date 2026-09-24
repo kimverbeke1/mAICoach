@@ -179,34 +179,104 @@ def _extract_selected_period_klassement_from_text(text: str) -> str | None:
     return None
 
 
+def _label_then_rank(text: str) -> str | None:
+    """Zoekt het EERSTE P-getal dat NA het label 'geselecteerde periode'
+    komt. Een P-waarde die VOOR het label staat hoort bij iets anders en
+    mag nooit meegenomen worden."""
+    clean = _clean(text)
+    m = re.search(r"geselecteerde\s+periode", clean, flags=re.I)
+    if not m:
+        return None
+    return _rank(clean[m.end():])
+
+
 def _extract_selected_period_klassement_from_html(html: str) -> str | None:
-    """Zoekt ook in tabelrijen/cellen naar het label 'geselecteerde periode'."""
+    """Haalt het klassement van de GESELECTEERDE periode uit de padel-form.
+
+    PADEL_ANALYSIS_SELECTED_PERIOD_WRAPPER_FIX_2026-09-24
+    ----------------------------------------------------------------------
+    ROOT CAUSE (gereproduceerd, geen vermoeden): de vorige implementatie deed
+
+        for row in soup.find_all(["tr", "li", "div"]):
+            if "geselecteerde periode" not in row_text.lower(): continue
+            for c in reversed(cells):
+                r = _rank(c)
+                if r: return r
+
+    Twee eigenschappen daarvan zijn samen fataal:
+
+      1. find_all() levert elementen in DOCUMENTVOLGORDE, en dat betekent bij
+         geneste elementen: BUITENSTE EERST. Een grote wrapper-<div> die
+         ergens diep vanbinnen de tekst "geselecteerde periode" bevat, matcht
+         dus VOOR de kleine tabelrij waar het label echt staat.
+      2. reversed(cells) pakt vervolgens de LAATSTE rank-achtige waarde in
+         dat hele blok. In zo'n wrapper is dat niet het klassement bij het
+         label, maar gewoon de laatste P-waarde die toevallig in dat blok
+         voorkomt - in de praktijk een rij uit de niveau-/winratetabel.
+
+    Concreet bewijs: Kim Verbeke (1790766) kreeg P300 terwijl hij officieel
+    P200 is en virtueel P100. Die P300 kwam uit zijn niveau-tabel (hij
+    speelde 3 matchen op P300-niveau) en stond simpelweg als laatste in de
+    wrapper. Bij Baete Evelien (615023) gaf dezelfde fout toevallig wel het
+    juiste cijfer - vandaar dat het bij de ene speler klopte en bij de
+    andere niet, wat de diagnose lang vertroebeld heeft.
+
+    FIX, drie samenwerkende regels:
+      1. Verzamel ALLE elementen met het label en neem het KLEINSTE
+         (minste tekens). Dat is per definitie de label-rij zelf en nooit
+         een wrapper die de halve pagina omvat.
+      2. Neem binnen dat element enkel een P-waarde die NA het label komt
+         (_label_then_rank). Een waarde ervoor hoort bij iets anders.
+      3. Negeer elementen die duidelijk de niveau-/winratetabel bevatten
+         (herkenbaar aan meerdere P-waarden met percentages) - daar staat
+         nooit een klassement, enkel tegenstander-niveaus.
+    """
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html or "", "html.parser")
     except Exception:
         return None
 
-    # 1) Rij-gebaseerd: label in één cel, klassement in volgende cel.
-    for row in soup.find_all(["tr", "li", "div"]):
-        cells = [_clean(c.get_text(" ")) for c in row.find_all(["td", "th", "span", "label", "strong"])]
-        row_text = _clean(row.get_text(" "))
-        if "geselecteerde periode" not in row_text.lower():
+    kandidaten = []
+    for el in soup.find_all(["tr", "li", "div", "p", "span"]):
+        tekst = _clean(el.get_text(" "))
+        if "geselecteerde periode" not in tekst.lower():
             continue
+        # Bevat dit element de niveau-/winratetabel? Dan is elke P-waarde
+        # erin een tegenstander-niveau, geen klassement.
+        if len(re.findall(r"\d+(?:[,.]\d+)?\s*%", tekst)) >= 2:
+            continue
+        kandidaten.append((len(tekst), el, tekst))
 
-        # Probeer eerst tegen het einde van de rij, omdat label-links kan staan en waarde rechts.
-        for c in reversed(cells):
-            r = _rank(c)
+    if kandidaten:
+        # Kleinste eerst: de label-rij zelf, niet een omhullende wrapper.
+        kandidaten.sort(key=lambda k: k[0])
+        for _lengte, el, tekst in kandidaten:
+            # Eerst de cellen NA de cel met het label (klassieke
+            # label-links/waarde-rechts-opbouw in een tabelrij).
+            cellen = [_clean(c.get_text(" ")) for c in el.find_all(["td", "th", "span", "label", "strong"])]
+            label_index = next(
+                (i for i, c in enumerate(cellen) if "geselecteerde periode" in c.lower()),
+                None,
+            )
+            if label_index is not None:
+                for c in cellen[label_index + 1:]:
+                    r = _rank(c)
+                    if r:
+                        return r
+            # Anders: het eerste P-getal na het label in de platte tekst.
+            r = _label_then_rank(tekst)
             if r:
                 return r
 
-        r = _extract_selected_period_klassement_from_text(row_text)
-        if r:
-            return r
+    # Tekst-gebaseerde fallback op de volledige padel-form, met dezelfde
+    # regel "enkel wat NA het label komt".
+    volledige_tekst = _clean(soup.get_text(" "))
+    r = _label_then_rank(volledige_tekst)
+    if r:
+        return r
+    return _extract_selected_period_klassement_from_text(volledige_tekst)
 
-    # 2) Tekst-gebaseerd fallback op de volledige padel-form.
-    text = _clean(soup.get_text(" "))
-    return _extract_selected_period_klassement_from_text(text)
 
 def _parse(html, selected_label=None):
     from bs4 import BeautifulSoup
@@ -285,7 +355,7 @@ def scrape_klassement(player_id,max_periods=None,headless=True,delay_between_per
         finally: ctx.close(); browser.close()
 # PADEL_ANALYSIS_DOMINANT_LEVEL_FIX_2026-09-23: versiestempel, zodat in de
 # logoutput meteen zichtbaar is of de gefixte versie effectief draait.
-KLASSEMENT_PARSER_VERSION = "2026-09-23-official-first"
+KLASSEMENT_PARSER_VERSION = "2026-09-24-wrapper-fix"
 
 
 def klassement_to_history_summary(periods):
@@ -383,13 +453,34 @@ def klassement_to_history_summary(periods):
         # wel nog altijd een bruikbare indicatie van het niveau waarop
         # effectief gespeeld werd - dus expliciet als zodanig meegegeven
         # i.p.v. weggegooid.
-        virtueel = _dominant_level(p) if i == 0 else None
+        # PADEL_ANALYSIS_VIRTUEEL_FROM_BEREKEND_2026-09-24: het VIRTUELE
+        # klassement is de voorspelling van TVL voor de eerstvolgende
+        # officiele berekening. Dat staat op de pagina onder labels als
+        # "berekend klassement" / "nieuw klassement" / "klassement deze
+        # periode" - precies wat _parse() al als berekend_klassement
+        # opslaat, maar wat tot nu toe nergens gebruikt werd.
+        #
+        # Voorheen stond hier _dominant_level(): het niveau waarop de speler
+        # de meeste matchen speelde. Dat is een frequentietelling over
+        # tegenstander-niveaus en heeft niets met een klassement te maken.
+        # Bevestiging: Kim is virtueel P100, maar zijn dominante niveau was
+        # een heel ander cijfer - die twee vallen alleen bij toeval samen.
+        #
+        # Het dominante niveau blijft wel apart beschikbaar als
+        # "dominant_niveau" (beschrijvend, geen klassement), zodat die
+        # informatie niet verloren gaat maar ook nooit meer als klassement
+        # gepresenteerd kan worden.
+        virtueel = p.get("berekend_klassement") if i == 0 else None
+        dominant = _dominant_level(p) if i == 0 else None
 
         out.append({
             "datum": period_start_date(label) if "period_start_date" in globals() else None,
             "periode": label,
             "klassement": klassement,
             "virtueel_klassement": virtueel if virtueel != klassement else None,
+            # Beschrijvend: het niveau waarop deze speler de meeste matchen
+            # speelde. Nadrukkelijk GEEN klassement - zie hierboven.
+            "dominant_niveau": dominant,
             # True zodra "klassement" hierboven niet van de pagina zelf kwam
             # maar afgeleid is uit een frequentietelling - de app kan dit
             # gebruiken om zo'n cijfer nooit als officieel te presenteren.
