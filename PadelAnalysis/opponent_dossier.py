@@ -560,6 +560,50 @@ def _official_rank_from_padelstat_snapshot(player_id) -> Optional[float]:
             pass
     return None
 
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24
+# ─────────────────────────────────────────────
+def _correct_history_with_snapshot(player_id, rows: list[dict]) -> list[dict]:
+    """Lijnt de RECENTSTE historiekrij uit met de padelstat-snapshot.
+
+    PROBLEEM: sinds PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24 komt
+    "Huidig klassement" uit de padelstat-snapshot, maar de historiekrijen
+    kwamen nog rechtstreeks uit klassement_history. Voor de lopende periode
+    staat daar het cijfer dat de TVL-pagina toont, en dat is het VIRTUELE
+    klassement - de voorspelling voor de eerstvolgende officiele berekening.
+    Kim zag daardoor P200 als metric en P300 in de grafiek eronder.
+
+    AANPAK: het TVL-cijfer wordt niet weggegooid maar VERPLAATST. De rij
+    krijgt het officiele cijfer als 'rank' en het TVL-cijfer als
+    'virtual_rank'. Zo klopt de grafiek met de metric erboven, en heeft
+    render_player_summary_inline() eindelijk structureel iets om in zijn
+    vijfde metric "Virtueel klassement" te tonen.
+
+    Enkel rows[0] wordt aangeraakt: oudere periodes zijn al definitief
+    berekend en kennen geen virtueel cijfer. Wijkt de snapshot niet af, dan
+    gebeurt er niets - dan is er ook niets te melden.
+    """
+    if not rows:
+        return rows
+    snapshot = _official_rank_from_padelstat_snapshot(player_id)
+    if snapshot is None:
+        return rows
+
+    officieel = int(snapshot)
+    recentste = dict(rows[0])
+    getoond = recentste.get("rank")
+    if getoond == officieel:
+        return rows
+
+    recentste["rank"] = officieel
+    # Het cijfer dat TVL toonde is per definitie de voorspelling. Een al
+    # aanwezige virtual_rank (uit het dominante niveau) is minder
+    # betekenisvol en wordt hierdoor vervangen.
+    recentste["virtual_rank"] = getoond
+    return [recentste] + list(rows[1:])
+
 def build_player_summary(
     player_id: str,
     name: str,
@@ -604,6 +648,11 @@ def build_player_summary(
     # gescrapete klassement_history (nooit uit de opportunistische
     # fallbacks hieronder, die berusten op tegenstander-matchrecords en dus
     # geen "virtueel_klassement"-concept kennen).
+    # PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24: eerst de recentste
+    # historiekrij uitlijnen met de padelstat-snapshot, zodat de grafiek
+    # hetzelfde officiele cijfer toont als de metric erboven en het
+    # TVL-cijfer als virtueel klassement bewaard blijft.
+    history_rows = _correct_history_with_snapshot(player_id, history_rows)
     current_virtual_rank = _current_virtual_rank(history_rows)
     # PADEL_ANALYSIS_OFFICIAL_RANK_SOURCE_FIX_2026-09-24: het huidige
     # officiele klassement komt nu uit de padelstat-snapshot - dezelfde

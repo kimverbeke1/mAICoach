@@ -558,6 +558,54 @@ def _official_current_rank(player_id: str) -> Optional[float]:
 
     rows = od._history_rows(ranking_doc)
     return float(rows[0]["rank"]) if rows else None
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24
+# ─────────────────────────────────────────────
+def _virtual_rank(player_id: str, official: Optional[float]) -> Optional[int]:
+    """Het VIRTUELE klassement van deze speler: TVL's voorspelling voor de
+    eerstvolgende officiele berekening.
+
+    Op verzoek van Kim ("mss ook wel interessant bij spelers en ploeganalyse
+    om ook virtueel klassement te tonen [...] ik vermoed dat de data
+    beschikbaar is maar niet getoond") - dat vermoeden klopte: het cijfer
+    stond al in klassement_history, maar werd op deze pagina's nergens
+    getoond.
+
+    Geeft None zodra het niet afwijkt van het officiele cijfer; dan valt er
+    niets aparts te melden en blijft de bestaande tweekolomsweergave staan.
+    """
+    try:
+        doc = fb.get_player(player_id) or {}
+    except Exception:
+        doc = {}
+    try:
+        profile_doc = fb.get_player_profile(player_id) or {}
+    except Exception:
+        profile_doc = {}
+    ranking_doc = doc if doc.get("klassement_history") else profile_doc
+
+    try:
+        rows = od._history_rows(ranking_doc)
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    # Het cijfer dat de TVL-pagina voor de lopende periode toont.
+    getoond = rows[0].get("rank")
+    virtueel = rows[0].get("virtual_rank")
+
+    if official is not None and getoond is not None and int(getoond) != int(official):
+        # De historiek toont iets anders dan het officiele cijfer: dat
+        # verschil IS de voorspelling (zie opponent_dossier.
+        # _correct_history_with_snapshot() voor de volledige redenering).
+        return int(getoond)
+    if virtueel is not None and (official is None or int(virtueel) != int(official)):
+        return int(virtueel)
+    return None
+
 def _render_player_ranking_summary(player_id: str) -> None:
     """PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
     Toont het officiële TVL-klassement en de padelstats.be playing strength
@@ -573,12 +621,44 @@ def _render_player_ranking_summary(player_id: str) -> None:
     except Exception:
         cached = None
     padelstat = cached.get("rating") if cached else None
-    c1, c2 = st.columns(2)
-    c1.metric("Officieel klassement", f"P{int(official)}" if official is not None else "Onbekend")
+    # PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24: een DERDE metric
+    # "Virtueel klassement", maar enkel als er effectief een afwijkend
+    # cijfer gekend is - anders blijft de bestaande, rustige
+    # tweekolomsweergave staan i.p.v. een lege kolom te tonen.
+    virtueel = _virtual_rank(player_id, official)
+    if virtueel is not None:
+        c1, c2, c3 = st.columns(3)
+    else:
+        c1, c2 = st.columns(2)
+        c3 = None
+
+    c1.metric(
+        "Officieel klassement",
+        f"P{int(official)}" if official is not None else "Onbekend",
+        help=(
+            "Het klassement dat NU officieel geldt, tot de eerstvolgende "
+            "TVL-berekening (2x per jaar). Komt uit de padelstat-snapshot, de enige "
+            "bron die hiervoor betrouwbaar gebleken is."
+        ),
+    )
     c2.metric(
         "Playing strength (padelstats.be)",
         f"P{padelstat}" if padelstat is not None else "Onbekend",
+        help=(
+            "Onafhankelijke, externe schatting van de speelsterkte door padelstats.be. "
+            "Dit is GEEN TVL-klassement en heeft geen officiele waarde."
+        ),
     )
+    if c3 is not None:
+        c3.metric(
+            "Virtueel klassement", f"P{virtueel}",
+            help=(
+                "De voorspelling van TVL voor de EERSTVOLGENDE officiele "
+                "klassementsberekening, op basis van de resultaten van deze periode. "
+                "Nog niet geldig - het officiele klassement blijft wat links staat, "
+                "en dit cijfer kan bij de definitieve berekening nog wijzigen."
+            ),
+        )
     if padelstat is None:
         st.caption(
             "Playing strength wordt normaal AUTOMATISCH opgehaald van padelstats.be bij "
