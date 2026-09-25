@@ -370,7 +370,11 @@ def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, befo
     """
     if osc is None or not fixtures or not ploeg_id:
         return {}
-    cache_key = f"full_scout_v1_{ploeg_id}_{before_date}"
+    # PADEL_ANALYSIS_STALE_SCOUT_CACHE_BUMP_2026-09-25: versie opgehoogd
+    # zodat sessies met een oude bundle (van voor opponent_won bestond)
+    # niet stil een cache-hit geven zonder dat veld - zie de toelichting
+    # in apply_fixture_score_and_perf_fix.py.
+    cache_key = f"full_scout_v2_{ploeg_id}_{before_date}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
     try:
@@ -857,90 +861,106 @@ def _parse_set_score(score_text: str):
     return sets_links, sets_rechts
 
 
-def _fixture_final_score(fx: dict, boards: list, scouted_team_name: str) -> str:
-    """Eindscore van 1 volledige ontmoeting, bv. 'Ludoviek Padel C 0 - 4 TE
-    eleven C' (aantal GEWONNEN BORDEN, niet sets/games).
+def _fixture_final_score(
+    fx: dict, boards: list, scouted_team_name: str, opponent_ploeg_id: str = None,
+):
+    """Eindscore van 1 volledige ontmoeting (aantal gewonnen BORDEN).
 
-    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_2026-09-25 (op verzoek van Kim: "bij
-    de eerdere ontmoetingen bij de opstelling analyse zou het ook goed zijn
-    om meteen de eindscore te zien bv. Ludoviek Padel C vs TE eleven C:
-    0-4"). Telt per bord, via _parse_set_score(), of de kant met
-    'opponent_pair' (de GESCOUTE ploeg - dat is exact wat deze boards-lijst
-    bijhoudt) dat bord won of verloor, en somt dat op over alle borden van
-    de ontmoeting. Geeft "" terug als er te weinig leesbare scores zijn om
-    een betrouwbare eindstand te tonen - liever niets dan een gokresultaat.
+    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_FIX_2026-09-25 (op verzoek van Kim:
+    "bij ludoviek padel tegen tc eleven zie ik 4-0 maar dat klopt niet. zou
+    1-3 moeten zijn [...] de uitslagen op de website staan genoteerd als
+    score van de winnaar").
+
+    ROOT CAUSE: de vorige versie leidde de eindscore af door PER SET de 2
+    cijfers te vergelijken en de grootste te bestempelen als de kant van
+    "opponent_pair" (in de veronderstelling dat de cijfervolgorde iets zegt
+    over wie won). TVL noteert een bordscore echter altijd als WINNAAR
+    EERST ("6-0 6-1"), nooit als "team A eerst" - die aanname was dus
+    fundamenteel fout, niet incidenteel: het cijfer zelf verraadt nooit wie
+    won, enkel hoe groot het verschil was.
+
+    FIX: gebruikt nu uitsluitend board["opponent_won"] (zie
+    opponent_scout.extract_opponent_lineup(), waar dit ONDUBBELZINNIG
+    berekend wordt via de eigen "won"-indicator van de pagina, losgekoppeld
+    van de setcijfers) - geen enkele aanname over cijfervolgorde meer nodig.
+
+    Geeft (score_text, winner_name) terug, bv. ("1-3", "T.C. ELEVEN C").
+    Geeft (None, None) terug als er te weinig borden een gekend resultaat
+    hebben om een betrouwbare eindstand te tonen.
     """
     home_name = fx.get("home_name") or ""
     away_name = fx.get("away_name") or ""
-    is_scouted_home = bool(
-        scouted_team_name and home_name
-        and (_clean_name(scouted_team_name) in _clean_name(home_name)
-             or _clean_name(home_name) in _clean_name(scouted_team_name))
-    )
-    scouted_wins = other_wins = 0
-    leesbare_borden = 0
-    for b in boards:
-        if len(b.get("opponent_pair") or []) != 2:
-            continue
-        parsed = _parse_set_score(b.get("score"))
-        if parsed is None:
-            continue
-        leesbare_borden += 1
-        links, rechts = parsed
-        if links > rechts:
-            scouted_wins += 1
-        else:
-            other_wins += 1
-    if leesbare_borden == 0:
-        return ""
+
+    scouted_wins = sum(1 for b in boards if b.get("opponent_won") is True)
+    other_wins = sum(1 for b in boards if b.get("opponent_won") is False)
+    known = scouted_wins + other_wins
+    if known == 0:
+        return None, None
+
+    is_scouted_home = None
+    if opponent_ploeg_id is not None:
+        if str(fx.get("home_ploeg_id")) == str(opponent_ploeg_id):
+            is_scouted_home = True
+        elif str(fx.get("away_ploeg_id")) == str(opponent_ploeg_id):
+            is_scouted_home = False
+    if is_scouted_home is None and scouted_team_name and home_name:
+        is_scouted_home = bool(
+            _clean_name(scouted_team_name) in _clean_name(home_name)
+            or _clean_name(home_name) in _clean_name(scouted_team_name)
+        )
+
     if not home_name or not away_name:
-        # Geen teamnamen gekend: toon gewoon de gescoute ploeg als eerste.
-        return f"{scouted_team_name or 'Gescoute ploeg'} {scouted_wins} - {other_wins} tegenstander"
+        winner = None
+        if scouted_wins > other_wins:
+            winner = scouted_team_name or None
+        elif other_wins > scouted_wins:
+            winner = "tegenstander"
+        return f"{scouted_wins}-{other_wins}", winner
+
     if is_scouted_home:
-        return f"{home_name} {scouted_wins} - {other_wins} {away_name}"
-    return f"{home_name} {other_wins} - {scouted_wins} {away_name}"
+        home_wins, away_wins = scouted_wins, other_wins
+    else:
+        home_wins, away_wins = other_wins, scouted_wins
+
+    winner = None
+    if home_wins > away_wins:
+        winner = home_name
+    elif away_wins > home_wins:
+        winner = away_name
+    return f"{home_wins}-{away_wins}", winner
 
 
 def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle: dict = None) -> None:
     """Eerdere ontmoetingen van de tegenstander, kiesbaar via dropdown.
 
-    PADEL_ANALYSIS_ALL_FIXTURES_DROPDOWN_2026-09-24 (op verzoek van Kim:
-    "bij de opstelling analyse zou ik alle matchen willen kunnen zien
-    (selecteren via dropdown list)" + "eerdere ontmoetingen ter referentie
-    toont bij 1 ploeg nu enkel de laatste match en niet die ervoor")
+    PADEL_ANALYSIS_FIXTURE_LABEL_FORMAT_FIX_2026-09-25 (op verzoek van Kim:
+    "de formattering van de eerdere ontmoeten is niet mooi [...] staat 2
+    keer hetzelfde en die scores staan daar tussen in. beter op het einde
+    van de string de score en maar 1 keer de ploegen [...] Gewonnen ploeg
+    kan je groen zetten ook")
     ----------------------------------------------------------------------
-    ROOT CAUSE: deze functie las `bundle["previous_fixtures"]`, en die
-    bundle wordt door render_scout_header() met lookback=1 opgebouwd -
-    exact dezelfde oorzaak als bij de match1/match2-frequentie
-    (PADEL_ANALYSIS_FREQUENCY_ALL_FIXTURES_2026-09-22). Er was dus per
-    definitie maar 1 ontmoeting beschikbaar om te tonen.
-
-    FIX: gebruikt nu bij voorkeur `full_bundle` (alle gespeelde
-    ontmoetingen, via _scout_team_all_fixtures()) en zet de ontmoetingen
-    achter een selectbox i.p.v. ze allemaal onder elkaar te zetten - zo
-    blijft de pagina kort, precies zoals Kim vroeg.
-
-    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_2026-09-25 (op verzoek van Kim: "bij
-    de eerdere ontmoetingen bij de opstelling analyse zou het ook goed zijn
-    om meteen de eindscore te zien bv. Ludoviek Padel C vs TE eleven C:
-    0-4"): `opp` is nieuw en wordt gebruikt om te bepalen of de gescoute
-    ploeg de thuis- of bezoekersploeg was in elke ontmoeting (zie
-    _fixture_final_score()), zodat de eindscore in de juiste volgorde
-    getoond wordt. Optioneel/achterwaarts compatibel: ontbreekt `opp`, dan
-    wordt de eindscore nog steeds getoond, enkel zonder gegarandeerde
-    thuis/uit-volgorde.
+    ROOT CAUSE van de dubbele teamnamen: _fixture_final_score() gaf
+    voorheen een VOLLEDIGE string terug ("LUDOVIEK Padel C 4 - 0 T.C.
+    ELEVEN C"), en die werd toegevoegd AAN een label dat de teamnamen al
+    bevatte ("... (LUDOVIEK Padel C vs T.C. ELEVEN C)") - de teamnamen
+    stonden dus onvermijdelijk 2 keer in dezelfde regel, met de score er
+    lelijk tussenin.
+    FIX: _fixture_final_score() geeft nu enkel de KALE score terug ("1-3")
+    plus apart de winnaar-naam - de teamnamen worden hier, op de ENE plek
+    waar dat al gebeurde, gecombineerd met die kale score. De winnaar
+    verschijnt apart, in het groen. Zie _fixture_final_score() voor de
+    (belangrijkere) score-berekeningsfix zelf:
+    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_FIX_2026-09-25.
     """
     source = full_bundle if (full_bundle or {}).get("previous_fixtures") else bundle
     previous_fixtures = (source or {}).get("previous_fixtures") or []
     if not previous_fixtures:
         return
-
     bruikbaar = []
     for fx_bundle in previous_fixtures:
         if fx_bundle.get("error") or not (fx_bundle.get("boards") or []):
             continue
         bruikbaar.append(fx_bundle)
-
     titel = f"\U0001F4CB Tegenstander \u2014 eerdere ontmoeting(en) ter referentie ({len(bruikbaar)})"
     with st.expander(titel, expanded=False):
         st.caption(
@@ -951,10 +971,11 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
         if not bruikbaar:
             st.info("Geen match-detail beschikbaar voor de gekende eerdere ontmoeting(en).")
             return
-
         scouted_name = (opp or {}).get("name") or ""
+        opponent_ploeg_id = (opp or {}).get("ploeg_id")
         labels = []
-        eindscores = []
+        scores = []
+        winners = []
         for fx_bundle in bruikbaar:
             fx = fx_bundle.get("fixture", {}) or {}
             datum = fx.get("date_text", "?")
@@ -962,11 +983,15 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
             uit = fx.get("away_name") or ""
             wedstrijd = f" ({tegen} vs {uit})" if tegen and uit else ""
             labels.append(f"{datum}{wedstrijd}")
-            eindscores.append(_fixture_final_score(fx, fx_bundle.get("boards") or [], scouted_name))
-
+            score, winner = _fixture_final_score(
+                fx, fx_bundle.get("boards") or [], scouted_name,
+                opponent_ploeg_id=opponent_ploeg_id,
+            )
+            scores.append(score)
+            winners.append(winner)
         if len(bruikbaar) > 1:
             def _label_met_eindscore(i):
-                return f"{labels[i]} \u2014 {eindscores[i]}" if eindscores[i] else labels[i]
+                return f"{labels[i]} \u2014 {scores[i]}" if scores[i] else labels[i]
             keuze = st.selectbox(
                 "Welke ontmoeting wil je bekijken?", list(range(len(bruikbaar))),
                 format_func=_label_met_eindscore, index=len(bruikbaar) - 1,
@@ -975,17 +1000,21 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
         else:
             keuze = 0
             titel_txt = f"**{labels[0]}**"
-            if eindscores[0]:
-                titel_txt += f" \u2014 **{eindscores[0]}**"
+            if scores[0]:
+                titel_txt += f" \u2014 **{scores[0]}**"
             st.caption(f"Enige gekende ontmoeting: {titel_txt}")
-
-        if eindscores[keuze]:
-            st.markdown(f"**Eindscore: {eindscores[keuze]}**")
+        if scores[keuze]:
+            fx_keuze = bruikbaar[keuze].get("fixture", {}) or {}
+            home = fx_keuze.get("home_name") or "?"
+            away = fx_keuze.get("away_name") or "?"
+            st.markdown(f"**Eindscore: {home} - {away}: {scores[keuze]}**")
+            if winners[keuze]:
+                st.success(f"\U0001F7E2 Winnaar: **{winners[keuze]}**")
             st.caption(
-                "Berekend uit de bordscores hierboven/hieronder (aantal gewonnen borden, niet "
-                "games/sets) - controleer bij twijfel de kolom 'Score' zelf."
+                "Berekend uit het aantal GEWONNEN BORDEN per ontmoeting (niet games/sets), op "
+                "basis van de resultaat-indicator per bord - niet op de setcijfers zelf (die "
+                "staan altijd als 'winnaar eerst' genoteerd en verraden dus nooit welke kant won)."
             )
-
         rows = _fixture_rows(bruikbaar[keuze].get("boards") or [])
         _render_fixture_rows_table(rows)
 
@@ -1547,12 +1576,39 @@ def _render_rotation_planner(
 
     # De per-rotatie gekozen tegenstander heeft voorrang op het algemene scenario.
     effective_opponent_boards = rotation_opponent_boards or opponent_boards
-    candidates, total_possible, rotation_diagnostics = _generate_rotation_candidates(
-        available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
-        opponent_boards=effective_opponent_boards, player_ratings=player_ratings,
-        opponent_ratings=opponent_ratings, max_results=15,
-        tournament_rules_dict=tournament_rules_dict,
+    # PADEL_ANALYSIS_ROTATION_PLANNER_CACHE_2026-09-25 (op verzoek van Kim:
+    # "Het laden bij het aanklikken van een keuze is wel een beetje
+    # vervelend. zo ook bvb bij aanklikken rotatie 1"):
+    # In tegenstelling tot de matchup-scenariotabel en de sandbox (beide al
+    # achter een expliciete knop + signature-cache), riep de Rotatieplanner
+    # _generate_rotation_candidates() ONVOORWAARDELIJK aan bij ELKE render -
+    # dus bij ELKE widget-interactie op de hele pagina, ook volledig
+    # onrelateerde. Dezelfde signature-cache-aanpak als elders in dit
+    # bestand: enkel herrekenen als de daadwerkelijk bepalende invoer
+    # effectief gewijzigd is.
+    rot_cache_key = f"rot_candidates_v1_{ploeg_id}_{next_rotation_num}"
+    rot_sig_key = f"rot_candidates_sig_v1_{ploeg_id}_{next_rotation_num}"
+    rot_signature = (
+        tuple(sorted(available_ids)),
+        tuple(sorted(tuple(sorted(p)) for p in excluded_pairs)) if excluded_pairs else (),
+        tuple(sorted(official_ranks_strict.items())),
+        tuple(sorted(player_ratings.items())) if player_ratings else (),
+        tuple(sorted(opponent_ratings.items())) if opponent_ratings else (),
+        tuple(
+            tuple(sorted(str(p.get("user_id")) for p in b.get("opponent_pair", [])))
+            for b in (effective_opponent_boards or [])
+        ),
+        tuple(sorted(tournament_rules_dict.items())) if tournament_rules_dict else None,
     )
+    if st.session_state.get(rot_sig_key) != rot_signature:
+        st.session_state[rot_cache_key] = _generate_rotation_candidates(
+            available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
+            opponent_boards=effective_opponent_boards, player_ratings=player_ratings,
+            opponent_ratings=opponent_ratings, max_results=15,
+            tournament_rules_dict=tournament_rules_dict,
+        )
+        st.session_state[rot_sig_key] = rot_signature
+    candidates, total_possible, rotation_diagnostics = st.session_state[rot_cache_key]
     if not candidates:
         if total_possible == 0:
             st.info("Geen geldige koppelverdeling meer mogelijk.")
@@ -2251,36 +2307,24 @@ def _render_best_for_selected_player(
 ) -> None:
     """Welke ploegopstelling is het beste VOOR EEN SPECIFIEKE speler?
 
-    PADEL_ANALYSIS_BEST_FOR_SELECTED_PLAYER_2026-09-24 (op verzoek van Kim:
-    "Ook wel interessant om van de geselecteerde speler waar je de
-    opstelling analyse mee begint, de beste matchopstelling voor die speler
-    aan te duiden in bv. een kleur. dus hoogste winstkans. Eigenlijk wil je
-    dan weten welke ploegopstelling uiteindelijk het beste is voor die
-    speler. Hangt natuurlijk af van de tegenstander maar zou je toch ook
-    ergens kunnen aantonen in 1 lijst met alle combinaties enkel en alleen
-    voor die speler in aparte tabel.")
-    ----------------------------------------------------------------------
-    De bestaande tabellen sorteren op het TEAMresultaat (verwacht aantal
-    gewonnen matchen over alle borden). Die vraag is een andere: welke
-    opstelling geeft DEZE speler persoonlijk de grootste kans?
-
-    METHODE, en waarom: Kim koos expliciet voor het gemiddelde over ALLE
-    doorgerekende tegenstander-opstellingen, niet voor de meest
-    waarschijnlijke. Dat is de robuuste keuze - de tegenstander kan immers
-    verrassen, en een opstelling die enkel tegen 1 specifiek scenario goed
-    scoort is dan waardeloos. Daarom wordt hier per eigen opstelling het
-    GEMIDDELDE van de persoonlijke winkans genomen, met de slechtste
-    (worst case) ernaast als risicomaat.
-
-    Enkel de matchen WAARIN DEZE SPELER ZELF STAAT tellen mee; speelt hij
-    in een opstelling 2 matchen, dan wordt het gemiddelde over die 2
-    genomen.
+    PADEL_ANALYSIS_BEST_FOR_SELECTED_PLAYER_2026-09-24 (op verzoek van Kim,
+    zie eerdere toelichting in dit bestand) + PADEL_ANALYSIS_BEST_FOR_
+    PLAYER_TEAM_RESULT_2026-09-25 (op verzoek van Kim: "Bij beste opstelling
+    voor mezelf zie ik niet het team resultaat.. mag er bij in de tabel. de
+    andere kolommen [...] kan je gerust smaller maken zodat ook volledige
+    ploegopstelling wel past op scherm"):
+    Toont nu ook het TEAMresultaat (gemiddeld verwacht aantal gewonnen
+    matchen over de HELE ploeg, over dezelfde tegenstander-scenario's)
+    naast de persoonlijke winkans - zodat direct zichtbaar is of een
+    opstelling die goed is VOOR DEZE SPELER ook goed is VOOR HET TEAM, of
+    net een compromis vereist. De percentage-kolommen kregen een
+    expliciete, smalle kolombreedte zodat de (vaak langere) kolom
+    'Volledige ploegopstelling' meer ruimte krijgt.
     """
     if not all_matchups or not sel_player_id:
         return
     sel_id = str(sel_player_id)
     sel_naam = name_lookup_global.get(sel_id, sel_id)
-
     groepen: dict = {}
     for m in all_matchups:
         eigen_kansen = []
@@ -2302,17 +2346,19 @@ def _render_best_for_selected_player(
         slot = groepen.setdefault(key, {
             "kansen": [], "posities": eigen_posities,
             "assignment": m["assignment"], "n_opstellingen": 0,
+            "team_ebw": [],
         })
         slot["kansen"].append(sum(eigen_kansen) / len(eigen_kansen))
+        team_ebw = m.get("expected_boards_won")
+        if team_ebw is not None:
+            slot["team_ebw"].append(team_ebw)
         slot["n_opstellingen"] += 1
-
     if not groepen:
         st.info(
             f"{sel_naam} komt in geen enkele doorgerekende opstelling voor - selecteer "
             "deze speler hierboven bij 'Beschikbare eigen spelers' om deze tabel te vullen."
         )
         return
-
     rijen = []
     for slot in groepen.values():
         kansen = slot["kansen"]
@@ -2328,17 +2374,18 @@ def _render_best_for_selected_player(
             f"{name_lookup_global.get(str(a['our_pair'][1]), a['our_pair'][1])}"
             for idx, a in enumerate(slot["assignment"])
         )
+        team_ebw_list = slot["team_ebw"]
+        team_gemiddeld = (sum(team_ebw_list) / len(team_ebw_list)) if team_ebw_list else None
         rijen.append({
             "Gemiddelde winkans": round(gemiddeld * 100, 1),
             "Slechtste geval": round(min(kansen) * 100, 1),
             "Beste geval": round(max(kansen) * 100, 1),
+            "Team gemiddeld": round(team_gemiddeld, 2) if team_gemiddeld is not None else None,
             f"Positie van {sel_naam}": pos_txt,
             "Volledige ploegopstelling": opstelling_txt,
             "Tegenstander-scenario's": slot["n_opstellingen"],
         })
-
     rijen.sort(key=lambda r: r["Gemiddelde winkans"], reverse=True)
-
     st.markdown(
         f'<div class="section-header">\U0001F3AF Beste opstelling voor {sel_naam}</div>',
         unsafe_allow_html=True,
@@ -2350,33 +2397,43 @@ def _render_best_for_selected_player(
         "zakken als de tegenstander de voor ons ongunstigste opstelling kiest."
     )
     st.caption(
-        "Let op: dit is de kans voor DEZE speler persoonlijk, niet voor de ploeg. De opstelling "
-        "die hier bovenaan staat is dus niet noodzakelijk de beste opstelling voor het TEAM - "
-        "vergelijk met de tabel hierboven voor het teamresultaat."
+        "'Team gemiddeld' is het verwacht aantal gewonnen matchen voor de HELE ploeg (niet enkel "
+        f"{sel_naam}) bij dezelfde opstelling - zo zie je meteen of een opstelling die goed is voor "
+        f"{sel_naam} persoonlijk, ook goed is voor het team, of net een compromis vereist."
     )
-
     try:
         import pandas as _pd
         df = _pd.DataFrame(rijen)
-        # De beste rij visueel markeren, exact zoals Kim vroeg ("aanduiden
-        # in bv. een kleur"). Faalt de styling (oudere pandas/Streamlit),
-        # dan wordt gewoon de gewone tabel getoond - nooit een crash.
         styled = df.style.background_gradient(
             subset=["Gemiddelde winkans"], cmap="RdYlGn", vmin=0, vmax=100,
         ).format({
             "Gemiddelde winkans": "{:.1f}%",
             "Slechtste geval": "{:.1f}%",
             "Beste geval": "{:.1f}%",
+            "Team gemiddeld": lambda v: f"{v:.2f}" if v is not None else "-",
         })
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            styled, use_container_width=True, hide_index=True,
+            column_config={
+                "Gemiddelde winkans": st.column_config.NumberColumn("Gem. winkans", width="small"),
+                "Slechtste geval": st.column_config.NumberColumn("Worst", width="small"),
+                "Beste geval": st.column_config.NumberColumn("Best", width="small"),
+                "Team gemiddeld": st.column_config.NumberColumn("Team gem.", width="small"),
+                "Tegenstander-scenario's": st.column_config.NumberColumn("Scen.", width="small"),
+                "Volledige ploegopstelling": st.column_config.TextColumn(
+                    "Volledige ploegopstelling", width="large",
+                ),
+            },
+        )
     except Exception:
         st.dataframe(rijen, use_container_width=True, hide_index=True)
-
     beste = rijen[0]
+    team_val = beste.get("Team gemiddeld")
+    team_txt = f", team gemiddeld **{team_val:.2f}**" if team_val is not None else ""
     st.success(
         f"\U0001F3C6 Beste voor {sel_naam}: **{beste['Volledige ploegopstelling']}** "
         f"\u2014 gemiddeld **{beste['Gemiddelde winkans']:.1f}%** winkans "
-        f"(slechtste geval {beste['Slechtste geval']:.1f}%)."
+        f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}."
     )
     st.divider()
 
@@ -3119,7 +3176,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     col_roster, col_refresh = st.columns([3, 1])
     with col_refresh:
         if st.button("\U0001F504 Ploeg opnieuw ophalen", key=f"refresh_own_roster_{sel_player_id}"):
-            for key in [k for k in list(st.session_state) if str(k).startswith(("own_roster_v2_", "full_scout_v1_"))]:
+            for key in [k for k in list(st.session_state) if str(k).startswith(("own_roster_v2_", "full_scout_v2_"))]:
                 st.session_state.pop(key, None)
             _load_encounter_index.clear()
             # PADEL_ANALYSIS_UI_SPEED_CACHE_2026-09-24: ook de rating-caches
