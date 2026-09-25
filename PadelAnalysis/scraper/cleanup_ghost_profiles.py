@@ -1,53 +1,67 @@
 """
-cleanup_ghost_profiles.py — verwijdert automatisch ontdekte tegenstander-
-profielen die geen enkele relevantie (meer) hebben.
+cleanup_ghost_profiles.py — verwijdert spelersprofielen die geen enkele
+relevantie (meer) hebben.
 
 Locatie: PadelAnalysis/scraper/cleanup_ghost_profiles.py
 (naast enrich_opponents.py / ci_scrape_all.py, zelfde path-setup patroon)
 
 --------------------------------------------------------------------------
-WAAROM DIT BESTAAT
+GESCHIEDENIS
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 loste de STRUCTURELE
 oorzaak op (discover_opponent_players() ontdekt sindsdien enkel nog
-interclub-tegenstanders, geen eenmalige tornooi-tegenstanders meer). Maar de
-al aangemaakte "ghost"-profielen van VOOR die fix bestaan nog gewoon in
-Firestore, en maken de Spelers-lijst en elke multiselect onnodig lang.
+interclub-tegenstanders, geen eenmalige tornooi-tegenstanders meer).
+
+PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17 breidde de opruiming uit met
+een tweede added_by-marker ("opponent_scout", naast "auto_opponent_
+discovery"), voor profielen aangemaakt via de "Tegenstander analyseren"-knop.
 
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17 (op verzoek van Kim, "de lijst
-van spelers is gigantisch geworden")
+PADEL_ANALYSIS_LEGACY_GHOST_NO_MARKER_2026-09-17 (op verzoek van Kim, tweede
+keer deze dag)
 --------------------------------------------------------------------------
-BUG (opgelost): naast enrich_opponents.py's automatische ontdekking
-(added_by="auto_opponent_discovery") bestaat er een TWEEDE, aparte bron van
-automatisch aangemaakte profielen: opponent_scout.py's "🔍 Tegenstander
-analyseren"-knop, gebruikt telkens Kim een nieuwe/nog niet gespeelde
-tegenstander bekijkt in "Volgende match". Elke keer de tegenstander-ploeg
-wijzigt (nieuwe rotatie, nieuwe poule), krijgen NIEUWE spelers een profiel
-via dit pad. Deze profielen kregen VOORHEEN geen enkele added_by-marker
-(zie opponent_scout.py's moduledocstring PADEL_ANALYSIS_SCOUT_PROFILE_
-INTEGRITY_2026-09-17), waardoor dit opruimscript ze structureel MISTE — dit
-verklaart waarom de Spelers-lijst bleef aangroeien ondanks eerdere opruiming.
+BUG (opgelost): een dry-run op 17 september toonde "Geen spookprofielen
+gevonden", terwijl check_player_data.py --team-of tegelijk 50+ spelers toonde
+die VOLLEDIG leeg waren (geen matchdata, geen padelstat, geen klassement,
+geen club) -- exact het soort profiel dat opgeruimd zou moeten worden.
 
-Fix: find_ghost_profiles() beschouwt nu BEIDE markers
-("auto_opponent_discovery" EN "opponent_scout") als "automatisch ontdekt,
-dus kandidaat voor opruiming" (mits de overige criteria hieronder ook
-voldaan zijn). Profielen met added_by="manual" (page_add_player.py, sinds
-dezelfde datum expliciet gezet) of HELEMAAL GEEN added_by-veld (oudere,
-van-vóór-deze-fix handmatige profielen -- veilig behandeld als "onbekende
-oorsprong, dus NIET opruimen") worden nooit aangeraakt.
+Oorzaak: deze profielen zijn aangemaakt VOOR de added_by-markers uberhaupt
+bestonden (dus vooraleer PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17 en
+de eerdere PADEL_ANALYSIS_GHOST_CLEANUP_TIMESTAMP_2026-09-16 werden
+toegevoegd). Ze hebben dus HELEMAAL GEEN added_by-veld. De vorige versie van
+dit script behandelde "geen added_by-veld" bewust als "onbekende oorsprong,
+dus NOOIT opruimen" -- een terechte voorzichtigheidsregel voor profielen die
+mogelijk bewust/handmatig zijn aangemaakt, maar te streng voor deze
+specifieke, overduidelijk lege categorie.
+
+Fix: een TWEEDE, apart criterium (naast het bestaande AUTO_DISCOVERED_
+MARKERS-pad) dat een profiel ZONDER added_by-veld ALSNOG als opruimbaar
+beschouwt, MITS het aan ALLE ANDERE bestaande voorwaarden voldoet (geen
+matchdata, geen padelstat, geen klassement, geen club, geen handmatige
+poule-URL, oud genoeg). Een profiel zonder added_by MAAR met bijvoorbeeld een
+club, of matchdata, of een klassement, wordt nog steeds NOOIT aangeraakt --
+dat onderscheidt een oud ghost-profiel (zuiver een naam + player_id, verder
+niets) van een oud, bewust/handmatig aangemaakt profiel (dat typisch wél een
+club en/of matchdata heeft).
+
+Zie find_ghost_profiles() voor de volledige, exacte logica.
 
 --------------------------------------------------------------------------
 WAT DIT SCRIPT WEL EN NIET VERWIJDERT
 --------------------------------------------------------------------------
-Verwijderd wordt UITSLUITEND een profiel dat:
-  1. added_by in {"auto_opponent_discovery", "opponent_scout"} — dus NOOIT
-     een profiel zonder added_by-veld (onbekende oorsprong -> niet
-     aanraken) en NOOIT added_by="manual";
+Verwijderd wordt een profiel dat:
+  A) added_by in {"auto_opponent_discovery", "opponent_scout"}, OF
+  B) HELEMAAL GEEN added_by-veld heeft EN ook GEEN club heeft (het
+     "legacy ghost, van voor de added_by-markers"-pad);
+  EN in BEIDE gevallen bijkomend:
   2. GEEN matches heeft op het bijhorende players-document;
   3. GEEN padelstat-rating en GEEN klassement_history heeft;
   4. NIET de opgeslagen poule_reeks_url_manual heeft ingesteld;
   5. Oud genoeg is (discovered_at ontbreekt OF ouder dan --min-age-days).
+
+NOOIT verwijderd: added_by="manual", of een profiel zonder added_by-veld
+dat WEL een club heeft (die combinatie wijst op een oud, bewust aangemaakt
+profiel, niet op een automatisch ontdekte ghost).
 
 Standaard draait dit script in --dry-run. Pas met --execute wordt er ook
 effectief verwijderd (uit zowel player_profiles als players).
@@ -79,9 +93,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_AGE_DAYS = 3
 
-# PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17: BEIDE markers gelden als
-# "automatisch ontdekt, dus kandidaat voor opruiming" -- added_by="manual"
-# of een ontbrekend added_by-veld worden NOOIT als kandidaat beschouwd.
+# Markers die expliciet aangeven dat een profiel automatisch ontdekt is.
 AUTO_DISCOVERED_MARKERS = {"auto_opponent_discovery", "opponent_scout"}
 
 
@@ -123,6 +135,29 @@ def _home_player_id() -> Optional[str]:
         return None
 
 
+def _is_eligible_by_origin(profile: dict) -> tuple[bool, str]:
+    """PADEL_ANALYSIS_LEGACY_GHOST_NO_MARKER_2026-09-17.
+
+    Beoordeelt UITSLUITEND de "oorsprong"-voorwaarde (los van de overige
+    criteria zoals matchdata/padelstat/klassement, die apart gecontroleerd
+    worden in find_ghost_profiles()). Returns (in_aanmerking, reden_label).
+
+    Pad A: expliciete added_by-marker -> altijd in aanmerking.
+    Pad B: HELEMAAL geen added_by-veld EN ook geen club -> waarschijnlijk een
+           legacy ghost-profiel van voor de added_by-markers bestonden, dus
+           ook in aanmerking. Een ontbrekend added_by-veld MET een club
+           blijft wél buiten beschouwing (te onzeker: kan een oud, bewust
+           toegevoegd profiel zijn)."""
+    added_by = profile.get("added_by")
+    if added_by in AUTO_DISCOVERED_MARKERS:
+        return True, added_by
+
+    if not added_by and not (profile.get("club") or "").strip():
+        return True, "legacy_no_marker"
+
+    return False, ""
+
+
 def find_ghost_profiles(
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
 ) -> list:
@@ -139,10 +174,11 @@ def find_ghost_profiles(
             continue
         if home_id and player_id == home_id:
             continue
-        # PADEL_ANALYSIS_SCOUT_GHOST_CLEANUP_2026-09-17: uitgebreid van enkel
-        # "auto_opponent_discovery" naar BEIDE automatische markers.
-        if profile.get("added_by") not in AUTO_DISCOVERED_MARKERS:
+
+        eligible, origin_reason = _is_eligible_by_origin(profile)
+        if not eligible:
             continue
+
         if (profile.get("poule_reeks_url_manual") or "").strip():
             continue
         if profile.get("klassement_history"):
@@ -175,8 +211,9 @@ def find_ghost_profiles(
             "player_id": player_id,
             "naam": profile.get("display_name") or "(geen naam)",
             "club": profile.get("club") or "",
-            "added_by": profile.get("added_by"),
-            "discovered_at": discovered_at_raw or "onbekend (van vóór deze fix)",
+            "added_by": profile.get("added_by") or "(geen veld)",
+            "origin_reason": origin_reason,
+            "discovered_at": discovered_at_raw or "onbekend",
         })
 
     return kandidaten
@@ -199,7 +236,7 @@ def delete_ghost_profiles(kandidaten: list) -> dict:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[{pid}] Geen players-document om te verwijderen ({e}).")
         samenvatting["verwijderd"] += 1
-        logger.info(f"[{pid}] Verwijderd: {k['naam']} (added_by={k['added_by']})")
+        logger.info(f"[{pid}] Verwijderd: {k['naam']} (origin={k['origin_reason']})")
     return samenvatting
 
 
@@ -209,7 +246,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
     parser = argparse.ArgumentParser(
-        description="Ruim automatisch ontdekte tegenstander-profielen op die geen enkele relevantie hebben."
+        description="Ruim spelersprofielen op die geen enkele relevantie hebben."
     )
     parser.add_argument("--execute", action="store_true",
                         help="Verwijder de gevonden spookprofielen ECHT. Zonder deze vlag: enkel tonen (dry-run).")
@@ -227,7 +264,10 @@ if __name__ == "__main__":
 
     print(f"\n{len(kandidaten)} spookprofiel(en) gevonden:\n")
     for k in sorted(kandidaten, key=lambda x: x["naam"]):
-        print(f"  {k['player_id']:<12} {k['naam']:<30} club={k['club'] or '-':<20} added_by={k['added_by']:<22} discovered_at={k['discovered_at']}")
+        print(
+            f"  {k['player_id']:<12} {k['naam']:<30} club={k['club'] or '-':<20} "
+            f"added_by={k['added_by']:<22} origin={k['origin_reason']:<20} discovered_at={k['discovered_at']}"
+        )
 
     if not args.execute:
         print(
