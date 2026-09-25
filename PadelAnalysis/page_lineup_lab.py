@@ -563,7 +563,25 @@ def _merge_full_opponent_roster(bundle: dict, fixtures: list, opp: dict) -> dict
     if toegevoegd:
         bundle = dict(bundle)
         bundle["unique_players"] = list(bestaand) + toegevoegd
+        # PADEL_ANALYSIS_ROSTER_CONFIDENCE_LABEL_2026-09-25: opponent_scout.
+        # scout_opponent() berekent sinds PADEL_ANALYSIS_TEAM_ROSTER_TOO_
+        # SMALL_FIX_2026-09-20 al "appearances" (in hoeveel doorzochte
+        # ontmoetingen deze speler voorkwam) en "known_matches_total" per
+        # speler, expliciet bedoeld als vertrouwensindicator - maar dat werd
+        # tot nu toe nergens in de UI getoond: de indicator bestond wel in
+        # de data maar was voor Kim onzichtbaar. Voor spelers die HIER (via
+        # de bredere, volledige-seizoen-scout) toegevoegd worden is dat
+        # net extra relevant: een speler met appearances=1 en known_
+        # matches_total=0 is een eenmalige waarneming zonder verdere
+        # bevestiging, iets anders dan een vaste basisspeler. Dat verschil
+        # wordt hier als apart veld op de bundle gezet i.p.v. stilzwijgend
+        # te laten liggen; page_lineup_lab() toont dit als caption.
+        onzeker = [
+            p.get("name", "?") for p in toegevoegd
+            if (p.get("appearances") or 0) <= 1 and not p.get("known_matches_total")
+        ]
         bundle["_roster_extended_with"] = [p.get("name", "?") for p in toegevoegd]
+        bundle["_roster_extended_low_confidence"] = onzeker
     return bundle
 
 
@@ -3367,6 +3385,20 @@ def page_lineup_lab():
                     f"\u2795 {len(extra_namen)} extra speler(s) uit eerdere ontmoetingen mee "
                     f"opgenomen in deze analyse: {', '.join(extra_namen)}."
                 )
+                # PADEL_ANALYSIS_ROSTER_CONFIDENCE_LABEL_2026-09-25: zie
+                # _merge_full_opponent_roster() - toont expliciet WELKE van
+                # deze extra spelers slechts 1x gezien zijn en verder geen
+                # bekende matchdata hebben, zodat een onzekere roster niet
+                # blind als een bevestigd feit gepresenteerd wordt.
+                onzeker_namen = bundle.get("_roster_extended_low_confidence") or []
+                if onzeker_namen:
+                    st.caption(
+                        f"\u2753 Let op: {', '.join(onzeker_namen)} "
+                        + ("is" if len(onzeker_namen) == 1 else "zijn")
+                        + " slechts 1x waargenomen en heeft/hebben verder nog geen "
+                        "bekende matchdata bij ons - eerder een eenmalige invaller dan een "
+                        "bevestigde vaste speler."
+                    )
             report_for_ai = None
             if bundle.get("unique_players"):
                 all_docs, global_docs = osu.prepare_team_docs(bundle, str(sel_player_id))
