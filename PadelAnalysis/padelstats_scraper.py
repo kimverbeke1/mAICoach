@@ -16,21 +16,64 @@ HTML-bron bevat enkel <div id="root"></div> en een defer-script; alle inhoud
 wordt pas na JavaScript-uitvoering opgebouwd.
 
 PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_FIX_2026-09-13 (v3):
-BUG (opgelost): elke klik mislukte omdat een Google Funding Choices cookie-
-consent-banner (CSS-klasse "fc-consent-root"/"fc-dialog-overlay") over de
-hele pagina lag en alle pointer-events onderschepte. Fix: _dismiss_consent_
+BUG (opgelost, destijds): elke klik mislukte omdat een Google Funding Choices
+cookie-consent-banner (CSS-klasse "fc-consent-root"/"fc-dialog-overlay") over
+de hele pagina lag en alle pointer-events onderschepte. Fix: _dismiss_consent_
 banner() sluit de banner (via gangbare knopteksten NL/EN, of desnoods een
 JS-verwijdering als fallback) VOOR er iets anders geprobeerd wordt.
+
+PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16 (v6, kritieke
+bugfix, gemeld door Kim via diagnose_padelstat_search.py):
+BUG (opgelost): de v3-fix uit 2026-09-13 loste het probleem destijds op,
+maar bleek NIET robuust tegen twee dingen die zich sindsdien voordeden:
+  1. De v3-fix probeerde ELKE knoptekst uit _CONSENT_BUTTON_TEXTS precies
+     EENMAAL te klikken, zonder nadien te VERIFIEREN of de banner ook echt
+     verdwenen was. Bleek de banner na de klik nog steeds aanwezig (bv. een
+     tussentijdse animatie, een tweede laag in de dialoog, of gewoon een net
+     ietsje andere render), dan ging de code toch al verder naar
+     search_box.click() - wat vervolgens vastliep op exact het probleem uit
+     de meldng van Kim: de banner (of specifiek een "Meer informatie"-FAQ-
+     knop erin) onderschept alsnog alle pointer-events, tien seconden lang,
+     tot Playwright's eigen timeout toeslaat.
+  2. Er was geen enkele RETRY-lus: als de eerste dismiss-poging faalde, werd
+     er nooit een tweede geprobeerd.
+Concreet bewijs uit Kims foutmelding: de click op de ZOEKBALK zelf (niet op
+een consent-knop) werd 10+ seconden lang geblokkeerd door
+"<button ... aria-label="Meer informatie" class="fc-faq-header
+fc-dialog-restricted-content">" en "<div class="fc-dialog-overlay">" - beide
+onderdeel van dezelfde fc-consent-root-boom die v3 had moeten sluiten.
+
+Fix, drie onderdelen:
+  1. _consent_banner_present(page): controleert EXPLICIET (via page.evaluate)
+     of .fc-consent-root nog in de DOM zit - i.p.v. blind aan te nemen dat een
+     geklikte knop de banner ook effectief sloot.
+  2. _dismiss_consent_banner(page) is herschreven tot een VERIFIERENDE
+     retry-lus (tot 4 pogingen, met een korte wachttijd ertussen): na elke
+     klikpoging (nu met force=True, om precies het "subtree intercepts
+     pointer events"-probleem te omzeilen dat een normale klik blokkeerde)
+     wordt gecontroleerd of de banner ECHT weg is via
+     _consent_banner_present(). Blijft de banner na alle klikpogingen toch
+     hangen, dan volgt een AGRESSIEVERE JS-fallback die niet enkel
+     '.fc-consent-root' verwijdert, maar ALLE elementen waarvan de class
+     met 'fc-' begint (dekt ook '.fc-dialog-overlay', '.fc-dialog-container',
+     enz. - de volledige Funding-Choices-boom - i.p.v. enkel de buitenste
+     container).
+  3. search_padelstat_player(), _click_and_get_padelstat_id() en
+     fetch_padelstat_rating() roepen nu ALLEMAAL _dismiss_consent_banner()
+     aan EN wachten nadien expliciet tot de banner weg is (of loggen een
+     duidelijke waarschuwing als dat na alle pogingen nog niet lukt) VOOR ze
+     een klik op de zoekbalk/pagina proberen. De zoekbalk-klik zelf gebeurt
+     nu ook met force=True als allerlaatste vangnet, zodat een eventueel
+     onzichtbaar geworden restant van de banner (0px hoog, maar nog in de
+     DOM) een geldige klik niet meer kan blokkeren.
 
 PADEL_ANALYSIS_PADELSTAT_REAL_STRUCTURE_2026-09-13 (v4):
 Uit een dump van #search NA het typen van "Kim Verbeke" bleek de EXACTE,
 bevestigde structuur van een zoekresultaat:
-
     <button class="... MuiCardActionArea-root ...">
       <p class="... css-ly3v7n">Verbeke Kim</p>
       <span class="... css-1v2gfp5"><b>P200</b><b> • </b>PADEL FACTORY</span>
     </button>
-
 search_padelstat_player() zoekt <button>-elementen, leest naam/klassement/
 club rechtstreeks uit de knoptekst en klikt om te navigeren; het
 padelstats-ID wordt nadien uit de resulterende page.url gehaald.
@@ -39,20 +82,20 @@ PADEL_ANALYSIS_PADELSTAT_CLUB_MATCH_BUG_2026-09-13 (v5, kritieke bugfix):
 BUG (opgelost): search_and_fetch_padelstat_rating() gebruikte voorheen een
 NAIEVE, ASYMMETRISCHE substring-check om de opgegeven club te vergelijken
 met een kandidaat-club:
-
     club_norm in _normalize(candidate.get("club", ""))
-
 Dit faalde systematisch zodra de opgegeven club LANGER was dan de kandidaat-
 club (wat in de praktijk vaak het geval is: onze eigen Firestore-clubnamen
 bevatten soms een geslachtscode-achtervoegsel zoals " | V" of " | M", bv.
 "Padel Factory | V"). Een string als "padel factory | v" is namelijk NOOIT
 een substring van het kortere "padel factory" - de vergelijkingsrichting zelf
 was dus al principieel te fragiel, los van het achtervoegsel-probleem.
+
 Concreet voorbeeld dat hierdoor faalde: Carl Ide (club "Padel Factory | V"
 resp. "| M" in onze eigen data) werd bij 3 gevonden padelstats-kandidaten
 NOOIT gekoppeld aan het kandidaat "PADEL FACTORY", ook al was dat overduidelijk
 de juiste match - met een verkeerde/onbevestigde speler (en dus verkeerde
 playing-strength-waarde) tot gevolg.
+
 Fix, twee onderdelen:
   1. _strip_known_suffixes(): verwijdert een eventueel " | <letter>"-
      achtervoegsel (geslachtscode of vergelijkbaar) VOOR verdere verwerking.
@@ -64,6 +107,7 @@ Fix, twee onderdelen:
      zouden matchen puur op het gedeelde woord "padel") en een match is
      positief zodra er minstens één betekenisvol woord overlapt, ongeacht
      volgorde, lengte-verschil of exacte formulering.
+
 Beide fixes zijn getest tegen het exacte, gemelde Carl Ide-scenario (club
 "Padel Factory | V" tegenover kandidaten "T.C. WINDEKIND - WINDEKIND SPORT
 BVBA", "PADEL FACTORY", "T. AND P. C") en geven nu de correcte match.
@@ -78,12 +122,9 @@ BELANGRIJK - scope en respectvol gebruik:
 
 Gebruik:
     import padelstats_scraper as ps
-
     result = ps.fetch_padelstat_rating("1293841")
     print(result["rating"])  # 190
-
     result = ps.search_and_fetch_padelstat_rating("Kim Verbeke", club="Padel Factory")
-
     candidates = ps.search_padelstat_player("Kim Verbeke")
     for c in candidates:
         print(c["name"], "|", c["klassement"], "|", c["club"], "->", c["padelstat_id"])
@@ -94,12 +135,15 @@ import re
 from typing import Optional
 
 BASE_URL = "https://padelstats.be"
-
 _CONFIRMED_SEARCH_PLACEHOLDER = "Search a player by name or club"
 
+# PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16: uitgebreide
+# lijst met knopteksten (extra NL-varianten toegevoegd t.o.v. v3), want de
+# exacte tekst kan per A/B-render van Google Funding Choices verschillen.
 _CONSENT_BUTTON_TEXTS = [
     "Alles accepteren", "Accepteren", "Akkoord", "Ik ga akkoord",
-    "Accept all", "I agree", "Agree", "Accept", "OK", "Got it",
+    "Alles toestaan", "Toestaan", "Doorgaan", "Aanvaarden", "Alles aanvaarden",
+    "Accept all", "I agree", "Agree", "Accept", "OK", "Got it", "Continue",
 ]
 
 # Labels voor de "playing strength" op een PROFIELPAGINA (niet te verwarren
@@ -108,7 +152,6 @@ _RATING_LABEL_PATTERNS = [
     r"playing\s*strength[^\d]{0,20}P\s*(\d{2,4})",
     r"speelsterkte[^\d]{0,20}P\s*(\d{2,4})",
 ]
-
 _GENERIC_P_PATTERN = r"\bP(\d{2,4})\b"
 
 # Herkent "P200 •" of "P200 • CLUB" in de tekst van een resultaatkaart.
@@ -123,6 +166,12 @@ _CLUB_STOPWORDS = {
     "club", "cc", "tc", "t.c.", "vzw", "bvba", "nv", "sport", "sports",
     "padel", "tennis", "paddle",
 }
+
+# PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16: hoeveel keer
+# we proberen de banner te sluiten voor we het opgeven (met JS-fallback erna).
+_CONSENT_DISMISS_ATTEMPTS = 4
+_CONSENT_POLL_TIMEOUT_MS = 4000
+_CONSENT_POLL_INTERVAL_MS = 250
 
 
 def _extract_rating(text: str) -> tuple[Optional[int], str]:
@@ -185,44 +234,129 @@ def _club_matches(given_club: str, candidate_club: str) -> bool:
     return bool(given_words & candidate_words)
 
 
-def _dismiss_consent_banner(page) -> str:
-    """Sluit de cookie-consent-banner. Geeft een statusstring terug voor
-    debug-doeleinden."""
-    for text in _CONSENT_BUTTON_TEXTS:
-        try:
-            btn = page.get_by_role("button", name=re.compile(re.escape(text), re.IGNORECASE))
-            if btn.count() > 0:
-                btn.first.click(timeout=3000)
-                page.wait_for_timeout(500)
-                return f"geklikt op knop met tekst '{text}'"
-        except Exception:
-            continue
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16
+# ---------------------------------------------------------------------------
+def _consent_banner_present(page) -> bool:
+    """Controleert EXPLICIET of de Funding-Choices-consentbanner nog in de
+    DOM aanwezig is (en zichtbaar/met afmetingen, niet enkel technisch
+    aanwezig maar al onzichtbaar gemaakt). Dit is de verificatiestap die in
+    v3 volledig ontbrak: v3 nam na een klik gewoon aan dat de banner weg was."""
     try:
-        for frame in page.frames:
-            for text in _CONSENT_BUTTON_TEXTS:
-                try:
-                    btn = frame.get_by_role("button", name=re.compile(re.escape(text), re.IGNORECASE))
-                    if btn.count() > 0:
-                        btn.first.click(timeout=3000)
-                        page.wait_for_timeout(500)
-                        return f"geklikt op knop in iframe met tekst '{text}'"
-                except Exception:
-                    continue
+        return bool(
+            page.evaluate(
+                """() => {
+                    const el = document.querySelector('.fc-consent-root');
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }"""
+            )
+        )
     except Exception:
-        pass
+        # Kan niet betrouwbaar vaststellen -> conservatief 'nog aanwezig'
+        # aannemen, zodat de aanroeper blijft proberen i.p.v. voortijdig
+        # verder te gaan.
+        return True
+
+
+def _force_remove_consent_banner(page) -> bool:
+    """Agressieve JS-fallback: verwijdert ALLE elementen waarvan de class
+    met 'fc-' begint (dekt de volledige Funding-Choices-boom: consent-root,
+    dialog-overlay, dialog-container, enz.), niet enkel de buitenste
+    container zoals de oorspronkelijke (v3) fallback deed."""
     try:
         removed = page.evaluate(
             """() => {
-                const el = document.querySelector('.fc-consent-root');
-                if (el) { el.remove(); return true; }
-                return false;
+                const nodes = document.querySelectorAll('[class*="fc-"]');
+                let count = 0;
+                nodes.forEach(el => { el.remove(); count++; });
+                return count;
             }"""
         )
-        if removed:
-            return "banner-element rechtstreeks verwijderd via JavaScript (fallback)"
+        return bool(removed)
+    except Exception:
+        return False
+
+
+def _dismiss_consent_banner(page) -> str:
+    """Sluit de cookie-consent-banner, met VERIFICATIE en RETRY.
+
+    PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16: dit is een
+    volledige herschrijving t.o.v. v3. In plaats van blind één klik per
+    knoptekst te proberen en te hopen dat dat volstond, wordt nu na ELKE
+    poging expliciet gecontroleerd (_consent_banner_present) of de banner
+    ECHT verdwenen is, met tot _CONSENT_DISMISS_ATTEMPTS pogingen. Klikken
+    gebeuren met force=True, omdat het gemelde probleem exact was dat een
+    NORMALE klik (die wacht tot een element "stabiel en niet-overlapt" is)
+    bleef hangen precies omdat de banner zelf de overlap veroorzaakte -
+    force=True negeert die actionability-check bewust.
+
+    Geeft een statusstring terug voor debug-doeleinden."""
+    if not _consent_banner_present(page):
+        return "geen banner aanwezig (niets te doen)"
+
+    for attempt in range(1, _CONSENT_DISMISS_ATTEMPTS + 1):
+        clicked_via = None
+
+        # Spoor 1: knop op de hoofdpagina.
+        for text in _CONSENT_BUTTON_TEXTS:
+            try:
+                btn = page.get_by_role("button", name=re.compile(re.escape(text), re.IGNORECASE))
+                if btn.count() > 0:
+                    btn.first.click(timeout=3000, force=True)
+                    clicked_via = f"knop '{text}' (poging {attempt})"
+                    break
+            except Exception:
+                continue
+
+        # Spoor 2: knop binnen een iframe (sommige CMP's renderen in een
+        # apart frame).
+        if not clicked_via:
+            try:
+                for frame in page.frames:
+                    for text in _CONSENT_BUTTON_TEXTS:
+                        try:
+                            btn = frame.get_by_role(
+                                "button", name=re.compile(re.escape(text), re.IGNORECASE)
+                            )
+                            if btn.count() > 0:
+                                btn.first.click(timeout=3000, force=True)
+                                clicked_via = f"knop '{text}' in iframe (poging {attempt})"
+                                break
+                        except Exception:
+                            continue
+                    if clicked_via:
+                        break
+            except Exception:
+                pass
+
+        # Geef de pagina even tijd om de banner effectief te sluiten/animeren.
+        try:
+            page.wait_for_timeout(_CONSENT_POLL_INTERVAL_MS)
+        except Exception:
+            pass
+
+        # VERIFICATIE (dit ontbrak in v3): is de banner nu echt weg?
+        if not _consent_banner_present(page):
+            return clicked_via or f"banner verdween na poging {attempt} (geen klik meer nodig)"
+
+    # Alle klikpogingen uitgeput en de banner zit er nog steeds: agressieve
+    # JS-verwijdering van de volledige fc-*-boom, met een korte poll erna.
+    _force_remove_consent_banner(page)
+    try:
+        page.wait_for_timeout(_CONSENT_POLL_INTERVAL_MS)
     except Exception:
         pass
-    return "geen enkele methode werkte - banner mogelijk nog aanwezig"
+
+    if not _consent_banner_present(page):
+        return f"banner verwijderd via JS-fallback na {_CONSENT_DISMISS_ATTEMPTS} mislukte klikpogingen"
+
+    return (
+        f"WAARSCHUWING: banner nog steeds aanwezig na {_CONSENT_DISMISS_ATTEMPTS} "
+        "klikpogingen EN een JS-fallback - volgende stap probeert desondanks door te gaan "
+        "met force=True op de zoekbalk."
+    )
 
 
 def fetch_padelstat_rating(padelstat_player_id: str, headless: bool = True, timeout_ms: int = 15000) -> dict:
@@ -238,9 +372,7 @@ def fetch_padelstat_rating(padelstat_player_id: str, headless: bool = True, time
     """
     padelstat_player_id = str(padelstat_player_id).strip()
     url = f"{BASE_URL}/speler/{padelstat_player_id}"
-
     from playwright.sync_api import sync_playwright
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         try:
@@ -251,7 +383,6 @@ def fetch_padelstat_rating(padelstat_player_id: str, headless: bool = True, time
             body_text = page.inner_text("body")
         finally:
             browser.close()
-
     rating, source = _extract_rating(body_text)
     return {
         "padelstat_id": padelstat_player_id,
@@ -273,7 +404,6 @@ def search_padelstat_player(name: str, headless: bool = True, timeout_ms: int = 
     }
     """
     from playwright.sync_api import sync_playwright
-
     results: list[dict] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -281,17 +411,20 @@ def search_padelstat_player(name: str, headless: bool = True, timeout_ms: int = 
             page = browser.new_page()
             page.goto(BASE_URL, wait_until="networkidle", timeout=timeout_ms)
             page.wait_for_timeout(1000)
+            # PADEL_ANALYSIS_PADELSTAT_CONSENT_BANNER_REGRESSION_2026-09-16:
+            # verifiërende dismiss (zie functiedocstring hierboven).
             _dismiss_consent_banner(page)
-
             search_box = page.get_by_placeholder(_CONFIRMED_SEARCH_PLACEHOLDER).first
-            search_box.click(timeout=10000)
+            # force=True als laatste vangnet: mocht er ondanks alle
+            # dismiss-pogingen toch nog een (bijna onzichtbaar) restant van
+            # de banner in de DOM hangen, dan negeert force=True de
+            # actionability-check die anders opnieuw 10s zou vastlopen.
+            search_box.click(timeout=10000, force=True)
             search_box.fill(name)
             page.wait_for_timeout(2000)
-
             container = page.locator("xpath=//div[@id='search']/following-sibling::div[1]")
             if container.count() == 0:
                 return []
-
             cards = container.first.get_by_role("button")
             count = cards.count()
             for i in range(count):
@@ -313,7 +446,6 @@ def search_padelstat_player(name: str, headless: bool = True, timeout_ms: int = 
                 })
         finally:
             browser.close()
-
     return results
 
 
@@ -321,7 +453,6 @@ def _click_and_get_padelstat_id(name: str, index: int, headless: bool = True, ti
     """Herhaalt de zoekopdracht en klikt op de kaart op positie 'index', en
     leest het padelstats-ID uit de resulterende URL na navigatie."""
     from playwright.sync_api import sync_playwright
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         try:
@@ -329,23 +460,19 @@ def _click_and_get_padelstat_id(name: str, index: int, headless: bool = True, ti
             page.goto(BASE_URL, wait_until="networkidle", timeout=timeout_ms)
             page.wait_for_timeout(1000)
             _dismiss_consent_banner(page)
-
             search_box = page.get_by_placeholder(_CONFIRMED_SEARCH_PLACEHOLDER).first
-            search_box.click(timeout=10000)
+            search_box.click(timeout=10000, force=True)
             search_box.fill(name)
             page.wait_for_timeout(2000)
-
             container = page.locator("xpath=//div[@id='search']/following-sibling::div[1]")
             if container.count() == 0:
                 return None
             cards = container.first.get_by_role("button")
             if index >= cards.count():
                 return None
-
-            cards.nth(index).click(timeout=10000)
+            cards.nth(index).click(timeout=10000, force=True)
             page.wait_for_timeout(1500)
             page.wait_for_url(re.compile(r"/speler/\d+"), timeout=timeout_ms)
-
             match = re.search(r"/speler/(\d+)", page.url)
             return match.group(1) if match else None
         finally:
@@ -380,10 +507,8 @@ def search_and_fetch_padelstat_rating(
     candidates = search_padelstat_player(name, headless=headless)
     if not candidates:
         return None
-
     chosen = None
     note = None
-
     if club:
         for candidate in candidates:
             if _club_matches(club, candidate.get("club", "")):
@@ -405,7 +530,6 @@ def search_and_fetch_padelstat_rating(
                 "disambigueren. Eerste resultaat gebruikt - geef het 'club'-argument mee voor "
                 "een zekere match."
             )
-
     padelstat_id = _click_and_get_padelstat_id(name, chosen["_index"], headless=headless)
     if not padelstat_id:
         return {
@@ -419,7 +543,6 @@ def search_and_fetch_padelstat_rating(
                 f"'{chosen.get('card_text', '')}'."
             ),
         }
-
     result = fetch_padelstat_rating(padelstat_id, headless=headless)
     result["matched_name"] = chosen["name"]
     result["matched_klassement"] = chosen.get("klassement")
