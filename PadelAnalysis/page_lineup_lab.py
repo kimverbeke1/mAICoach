@@ -475,11 +475,35 @@ def _cached_official_rank(player_id: str):
         return None
 
 
+# PADEL_ANALYSIS_UI_SPEED_CACHE_PHASE2_2026-09-25 (op verzoek van Kim: "toch
+# nog altijd traag om mee te werken"): de vorige caching-ronde (2026-09-24)
+# raakte enkel de padelstat/klassement-lookups per speler, maar liet de
+# ZWAARSTE aanroep op deze pagina ONGEMOEID: ll.get_docs_for_players(
+# available_ids) in _render_opstelling_scenario() haalt het VOLLEDIGE
+# matchdocument (elk met tot honderden matchrecords) op voor ELKE eigen
+# speler - en dat gebeurt bij ELKE widget-interactie op deze pagina (elke
+# number_input voor max_per_player, elke checkbox, elke selectbox-wijziging
+# stuurt Streamlit een volledige script-rerun). Bij 4-8 eigen spelers is dat
+# 4-8 volledige Firestore-documentreads per klik - de dominante resterende
+# bron van traagheid, los van de reeds gecachete rating-lookups.
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_docs_for_players(player_ids: tuple) -> dict:
+    """Gecachete variant van ll.get_docs_for_players(). Sleutel is de
+    (gesorteerde) tuple van speler-ID's, zodat een gewijzigde selectie wel
+    meteen een verse ophaling triggert, maar dezelfde selectie binnen de
+    TTL nooit twee keer wordt opgehaald."""
+    try:
+        return ll.get_docs_for_players(list(player_ids))
+    except Exception:
+        return {}
+
+
 def _clear_rank_caches() -> None:
     """Leegt de lookup-caches hierboven (gebruikt door de ververs-knoppen)."""
     try:
         _cached_own_player_rating.clear()
         _cached_official_rank.clear()
+        _cached_docs_for_players.clear()
     except Exception:
         pass
 
@@ -725,7 +749,18 @@ def _rank_text_for_opponent(player: dict) -> str:
 
 
 def _fixture_rows(boards: list) -> list:
-    """Zet de dubbels van 1 ontmoeting om naar tabelrijen, MET klassement."""
+    """Zet de dubbels van 1 ontmoeting om naar tabelrijen, MET klassement.
+
+    PADEL_ANALYSIS_OPPONENT_WON_ROWS_COLOR_2026-09-25 (op verzoek van Kim:
+    "Winstmatchen mag je eventueel gewoon in groen tonen in de tabel"):
+    voegt het "Resultaat"-veld toe, gebaseerd op opponent_scout.py's nieuwe,
+    ondubbelzinnige "opponent_won"-veld (won de GESCOUTE ploeg dit bord?).
+    De kleurcodering zelf gebeurt in _render_fixture_rows_table() hieronder
+    via een pandas Styler - deze functie geeft enkel de platte data terug,
+    zodat _matchups_to_table_rows() en andere consumenten die dit
+    hergebruiken niet worden verrast door een extra kolom die ze niet
+    verwachten (defensief: valt terug op "?" als opponent_won ontbreekt in
+    oudere, reeds gecachete bundles van vóór deze fix)."""
     rows = []
     for b in sorted(boards, key=lambda x: x.get("board_position") or 0):
         pair = b.get("opponent_pair") or []
@@ -734,6 +769,13 @@ def _fixture_rows(boards: list) -> list:
         pos = b.get("board_position")
         rot = (int(pos) + 1) // 2 if pos else "?"
         m_in_rot = 1 if (pos and int(pos) % 2 == 1) else 2
+        opponent_won = b.get("opponent_won")
+        if opponent_won is True:
+            resultaat = "Gewonnen"
+        elif opponent_won is False:
+            resultaat = "Verloren"
+        else:
+            resultaat = "Onbekend"
         rows.append({
             "Match": f"Rotatie {rot} — Match {m_in_rot}" if pos else "Match ?",
             "Speler 1": pair[0].get("name", "?"),
@@ -741,8 +783,42 @@ def _fixture_rows(boards: list) -> list:
             "Speler 2": pair[1].get("name", "?"),
             "Klassement 2": _rank_text_for_opponent(pair[1]),
             "Score": b.get("score") or "onbekend",
+            "Resultaat": resultaat,
         })
     return rows
+
+
+def _render_fixture_rows_table(rows: list) -> None:
+    """PADEL_ANALYSIS_OPPONENT_WON_ROWS_COLOR_2026-09-25: toont _fixture_
+    rows()-resultaat met een groene rij bij "Gewonnen" (vanuit het
+    perspectief van de GESCOUTE ploeg - dus: dit koppel is gevaarlijk, ze
+    wonnen dit bord) en een lichte rode tint bij "Verloren" (dit koppel is
+    kwetsbaarder gebleken). "Onbekend" (geen leesbare score) blijft
+    ongekleurd. Faalt de styling (bv. een oudere pandas/Streamlit-versie),
+    dan valt dit terug op de gewone, ongekleurde tabel - nooit een crash
+    voor een puur cosmetische toevoeging."""
+    if not rows:
+        st.info("Geen bruikbare dubbels in deze ontmoeting.")
+        return
+    try:
+        import pandas as _pd
+
+        def _kleur_resultaat(row):
+            if row["Resultaat"] == "Gewonnen":
+                return ["background-color: #d4edda"] * len(row)
+            if row["Resultaat"] == "Verloren":
+                return ["background-color: #f8d7da"] * len(row)
+            return [""] * len(row)
+
+        df = _pd.DataFrame(rows)
+        styled = df.style.apply(_kleur_resultaat, axis=1)
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.caption(
+            "\U0001F7E2 Groen = de GESCOUTE ploeg (tegenstander) won dit bord - een gevaarlijk "
+            "koppel om rekening mee te houden. \U0001F534 Rood = zij verloren dit bord."
+        )
+    except Exception:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 def _parse_set_score(score_text: str):
@@ -911,10 +987,7 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
             )
 
         rows = _fixture_rows(bruikbaar[keuze].get("boards") or [])
-        if rows:
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("Geen bruikbare dubbels in deze ontmoeting.")
+        _render_fixture_rows_table(rows)
 
 
 def _render_match1_frequency_opponent(bundle: dict, full_bundle: dict = None) -> None:
@@ -3114,7 +3187,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     if total_slots != 2 * total_boards:
         st.error(f"Speler-plaatsen ({total_slots}) moet gelijk zijn aan 2× wedstrijden ({2*total_boards}).")
         return
-    docs_for_synergy = ll.get_docs_for_players(available_ids)
+    # PADEL_ANALYSIS_UI_SPEED_CACHE_PHASE2_2026-09-25: zie _cached_docs_for_players().
+    docs_for_synergy = _cached_docs_for_players(tuple(sorted(available_ids)))
     own_synergy = ll.compute_pairwise_synergy(docs_for_synergy, available_ids)
     synergy_fn = ll.make_pair_score_fn(own_synergy, docs_for_synergy)
     # PADEL_ANALYSIS_UI_SPEED_CACHE_2026-09-24: gecachet, zie _cached_own_player_rating().

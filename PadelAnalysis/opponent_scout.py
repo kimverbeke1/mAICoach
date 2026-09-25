@@ -239,10 +239,27 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
             for i, p in enumerate(players)
         ]
         opp_pair = players_with_rank[0:2] if is_opponent_home else players_with_rank[2:4]
+        raw_won = board.get("won")
+        # PADEL_ANALYSIS_OPPONENT_WON_FIELD_2026-09-25 (op verzoek van Kim:
+        # "Winstmatchen mag je eventueel gewoon in groen tonen in de
+        # tabel"): board.get("won") is dubbelzinnig - het geldt voor de
+        # partij die op het uitslagenblad ALS EERSTE vermeld staat, wat
+        # naargelang is_opponent_home ofwel de tegenstander ofwel de
+        # ANDERE partij kan zijn. page_lineup_lab.py's _fixture_rows() zou
+        # dit anders moeten HERberekenen (en dus opnieuw met dezelfde
+        # dubbelzinnigheid kunnen fout gaan) om te weten of de GESCOUTE
+        # ploeg (opponent_pair) dit bord won. Door dat HIER, op de ENE
+        # plek die is_opponent_home al kent, eenmalig ondubbelzinnig te
+        # berekenen, kan elke consument dit veld voortaan zonder verdere
+        # aannames gebruiken.
+        opponent_won = None
+        if raw_won is not None:
+            opponent_won = bool(raw_won) if is_opponent_home else (not bool(raw_won))
         out["boards"].append({
             "opponent_pair": opp_pair,
             "score": board.get("score"),
-            "won": board.get("won"),  # vanuit perspectief van de partij die als eerste vermeld staat — niet noodzakelijk de tegenstander
+            "won": raw_won,  # vanuit perspectief van de partij die als eerste vermeld staat — niet noodzakelijk de tegenstander
+            "opponent_won": opponent_won,  # ONDUBBELZINNIG: won de GESCOUTE ploeg (opponent_pair) dit bord?
             "board_position": board_index + 1,  # 1-based, vermoedelijke bordvolgorde (zie docstring hierboven)
         })
         for p in opp_pair:
