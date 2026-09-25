@@ -12,6 +12,7 @@ Data model per match:
     opp2_name, opp2_user_id, opp2_ranking
     round_text, result ("W"/"V"), won (bool), score
     scraped_at
+
   Interclub:
     player_id, period_label, match_type="interclub"
     competition_name, match_date
@@ -66,11 +67,22 @@ DEFAULT_PADEL_PARAMS = {
     "pcid": "79",
 }
 
+# ---------------------------------------------------------------------------
+# Versiestempel - PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25
+# ---------------------------------------------------------------------------
+# Kim's eigen verzoek ("Ik heb dat nu al een paar keer gevraagd en zie niets
+# veranderen [...] als extra test wil ik zeker de naam van de kolom
+# veranderen zodat ik daarmee ook extra kan zien of de code effectief goed
+# gecommit wordt"): een expliciete, grep-bare versiestring bovenaan het
+# bestand, zodat een deployment altijd te verifieren is met
+#     Select-String -Path scraper_v2.py -Pattern "UITSLAG_FIELD_FIX"
+# zonder de site zelf te moeten raadplegen.
+SCRAPER_V2_VERSION = "2026-09-25-uitslag-field-fix"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -117,7 +129,6 @@ def _get_html(session: requests.Session, url: str, params: dict = None, delay: f
 # ---------------------------------------------------------------------------
 # Period date-range parsing
 # ---------------------------------------------------------------------------
-
 _PERIOD_WEEK_RANGE_RE = re.compile(
     r"week\s+(\d{1,2})[/\s](\d{4})\s+tot\s+en\s+met\s+week\s+(\d{1,2})[/\s](\d{4})",
     re.IGNORECASE,
@@ -177,7 +188,6 @@ def find_current_period_by_date(all_periods: list[dict], today: Optional[_dt.dat
 # ---------------------------------------------------------------------------
 # Period discovery
 # ---------------------------------------------------------------------------
-
 def get_padel_periods(session: requests.Session, player_id: str) -> list[dict]:
     """
     Fetch the dashboard and return all available padel periods.
@@ -186,6 +196,7 @@ def get_padel_periods(session: requests.Session, player_id: str) -> list[dict]:
     params = {"userId": player_id, **DEFAULT_PADEL_PARAMS}
     html = _get_html(session, DASHBOARD_URL, params=params)
     soup = BeautifulSoup(html, "html.parser")
+
     selects_with_periods = []
     for sel in soup.find_all("select"):
         opts = sel.find_all("option")
@@ -203,12 +214,14 @@ def get_padel_periods(session: requests.Session, player_id: str) -> list[dict]:
                 "select_name": sel.get("name", ""),
                 "periods": period_opts,
             })
+
     if len(selects_with_periods) >= 3:
         padel_select = selects_with_periods[2]
     elif selects_with_periods:
         padel_select = selects_with_periods[0]
     else:
         return []
+
     return [
         {**p, "select_name": padel_select["select_name"]}
         for p in padel_select["periods"]
@@ -218,7 +231,6 @@ def get_padel_periods(session: requests.Session, player_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Period page fetcher
 # ---------------------------------------------------------------------------
-
 def fetch_period_html(
     session: requests.Session,
     player_id: str,
@@ -228,14 +240,18 @@ def fetch_period_html(
     params = {"userId": player_id, **DEFAULT_PADEL_PARAMS}
     html = _get_html(session, DASHBOARD_URL, params=params, delay=0.5)
     soup = BeautifulSoup(html, "html.parser")
+
     select_name = period.get("select_name", "")
     period_value = period.get("value", "")
+
     padel_select = soup.find("select", {"name": select_name}) if select_name else None
     padel_form = padel_select.find_parent("form") if padel_select else None
+
     if padel_form:
         form_action = padel_form.get("action", DASHBOARD_URL)
         if not form_action.startswith("http"):
             form_action = BASE_URL + form_action
+
         form_data = {}
         for inp in padel_form.find_all("input", {"type": "hidden"}):
             name = inp.get("name", "")
@@ -245,6 +261,7 @@ def fetch_period_html(
         if select_name:
             form_data[select_name] = period_value
         form_data["userId"] = player_id
+
         time.sleep(1.5)
         resp = session.post(form_action, data=form_data, headers=HEADERS, timeout=30)
         resp.raise_for_status()
@@ -259,28 +276,21 @@ def fetch_period_html(
 # Tournament parser
 # ---------------------------------------------------------------------------
 #
-# PADEL_ANALYSIS_CONTENT_BASED_SPORT_FILTER_FIX (deze beurt)
+# PADEL_ANALYSIS_CONTENT_BASED_SPORT_FILTER_FIX
 # BUG (opgelost): de vorige aanpak identificeerde de padel-sectie via
 # POSITIE ("de 3de 'Uitslagen Tornooien'/'Uitslagen Interclub' h3 op de
 # pagina", ervan uitgaande dat elke speler exact 4 vaste secties heeft:
 # tennis enkel, tennis dubbel, padel, pickleball, in die vaste volgorde).
-# Deze aanname bleek NIET betrouwbaar: als een speler niet aan één of
+# Deze aanname bleek NIET betrouwbaar: als een speler niet aan een of
 # meerdere van die andere sporten deelneemt, ontbreken hun secties op de
 # pagina en verschuift de POSITIE van de padel-sectie -- waardoor de
-# verkeerde sectie (of zelfs geen enkele) geselecteerd werd. Concreet
-# bevestigd via een live voorbeeld: een bekende, bestaande interclubmatch
-# (Stijn Mortier, 05/09/2026, reeks "PADEL OPEN 40 5", competitie "Padel
-# Senior Cup") werd NIET opgepikt, ondanks dat de juiste periode intussen
-# wel al correct via datumvergelijking geïdentificeerd werd.
+# verkeerde sectie (of zelfs geen enkele) geselecteerd werd.
 #
 # Nieuwe aanpak: parseer ALLE secties op de volledige pagina (ongeacht
 # positie/telling van hoeveel sport-secties er zijn), en filter het
 # resultaat achteraf op INHOUD: enkel matches behouden waarvan reeks_name
 # (of tournament_name/competition_name) het woord 'padel' bevat
-# (case-insensitive). Dit is een directe, betrouwbare check op de
-# daadwerkelijke matchdata zelf, i.p.v. een kwetsbare aanname over
-# paginastructuur/aantal-secties-per-speler.
-
+# (case-insensitive).
 def parse_tournament_section(soup: BeautifulSoup, player_id: str, period_label: str) -> list[dict]:
     """
     Parse ALLE tornooiresultaten-secties op de pagina, en filter nadien op
@@ -312,9 +322,11 @@ def _parse_tournament_org_div(org_div: Tag, player_id: str, period_label: str) -
         else:
             tournament_name = header_text
             date_start = date_end = None
+
         content = details_div.find("div", class_="details-content")
         if not content:
             continue
+
         reeks_name = reeks_url = reeks_id = tornooi_id = None
         partner_name = partner_uid = None
         tournament_week = None
@@ -339,6 +351,7 @@ def _parse_tournament_org_div(org_div: Tag, player_id: str, period_label: str) -
                 elif label.lower() == "week":
                     tournament_week = _clean(value_span.get_text())
                 tournament_week = _clean(value_span.get_text())
+
         table = content.find("table")
         if not table:
             continue
@@ -387,7 +400,6 @@ def _parse_tournament_org_div(org_div: Tag, player_id: str, period_label: str) -
 # ---------------------------------------------------------------------------
 # Interclub parser
 # ---------------------------------------------------------------------------
-
 def parse_interclub_section(soup: BeautifulSoup, player_id: str, period_label: str) -> list[dict]:
     """
     Parse ALLE interclub-secties op de pagina (elke 'Uitslagen Interclub' h3
@@ -424,9 +436,11 @@ def _parse_interclub_details_div(details_div: Tag, player_id: str, period_label:
     else:
         competition_name = header_text
         match_date = None
+
     content = details_div.find("div", class_="details-content")
     if not content:
         return matches
+
     reeks_name = encounter = None
     uitslagenblad_url = spelgroep_id = match_id = None
     for row in content.find_all("div", class_="row-fluid"):
@@ -444,6 +458,7 @@ def _parse_interclub_details_div(details_div: Tag, player_id: str, period_label:
             uitslagenblad_url = uitslagen_a.get("href", "")
             spelgroep_id = _param_from_url(uitslagenblad_url, "spelgroepId")
             match_id = _param_from_url(uitslagenblad_url, "matchId")
+
     table = content.find("table")
     if not table:
         return matches
@@ -493,18 +508,98 @@ def _parse_interclub_details_div(details_div: Tag, player_id: str, period_label:
 # ---------------------------------------------------------------------------
 # Uitslagenblad scraper
 # ---------------------------------------------------------------------------
+def _col_by_data_title(cols: list, title: str):
+    """Zoekt de <td> in `cols` met het opgegeven data-title-attribuut.
+    Betrouwbaarder dan positionele kolomindexen: de site markeert elke
+    kolom expliciet met data-title (bv. data-title="Uitslag"), en dat
+    attribuut verandert niet als de kolomvolgorde ooit zou wijzigen."""
+    return next((c for c in cols if c.get("data-title") == title), None)
+
+
+def _parse_pair_score(text: str) -> Optional[tuple]:
+    """Ontleedt een 'X-Y'-tekst (bv. '1-3', '0-1') tot (int, int).
+    Geeft None terug als de tekst niet exact dat formaat heeft - GEEN gok."""
+    m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", str(text or ""))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
 
 def scrape_uitslagenblad(session: requests.Session, url: str, delay: float = 1.5) -> dict:
+    """
+    Scrapet 1 interclub-uitslagenblad: de teamsamenvatting (ploegnamen,
+    ploeg-ID's, winnaar, eindscore in matchen/sets/spellen) en het detail
+    per bord (dubbel).
+
+    PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25 (op verzoek van Kim, na
+    grondige analyse van de ECHTE HTML-structuur van een uitslagenblad -
+    geen aanname meer, rechtstreeks bevestigd)
+    --------------------------------------------------------------------
+    ROOT CAUSE (bevestigd, niet langer een vermoeden): de vorige versie
+    zocht per bord naar een LOSSE LETTER "W" of "V" in de kolomtekst:
+
+        result_letter = next((t for t in reversed(col_texts) if t in ("W", "V")), None)
+
+    Die letters bestaan NERGENS op een interclub-uitslagenblad. De echte
+    kolom heet "Uitslag" (herkenbaar aan data-title="Uitslag") en bevat een
+    numeriek paar "0-1" of "1-0" - thuis-uit, PER BORD. Dat paar werd nooit
+    gevonden door de oude code, dus "won" bleef ALTIJD None. Dat is de
+    volledige verklaring voor de aanhoudende "Resultaat: Onbekend"-melding
+    in de UI, ook nadat de rest van de keten (opponent_scout.py,
+    page_lineup_lab.py) al correct was opgebouwd rond een "opponent_won"-
+    veld: dat veld kreeg simpelweg nooit bruikbare invoer.
+
+    Bevestigde structuur van elke bord-rij (uit een echt uitslagenblad,
+    2 onafhankelijke rijen gecontroleerd tegen de vetgedrukte winnaar-
+    aanduiding <b class="bold"> die de site zelf ook toont):
+        data-title="Uitslag"            "0-1"                thuis-uit: WIE won dit bord
+        data-title="Score v/d winnaar"  "6/3 - 6/7 (3) - 10/2"  setcijfers, ALTIJD winnaar-eerst
+        data-title="Sets"                "1-2"               sets thuis-uit, dit bord
+        data-title="Spellen"             "16-19"              spellen (games) thuis-uit, dit bord
+
+    En de "Samenvatting"-sectie bovenaan de pagina (buiten de bord-tabel):
+        Ontvangende ploeg: <a href="...ploegId=334297">... A</a>
+        Bezoekende ploeg:  <a href="...ploegId=337680">... D</a> (winnaar)
+        Uitslag:  1-3     <- gewonnen MATCHEN/borden, thuis-uit
+        Sets:     3-7
+        Spellen:  40-56
+
+    FIX: leest nu BEIDE niveaus expliciet via het data-title-attribuut
+    i.p.v. positionele tekstvergelijking, en geeft het team-niveau (voor de
+    eindscore/winnaar van de VOLLEDIGE ontmoeting) apart en ondubbelzinnig
+    terug naast het bestaande bord-niveau.
+
+    Nieuw, additief (bestaande sleutels "players"/"rankings"/"round_text"/
+    "result"/"won"/"score" blijven ongewijzigd - geen breaking change voor
+    bestaande aanroepers):
+      - per bord: "sets", "games" (elk (thuis, uit) of None)
+      - op het resultaat zelf: "home_ploeg_id", "away_ploeg_id",
+        "winner_team", "winner_ploeg_id", "team_score_matches",
+        "team_score_sets", "team_score_games"
+    """
     full_url = BASE_URL + url if url.startswith("/") else url
     html = _get_html(session, full_url, delay=delay)
     soup = BeautifulSoup(html, "html.parser")
+
     result = {
         "url": full_url,
         "scraped_at": _utc_now(),
         "home_team": None,
         "away_team": None,
+        "home_ploeg_id": None,
+        "away_ploeg_id": None,
+        "winner_team": None,
+        "winner_ploeg_id": None,
+        # Team-niveau eindscore van de VOLLEDIGE ontmoeting (thuis, uit),
+        # rechtstreeks uit de "Samenvatting"-sectie - GEEN afleiding uit de
+        # bordresultaten.
+        "team_score_matches": None,
+        "team_score_sets": None,
+        "team_score_games": None,
         "matches": [],
     }
+
+    # ---------- Teamnamen: fallback via <h1>/<h2>/<h3> met "thuis / uit" ----------
     for tag in ["h1", "h2", "h3"]:
         h = soup.find(tag)
         if h:
@@ -514,29 +609,84 @@ def scrape_uitslagenblad(session: requests.Session, url: str, delay: float = 1.5
                 result["home_team"] = _clean(parts[0])
                 result["away_team"] = _clean(parts[1])
                 break
+
+    # ---------- Samenvatting-sectie: ploegnamen, ploeg-ID's, winnaar, eindscore ----------
+    for row in soup.find_all("div", class_="row-fluid"):
+        for label_span in row.find_all("span", class_="list-label"):
+            value_span = label_span.find_next_sibling("span", class_="list-value")
+            if not value_span:
+                continue
+            label = _clean(label_span.get_text()).rstrip(":").lower()
+            value_text = _clean(value_span.get_text())
+            a = value_span.find("a")
+
+            if label == "ontvangende ploeg":
+                if a:
+                    result["home_team"] = _clean(a.get_text())
+                    result["home_ploeg_id"] = _param_from_url(a.get("href"), "ploegId")
+                if "(winnaar)" in value_text.lower():
+                    result["winner_team"] = result["home_team"]
+                    result["winner_ploeg_id"] = result["home_ploeg_id"]
+            elif label == "bezoekende ploeg":
+                if a:
+                    result["away_team"] = _clean(a.get_text())
+                    result["away_ploeg_id"] = _param_from_url(a.get("href"), "ploegId")
+                if "(winnaar)" in value_text.lower():
+                    result["winner_team"] = result["away_team"]
+                    result["winner_ploeg_id"] = result["away_ploeg_id"]
+            elif label == "uitslag":
+                result["team_score_matches"] = _parse_pair_score(value_text)
+            elif label == "sets":
+                result["team_score_sets"] = _parse_pair_score(value_text)
+            elif label == "spellen":
+                result["team_score_games"] = _parse_pair_score(value_text)
+
+    # ---------- Per bord (dubbel) ----------
     for table in soup.find_all("table"):
-        for row in table.find_all("tr"):
-            cols = row.find_all("td")
+        for tr in table.find_all("tr"):
+            cols = tr.find_all("td")
             if len(cols) < 4:
                 continue
-            all_links = [a for a in row.find_all("a") if _user_id_from_url(a.get("href"))]
+            all_links = [a for a in tr.find_all("a") if _user_id_from_url(a.get("href"))]
             if len(all_links) < 2:
                 continue
-            players = [{"name": _clean(a.get_text()), "user_id": _user_id_from_url(a.get("href"))} for a in all_links]
-            rankings = re.findall(r"P\d+", _clean(row.get_text()))
-            col_texts = [_clean(c.get_text()) for c in cols]
-            result_letter = next((t for t in reversed(col_texts) if t in ("W", "V")), None)
-            score_cands = [t for t in col_texts if re.match(r"\d+/\d+", t)]
-            score = score_cands[-1] if score_cands else None
-            round_cands = [t for t in col_texts if re.match(r"(poule|finale|1/[24])", t, re.I)]
-            round_text = round_cands[0] if round_cands else None
+            players = [
+                {"name": _clean(a.get_text()), "user_id": _user_id_from_url(a.get("href"))}
+                for a in all_links
+            ]
+            rankings = re.findall(r"P\d+", _clean(tr.get_text()))
+
+            uitslag_cel = _col_by_data_title(cols, "Uitslag")
+            uitslag_tekst = _clean(uitslag_cel.get_text()) if uitslag_cel is not None else ""
+            uitslag_pair = _parse_pair_score(uitslag_tekst)
+            # True = de kant die in deze rij als EERSTE (thuis-kolom, dus
+            # players[0:2]) vermeld staat, won dit bord. None als het
+            # "Uitslag"-veld niet gevonden of niet leesbaar was - bewust
+            # GEEN gok, liever expliciet onbekend dan een verzonnen waarde.
+            home_won_this_board = (uitslag_pair[0] == 1) if uitslag_pair else None
+
+            score_cel = _col_by_data_title(cols, "Score v/d winnaar")
+            score = _clean(score_cel.get_text()) if score_cel is not None else None
+
+            sets_cel = _col_by_data_title(cols, "Sets")
+            board_sets = _parse_pair_score(_clean(sets_cel.get_text())) if sets_cel is not None else None
+
+            spellen_cel = _col_by_data_title(cols, "Spellen")
+            board_games = _parse_pair_score(_clean(spellen_cel.get_text())) if spellen_cel is not None else None
+
             result["matches"].append({
                 "players": players,
                 "rankings": rankings,
-                "round_text": round_text,
-                "result": result_letter,
-                "won": (result_letter == "W") if result_letter in ("W", "V") else None,
+                "round_text": None,
+                # "won": True betekent "de eerste 2 spelers in deze rij
+                # (players[0:2], de THUIS-kolom op het uitslagenblad) wonnen
+                # dit bord". Dit is consistent met hoe
+                # opponent_scout.extract_opponent_lineup() players[0:2]
+                # behandelt als de thuiskolom.
+                "won": home_won_this_board,
                 "score": score,
+                "sets": board_sets,
+                "games": board_games,
             })
     return result
 
@@ -544,7 +694,6 @@ def scrape_uitslagenblad(session: requests.Session, url: str, delay: float = 1.5
 # ---------------------------------------------------------------------------
 # Main scrape function
 # ---------------------------------------------------------------------------
-
 def scrape_player(
     player_id: str,
     periods_to_scrape: Optional[list[str]] = None,
@@ -553,19 +702,23 @@ def scrape_player(
 ) -> dict:
     session = requests.Session()
     logger.info(f"Scraping speler {player_id}...")
+
     all_periods = get_padel_periods(session, player_id)
     logger.info(f"  {len(all_periods)} periodes gevonden")
     if not all_periods:
         return {"player_id": player_id, "error": "Geen periodes gevonden", "scraped_at": _utc_now()}
+
     target_periods = (
         [p for p in all_periods if p["label"] in periods_to_scrape]
         if periods_to_scrape is not None
         else all_periods
     )
+
     all_matches = []
     scraped_labels = []
     empty_labels = []
     failed_periods = []
+
     for i, period in enumerate(target_periods):
         label = period["label"]
         logger.info(f"  [{i+1}/{len(target_periods)}] {label}")
@@ -575,22 +728,27 @@ def scrape_player(
                 html = _get_html(session, DASHBOARD_URL, params=params, delay=0)
             else:
                 html = fetch_period_html(session, player_id, period)
+
             soup = BeautifulSoup(html, "html.parser")
             t_matches = parse_tournament_section(soup, player_id, label)
             i_matches = parse_interclub_section(soup, player_id, label)
             period_matches = t_matches + i_matches
+
             if period_matches:
                 all_matches.extend(period_matches)
                 logger.info(f"    → {len(t_matches)} tornooi + {len(i_matches)} interclub")
             else:
                 empty_labels.append(label)
                 logger.info(f"    → leeg")
+
             scraped_labels.append(label)
         except Exception as e:
             logger.error(f"    → FOUT: {e}")
             failed_periods.append({"label": label, "error": str(e)})
+
         if i < len(target_periods) - 1:
             time.sleep(delay_between_periods)
+
     uitslagenblad_results = {}
     if scrape_uitslagenbladeren:
         seen_urls = set()
@@ -604,10 +762,12 @@ def scrape_player(
                     uitslagenblad_results[key] = scrape_uitslagenblad(session, url)
                 except Exception as e:
                     logger.warning(f"  Uitslagenblad fout ({url}): {e}")
+
     won = sum(1 for m in all_matches if m.get("won") is True)
     lost = sum(1 for m in all_matches if m.get("won") is False)
     total = len(all_matches)
     known = won + lost
+
     return {
         "player_id": player_id,
         "scraped_at": _utc_now(),
@@ -635,6 +795,7 @@ def scrape_current_period(player_id: str) -> dict:
     params = {"userId": player_id, **DEFAULT_PADEL_PARAMS}
     html = _get_html(session, DASHBOARD_URL, params=params)
     soup = BeautifulSoup(html, "html.parser")
+
     period_label = "HUIDIGE_PERIODE"
     selects_with_periods = []
     for sel in soup.find_all("select"):
@@ -645,11 +806,14 @@ def scrape_current_period(player_id: str) -> dict:
         period_label = _clean(selects_with_periods[2][0].get_text())
     elif selects_with_periods:
         period_label = _clean(selects_with_periods[0][0].get_text())
+
     t_matches = parse_tournament_section(soup, player_id, period_label)
     i_matches = parse_interclub_section(soup, player_id, period_label)
     all_matches = t_matches + i_matches
+
     won = sum(1 for m in all_matches if m.get("won") is True)
     lost = sum(1 for m in all_matches if m.get("won") is False)
+
     return {
         "player_id": player_id,
         "period_label": period_label,

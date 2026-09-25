@@ -773,16 +773,22 @@ def _rank_text_for_opponent(player: dict) -> str:
 def _fixture_rows(boards: list) -> list:
     """Zet de dubbels van 1 ontmoeting om naar tabelrijen, MET klassement.
 
-    PADEL_ANALYSIS_OPPONENT_WON_ROWS_COLOR_2026-09-25 (op verzoek van Kim:
-    "Winstmatchen mag je eventueel gewoon in groen tonen in de tabel"):
-    voegt het "Resultaat"-veld toe, gebaseerd op opponent_scout.py's nieuwe,
-    ondubbelzinnige "opponent_won"-veld (won de GESCOUTE ploeg dit bord?).
-    De kleurcodering zelf gebeurt in _render_fixture_rows_table() hieronder
-    via een pandas Styler - deze functie geeft enkel de platte data terug,
-    zodat _matchups_to_table_rows() en andere consumenten die dit
-    hergebruiken niet worden verrast door een extra kolom die ze niet
-    verwachten (defensief: valt terug op "?" als opponent_won ontbreekt in
-    oudere, reeds gecachete bundles van vóór deze fix)."""
+    PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25 (op verzoek van
+    Kim: "kolom resultaat moet kolom 'winnaar' worden waar de naam van de
+    ploeg komt die die match gewonnen heeft en die lijn in het groen als
+    het de ploeg is die de volgende tegenstander wordt"):
+    ----------------------------------------------------------------------
+    ROOT CAUSE van "Resultaat: Onbekend": scrape_uitslagenblad() zocht naar
+    een niet-bestaande "W"/"V"-letter i.p.v. het echte "Uitslag"-veld
+    (0-1/1-0) - zie PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25 in
+    scraper_v2.py voor de volledige analyse en fix, bevestigd tegen de
+    echte HTML. Met die fix is "opponent_won" hier eindelijk bruikbaar.
+
+    FIX: kolom "Winnaar" toont nu de NAAM van de winnende duo (via het
+    nieuwe "other_pair"-veld uit opponent_scout.py - de tot nu toe
+    weggegooide, niet-gescoute kant van elk bord), niet enkel een
+    Gewonnen/Verloren-label. Een apart "opponent_won"-veld per rij (bool of
+    None) bepaalt de kleur in _render_fixture_rows_table() hieronder."""
     rows = []
     for b in sorted(boards, key=lambda x: x.get("board_position") or 0):
         pair = b.get("opponent_pair") or []
@@ -792,12 +798,13 @@ def _fixture_rows(boards: list) -> list:
         rot = (int(pos) + 1) // 2 if pos else "?"
         m_in_rot = 1 if (pos and int(pos) % 2 == 1) else 2
         opponent_won = b.get("opponent_won")
+        other_pair = b.get("other_pair") or []
         if opponent_won is True:
-            resultaat = "Gewonnen"
-        elif opponent_won is False:
-            resultaat = "Verloren"
+            winnaar_namen = " / ".join(p.get("name", "?") for p in pair)
+        elif opponent_won is False and len(other_pair) == 2:
+            winnaar_namen = " / ".join(p.get("name", "?") for p in other_pair)
         else:
-            resultaat = "Onbekend"
+            winnaar_namen = "Onbekend"
         rows.append({
             "Match": f"Rotatie {rot} — Match {m_in_rot}" if pos else "Match ?",
             "Speler 1": pair[0].get("name", "?"),
@@ -805,42 +812,49 @@ def _fixture_rows(boards: list) -> list:
             "Speler 2": pair[1].get("name", "?"),
             "Klassement 2": _rank_text_for_opponent(pair[1]),
             "Score": b.get("score") or "onbekend",
-            "Resultaat": resultaat,
+            "Winnaar": winnaar_namen,
+            "_opponent_won": opponent_won,  # intern: bepaalt de rijkleur, niet getoond
         })
     return rows
 
 
 def _render_fixture_rows_table(rows: list) -> None:
-    """PADEL_ANALYSIS_OPPONENT_WON_ROWS_COLOR_2026-09-25: toont _fixture_
-    rows()-resultaat met een groene rij bij "Gewonnen" (vanuit het
-    perspectief van de GESCOUTE ploeg - dus: dit koppel is gevaarlijk, ze
-    wonnen dit bord) en een lichte rode tint bij "Verloren" (dit koppel is
-    kwetsbaarder gebleken). "Onbekend" (geen leesbare score) blijft
+    """PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25: toont
+    _fixture_rows()-resultaat met een groene rij zodra de GESCOUTE ploeg
+    (onze eerstvolgende tegenstander) dat bord won, en een lichte rode tint
+    wanneer zij het verloren. "Onbekend" (geen leesbare score) blijft
     ongekleurd. Faalt de styling (bv. een oudere pandas/Streamlit-versie),
     dan valt dit terug op de gewone, ongekleurde tabel - nooit een crash
     voor een puur cosmetische toevoeging."""
     if not rows:
         st.info("Geen bruikbare dubbels in deze ontmoeting.")
         return
+    zichtbare_kolommen = [k for k in rows[0].keys() if not k.startswith("_")]
     try:
         import pandas as _pd
 
         def _kleur_resultaat(row):
-            if row["Resultaat"] == "Gewonnen":
+            if row.get("_opponent_won") is True:
                 return ["background-color: #d4edda"] * len(row)
-            if row["Resultaat"] == "Verloren":
+            if row.get("_opponent_won") is False:
                 return ["background-color: #f8d7da"] * len(row)
             return [""] * len(row)
 
         df = _pd.DataFrame(rows)
         styled = df.style.apply(_kleur_resultaat, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            styled, use_container_width=True, hide_index=True,
+            column_order=zichtbare_kolommen,
+        )
         st.caption(
-            "\U0001F7E2 Groen = de GESCOUTE ploeg (tegenstander) won dit bord - een gevaarlijk "
-            "koppel om rekening mee te houden. \U0001F534 Rood = zij verloren dit bord."
+            "\U0001F7E2 Groen = de GESCOUTE ploeg (onze eerstvolgende tegenstander) won dit bord - "
+            "een gevaarlijk koppel om rekening mee te houden. \U0001F534 Rood = zij verloren dit bord."
         )
     except Exception:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
+            use_container_width=True, hide_index=True,
+        )
 
 
 def _parse_set_score(score_text: str):
@@ -881,94 +895,90 @@ def _parse_set_score(score_text: str):
 
 def _fixture_final_score(
     fx: dict, boards: list, scouted_team_name: str, opponent_ploeg_id: str = None,
+    fixture_bundle: dict = None,
 ):
-    """Eindscore van 1 volledige ontmoeting (aantal gewonnen BORDEN).
+    """Eindscore van 1 volledige ontmoeting: matchen/sets/spellen + winnaar.
 
-    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_FIX_2026-09-25 (op verzoek van Kim:
-    "bij ludoviek padel tegen tc eleven zie ik 4-0 maar dat klopt niet. zou
-    1-3 moeten zijn [...] de uitslagen op de website staan genoteerd als
-    score van de winnaar").
+    PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25 (op verzoek van
+    Kim: "totaal resultaat met games en sets en totale score wordt ook niet
+    getoond"):
+    ----------------------------------------------------------------------
+    ROOT CAUSE: deze functie leidde de eindscore voorheen af door borden te
+    TELLEN (via opponent_won) - dat gaf enkel het aantal gewonnen MATCHEN,
+    nooit Sets of Spellen, want die informatie zit niet op bordniveau
+    samengevat. De ECHTE eindscore staat rechtstreeks op de pagina, in de
+    "Samenvatting"-sectie (Uitslag/Sets/Spellen) - scrape_uitslagenblad()
+    leest dit nu expliciet (zie PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25
+    in scraper_v2.py) en opponent_scout.py geeft het door als
+    fixture_bundle["team_score_matches"/"team_score_sets"/"team_score_games"].
 
-    ROOT CAUSE: de vorige versie leidde de eindscore af door PER SET de 2
-    cijfers te vergelijken en de grootste te bestempelen als de kant van
-    "opponent_pair" (in de veronderstelling dat de cijfervolgorde iets zegt
-    over wie won). TVL noteert een bordscore echter altijd als WINNAAR
-    EERST ("6-0 6-1"), nooit als "team A eerst" - die aanname was dus
-    fundamenteel fout, niet incidenteel: het cijfer zelf verraadt nooit wie
-    won, enkel hoe groot het verschil was.
+    FIX: gebruikt nu RECHTSTREEKS die gescrapete team-niveau velden. Enkel
+    als die (bv. bij een ouder, nog niet herscraped uitslagenblad)
+    ontbreken, valt dit terug op de oude bordentelling - dan ontbreken Sets
+    en Spellen noodgedwongen, maar het aantal gewonnen matchen blijft
+    beschikbaar.
 
-    FIX: gebruikt nu uitsluitend board["opponent_won"] (zie
-    opponent_scout.extract_opponent_lineup(), waar dit ONDUBBELZINNIG
-    berekend wordt via de eigen "won"-indicator van de pagina, losgekoppeld
-    van de setcijfers) - geen enkele aanname over cijfervolgorde meer nodig.
-
-    Geeft (score_text, winner_name) terug, bv. ("1-3", "T.C. ELEVEN C").
-    Geeft (None, None) terug als er te weinig borden een gekend resultaat
-    hebben om een betrouwbare eindstand te tonen.
+    Geeft een dict terug: {"home_name", "away_name", "matches", "sets",
+    "games", "winner"} - "matches"/"sets"/"games" zijn elk (thuis, uit) of
+    None, "winner" is de teamnaam of None.
     """
-    home_name = fx.get("home_name") or ""
-    away_name = fx.get("away_name") or ""
+    fixture_bundle = fixture_bundle or {}
+    home_name = fixture_bundle.get("home_team") or fx.get("home_name") or ""
+    away_name = fixture_bundle.get("away_team") or fx.get("away_name") or ""
+    winner = fixture_bundle.get("winner_team")
 
-    scouted_wins = sum(1 for b in boards if b.get("opponent_won") is True)
-    other_wins = sum(1 for b in boards if b.get("opponent_won") is False)
-    known = scouted_wins + other_wins
-    if known == 0:
-        return None, None
+    matches_pair = fixture_bundle.get("team_score_matches")
+    sets_pair = fixture_bundle.get("team_score_sets")
+    games_pair = fixture_bundle.get("team_score_games")
 
-    is_scouted_home = None
-    if opponent_ploeg_id is not None:
-        if str(fx.get("home_ploeg_id")) == str(opponent_ploeg_id):
-            is_scouted_home = True
-        elif str(fx.get("away_ploeg_id")) == str(opponent_ploeg_id):
-            is_scouted_home = False
-    if is_scouted_home is None and scouted_team_name and home_name:
-        is_scouted_home = bool(
-            _clean_name(scouted_team_name) in _clean_name(home_name)
-            or _clean_name(home_name) in _clean_name(scouted_team_name)
+    if matches_pair is None:
+        # Terugval (oud gedrag): tellen via de borden - enkel het aantal
+        # gewonnen matchen is dan beschikbaar, geen sets/spellen.
+        scouted_wins = sum(1 for b in boards if b.get("opponent_won") is True)
+        other_wins = sum(1 for b in boards if b.get("opponent_won") is False)
+        known = scouted_wins + other_wins
+        if known == 0:
+            return None
+        is_scouted_home = None
+        if opponent_ploeg_id is not None:
+            if str(fx.get("home_ploeg_id")) == str(opponent_ploeg_id):
+                is_scouted_home = True
+            elif str(fx.get("away_ploeg_id")) == str(opponent_ploeg_id):
+                is_scouted_home = False
+        if is_scouted_home is None and scouted_team_name and home_name:
+            is_scouted_home = bool(
+                _clean_name(scouted_team_name) in _clean_name(home_name)
+                or _clean_name(home_name) in _clean_name(scouted_team_name)
+            )
+        matches_pair = (
+            (scouted_wins, other_wins) if is_scouted_home else (other_wins, scouted_wins)
         )
+        if not winner:
+            if matches_pair[0] > matches_pair[1]:
+                winner = home_name or None
+            elif matches_pair[1] > matches_pair[0]:
+                winner = away_name or None
 
-    if not home_name or not away_name:
-        winner = None
-        if scouted_wins > other_wins:
-            winner = scouted_team_name or None
-        elif other_wins > scouted_wins:
-            winner = "tegenstander"
-        return f"{scouted_wins}-{other_wins}", winner
-
-    if is_scouted_home:
-        home_wins, away_wins = scouted_wins, other_wins
-    else:
-        home_wins, away_wins = other_wins, scouted_wins
-
-    winner = None
-    if home_wins > away_wins:
-        winner = home_name
-    elif away_wins > home_wins:
-        winner = away_name
-    return f"{home_wins}-{away_wins}", winner
+    return {
+        "home_name": home_name,
+        "away_name": away_name,
+        "matches": matches_pair,
+        "sets": sets_pair,
+        "games": games_pair,
+        "winner": winner,
+    }
 
 
 def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle: dict = None) -> None:
     """Eerdere ontmoetingen van de tegenstander, kiesbaar via dropdown.
 
-    PADEL_ANALYSIS_FIXTURE_LABEL_FORMAT_FIX_2026-09-25 (op verzoek van Kim:
-    "de formattering van de eerdere ontmoeten is niet mooi [...] staat 2
-    keer hetzelfde en die scores staan daar tussen in. beter op het einde
-    van de string de score en maar 1 keer de ploegen [...] Gewonnen ploeg
-    kan je groen zetten ook")
-    ----------------------------------------------------------------------
-    ROOT CAUSE van de dubbele teamnamen: _fixture_final_score() gaf
-    voorheen een VOLLEDIGE string terug ("LUDOVIEK Padel C 4 - 0 T.C.
-    ELEVEN C"), en die werd toegevoegd AAN een label dat de teamnamen al
-    bevatte ("... (LUDOVIEK Padel C vs T.C. ELEVEN C)") - de teamnamen
-    stonden dus onvermijdelijk 2 keer in dezelfde regel, met de score er
-    lelijk tussenin.
-    FIX: _fixture_final_score() geeft nu enkel de KALE score terug ("1-3")
-    plus apart de winnaar-naam - de teamnamen worden hier, op de ENE plek
-    waar dat al gebeurde, gecombineerd met die kale score. De winnaar
-    verschijnt apart, in het groen. Zie _fixture_final_score() voor de
-    (belangrijkere) score-berekeningsfix zelf:
-    PADEL_ANALYSIS_FIXTURE_FINAL_SCORE_FIX_2026-09-25.
+    PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25 (op verzoek van
+    Kim: "totaal resultaat met games en sets en totale score wordt ook niet
+    getoond [...] Gewonnen ploeg kan je groen zetten ook"):
+    toont nu het volledige lange formaat - Matchen X-Y, Sets X-Y, Spellen
+    X-Y - plus de winnaar-naam apart, in het groen. Zie
+    _fixture_final_score() voor waar deze cijfers nu vandaan komen
+    (rechtstreeks van de pagina, niet langer afgeleid uit bordentelling).
     """
     source = full_bundle if (full_bundle or {}).get("previous_fixtures") else bundle
     previous_fixtures = (source or {}).get("previous_fixtures") or []
@@ -993,23 +1003,25 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
         opponent_ploeg_id = (opp or {}).get("ploeg_id")
         labels = []
         scores = []
-        winners = []
         for fx_bundle in bruikbaar:
             fx = fx_bundle.get("fixture", {}) or {}
             datum = fx.get("date_text", "?")
-            tegen = fx.get("home_name") or ""
-            uit = fx.get("away_name") or ""
+            tegen = fx_bundle.get("home_team") or fx.get("home_name") or ""
+            uit = fx_bundle.get("away_team") or fx.get("away_name") or ""
             wedstrijd = f" ({tegen} vs {uit})" if tegen and uit else ""
             labels.append(f"{datum}{wedstrijd}")
-            score, winner = _fixture_final_score(
+            score = _fixture_final_score(
                 fx, fx_bundle.get("boards") or [], scouted_name,
-                opponent_ploeg_id=opponent_ploeg_id,
+                opponent_ploeg_id=opponent_ploeg_id, fixture_bundle=fx_bundle,
             )
             scores.append(score)
-            winners.append(winner)
         if len(bruikbaar) > 1:
             def _label_met_eindscore(i):
-                return f"{labels[i]} \u2014 {scores[i]}" if scores[i] else labels[i]
+                s = scores[i]
+                if not s or not s.get("matches"):
+                    return labels[i]
+                m = s["matches"]
+                return f"{labels[i]} \u2014 {m[0]}-{m[1]}"
             keuze = st.selectbox(
                 "Welke ontmoeting wil je bekijken?", list(range(len(bruikbaar))),
                 format_func=_label_met_eindscore, index=len(bruikbaar) - 1,
@@ -1017,21 +1029,29 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
             )
         else:
             keuze = 0
+            m = (scores[0] or {}).get("matches")
             titel_txt = f"**{labels[0]}**"
-            if scores[0]:
-                titel_txt += f" \u2014 **{scores[0]}**"
+            if m:
+                titel_txt += f" \u2014 **{m[0]}-{m[1]}**"
             st.caption(f"Enige gekende ontmoeting: {titel_txt}")
-        if scores[keuze]:
-            fx_keuze = bruikbaar[keuze].get("fixture", {}) or {}
-            home = fx_keuze.get("home_name") or "?"
-            away = fx_keuze.get("away_name") or "?"
-            st.markdown(f"**Eindscore: {home} - {away}: {scores[keuze]}**")
-            if winners[keuze]:
-                st.success(f"\U0001F7E2 Winnaar: **{winners[keuze]}**")
+        score = scores[keuze]
+        if score and score.get("matches"):
+            home, away = score["home_name"] or "?", score["away_name"] or "?"
+            m = score["matches"]
+            delen = [f"Matchen: {m[0]}-{m[1]}"]
+            if score.get("sets"):
+                s = score["sets"]
+                delen.append(f"Sets: {s[0]}-{s[1]}")
+            if score.get("games"):
+                g = score["games"]
+                delen.append(f"Spellen: {g[0]}-{g[1]}")
+            st.markdown(f"**Eindscore: {home} - {away}**")
+            st.markdown(" \u00b7 ".join(delen))
+            if score.get("winner"):
+                st.success(f"\U0001F7E2 Winnaar: **{score['winner']}**")
             st.caption(
-                "Berekend uit het aantal GEWONNEN BORDEN per ontmoeting (niet games/sets), op "
-                "basis van de resultaat-indicator per bord - niet op de setcijfers zelf (die "
-                "staan altijd als 'winnaar eerst' genoteerd en verraden dus nooit welke kant won)."
+                "Rechtstreeks van de 'Samenvatting'-sectie van het uitslagenblad - niet afgeleid "
+                "uit de bordresultaten hieronder."
             )
         rows = _fixture_rows(bruikbaar[keuze].get("boards") or [])
         _render_fixture_rows_table(rows)
