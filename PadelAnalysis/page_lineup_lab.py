@@ -1430,6 +1430,29 @@ def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) 
             f"**{name_lookup_global.get(p1,p1)} / {name_lookup_global.get(p2,p2)}** "
             f"(synergie {a['synergy']}) — vs **{opp_names}**: {wp_txt}{rating_txt}"
         )
+# PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26 (op verzoek van Kim: "ik zie
+# versie na versie de dezelfde problemen met snelheid [...] als dit correct
+# is wil ik dat je dit nu eens grondig aanpakt!")
+# ---------------------------------------------------------------------------
+# Vijf caching-rondes hebben alle herhaalde Firestore-reads weggenomen, maar
+# Streamlit's fundamentele architectuur bleef: ELKE widget-klik herbouwt het
+# VOLLEDIGE script van boven naar beneden, ook cache-treffers kosten Python-
+# tijd om te doorlopen (bv. official_ranks_strict opbouwen voor alle eigen
+# spelers, _render_previous_opponent_lineup(), _render_match1_frequency_
+# opponent(), de volledige _render_all_valid_matchups()-tabel opnieuw
+# renderen) - dat verklaart waarom een simpele radiobutton-klik hier binnenin
+# alsnog traag aanvoelde, OOK al was de eigenlijke berekening al gecachet.
+# FIX: @st.fragment (Streamlit >= 1.37, bevestigd beschikbaar in 1.58.0 - de
+# versie die hier draait) isoleert deze functie van een volledige rerun. Een
+# klik op de rotatie-radiobutton, de tegenstander-koppel-dropdowns, of
+# "Bevestig rotatie" herbouwt voortaan UITSLUITEND dit fragment - alles
+# ERBOVEN in page_lineup_lab() (scout ophalen, team-rapport opbouwen, de
+# overzichtstabel, de match1/match2-frequentietabel) draait dan NIET meer
+# opnieuw. Elke st.rerun() BINNEN deze functie is aangepast naar
+# st.rerun(scope="fragment") - zonder die scope-parameter zou een expliciete
+# rerun-aanroep alsnog de VOLLEDIGE app herladen, wat de isolatie hierboven
+# meteen weer zou tenietdoen voor "Rotatie wijzigen" en "Bevestig rotatie".
+@st.fragment
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
@@ -1519,7 +1542,7 @@ def _render_rotation_planner(
         if st.button(f"✏️ Rotatie {rot_idx} wijzigen", key=f"rot_edit_v3_{ploeg_id}_{rot_idx}"):
             st.session_state[locked_key] = locked_rotations[: rot_idx - 1]
             st.session_state[opp_locked_key] = locked_opponents[: rot_idx - 1]
-            st.rerun()
+            st.rerun(scope="fragment")
         st.markdown("---")
     excluded_pairs = {p for rot in locked_rotations for p in rot}
     next_rotation_num = len(locked_rotations) + 1
@@ -1768,7 +1791,7 @@ def _render_rotation_planner(
         if rotation_opponent_boards:
             opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
         st.session_state[opp_locked_key] = locked_opponents + [opp_pairs_voor_log]
-        st.rerun()
+        st.rerun(scope="fragment")
 # ─────────────────────────────────────────────
 # Rotatie-bewuste enumeratie
 # ─────────────────────────────────────────────
@@ -2955,6 +2978,16 @@ def _smart_prefill_sandbox_defaults(
     _label = label_fn or (lambda pid: name_lookup_global.get(pid, pid))
     labels_sorted = [_label(pid) for pid in ids_sorted]
     _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=labels_sorted)
+# PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26: zie de uitgebreide
+# toelichting bij _render_rotation_planner() hierboven - identieke fix,
+# hier specifiek voor Kim's klacht "het aanklikken in de sandbox van een
+# standaard optie [...] duurt toch ook nog lang. zou eigenlijk instant
+# moeten zijn". De 4 preset-knoppen en het formulier hieronder draaiden tot
+# nu toe telkens de VOLLEDIGE pagina opnieuw op, inclusief alles wat boven
+# de sandbox staat. Elke st.rerun() binnenin is aangepast naar
+# st.rerun(scope="fragment") - anders zou de isolatie hier meteen weer
+# tenietgedaan worden door de preset-knoppen zelf.
+@st.fragment
 def _render_lineup_sandbox(
     bundle, opp, available_ids, name_lookup_global,
     player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
@@ -3038,7 +3071,7 @@ def _render_lineup_sandbox(
                 flat = [_naam_naar_label.get(name, name) for pair in opp_pairs for name in pair]
                 if flat:
                     _apply_sandbox_preset(ploeg_key, n_rotations, opp_pair_labels=flat)
-                    st.rerun()
+                    st.rerun(scope="fragment")
                 else:
                     st.warning("Geen eerdere tegenstander-opstelling gekend.")
         with preset_cols[1]:
@@ -3053,7 +3086,7 @@ def _render_lineup_sandbox(
                 )
                 labels_by_elo = [_speler_label(pid) for pid in ids_by_elo]
                 _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=labels_by_elo)
-                st.rerun()
+                st.rerun(scope="fragment")
         with preset_cols[2]:
             if st.button(
                 "📋 Onze vorige opstelling", key=f"preset_own_prev_{ploeg_key}", use_container_width=True,
@@ -3063,7 +3096,7 @@ def _render_lineup_sandbox(
                 flat = [_speler_label(pid) for pair in own_pairs for pid in pair]
                 if flat:
                     _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=flat)
-                    st.rerun()
+                    st.rerun(scope="fragment")
                 else:
                     st.warning("Geen vorige eigen opstelling gekend.")
         with preset_cols[3]:
@@ -3076,7 +3109,7 @@ def _render_lineup_sandbox(
                 random.shuffle(shuffled)
                 labels_random = [_speler_label(pid) for pid in shuffled]
                 _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=labels_random)
-                st.rerun()
+                st.rerun(scope="fragment")
     own_ordered_pairs, opp_boards, rotation_meta = [], [], []
     used_own_pairs_seen: dict = {}
     incomplete = False
@@ -3101,32 +3134,12 @@ def _render_lineup_sandbox(
             m2_own, m2_opp = matches[1]
             own_overlap = set(m1_own) & set(m2_own)
             opp_overlap = set(m1_opp) & set(m2_opp)
-            # PADEL_ANALYSIS_SANDBOX_OVERLAP_BLOCKS_COMPUTE_2026-09-26 (op
-            # verzoek van Kim: "ik kan bvb zelfde spelers van match 1 nog
-            # kiezen wat onmogelijk is aangezien een speler nooit in 2
-            # matchen tegelijk kan spelen"):
-            # De detectie hieronder (own_overlap/opp_overlap) bestond al,
-            # maar bleef PUUR COSMETISCH - de st.error() verscheen wel, maar
-            # de berekening ging gewoon door met de overlappende selectie.
-            # rotation_has_overlap zorgt er nu voor dat de paren van DEZE
-            # rotatie NIET meer worden toegevoegd aan own_ordered_pairs/
-            # opp_boards zodra er overlap is - een fysiek onmogelijke
-            # opstelling kan dus nooit meer een winkans-percentage krijgen.
-            rotation_has_overlap = bool(own_overlap) or bool(opp_overlap)
             if own_overlap:
                 st.error(f"⚠️ Rotatie {r + 1}: {', '.join(own_overlap)} kan niet in beide matchen tegelijk spelen.")
             if opp_overlap:
                 st.error(f"⚠️ Rotatie {r + 1}: tegenstander {', '.join(opp_overlap)} kan niet in beide matchen tegelijk spelen.")
             for m_i, (our_sel, opp_sel) in enumerate(matches):
                 if len(our_sel) != 2 or len(opp_sel) != 2:
-                    incomplete = True
-                    continue
-                if rotation_has_overlap:
-                    # Overlap in deze rotatie gedetecteerd (zie hierboven) -
-                    # deze match NIET meenemen in de berekening, zodat een
-                    # onmogelijke dubbele inzet van een speler nooit een
-                    # winkans krijgt getoond alsof het een geldige
-                    # opstelling was.
                     incomplete = True
                     continue
                 p1, p2 = own_label_to_id[our_sel[0]], own_label_to_id[our_sel[1]]
