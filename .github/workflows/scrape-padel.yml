@@ -33,6 +33,27 @@
 # piekbelasting. Deze workflow heeft daarom GEEN "schedule:"-trigger meer -
 # een externe GCP Cloud Scheduler-job roept de workflow_dispatch-API aan.
 # workflow_dispatch blijft ook gewoon handmatig bruikbaar via de Actions-tab.
+#
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_KLASSEMENT_ENABLED_BY_DEFAULT_2026-09-26 (op verzoek van Kim:
+# "enable klassement mag true zijn. pas de yml file aan.")
+# --------------------------------------------------------------------------
+# ci_scrape_all.py's get_klassement_enabled() valt terug op False zodra de
+# environment variable ENABLE_KLASSEMENT niet gezet is (zie
+# PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 aldaar) - en
+# deze workflow gaf ENABLE_KLASSEMENT nooit door, dus elke reguliere run
+# scrapete de aparte TVL-klassementshistoriek nooit (zichtbaar in de log als
+# "klassement (TVL, historiek) opgehaald: 0"). Kim vroeg dit nu bewust aan
+# te zetten. ENABLE_KLASSEMENT: "true" hieronder (als job-env, dus voor
+# ALLE runs van deze workflow) keert die default om.
+# LET OP (uit ci_scrape_all.py's eigen docstring, niet controleerbaar vanuit
+# dit bestand): de TVL-klassement-scrape doet een VOLLEDIGE Playwright-
+# sessie per speler (dus trager dan de padelstat-stap) en was op het moment
+# van die notitie "bovendien geblokkeerd door bot-detectie op
+# tennisenpadelvlaanderen.be". Als de eerstvolgende run daardoor merkbaar
+# trager is of "klassement (TVL, historiek) opgehaald: 0" blijft tonen
+# ondanks deze wijziging, is dat een aanwijzing dat die bot-detectie nog
+# actief is - geen fout in deze yml.
 name: Scrape Padel Data
 on:
   workflow_dispatch:
@@ -80,5 +101,10 @@ jobs:
           # "missing" (zie DEFAULT_MODE aldaar).
           PLAYER_IDS: ${{ github.event.inputs.player_ids }}
           MODE: ${{ github.event.inputs.mode }}
+          # PADEL_ANALYSIS_KLASSEMENT_ENABLED_BY_DEFAULT_2026-09-26: zie
+          # toelichting bovenaan dit bestand. Zet ENABLE_KLASSEMENT terug op
+          # "false" hier (of verwijder de regel) om terug te keren naar de
+          # oude, snellere default zonder TVL-klassementshistoriek.
+          ENABLE_KLASSEMENT: "true"
         run: |
           python ci_scrape_all.py
