@@ -1616,33 +1616,62 @@ def _render_rotation_planner(
                                     voorstel_idx[i] = j
                                     break
 
-            col_o1, col_o2 = st.columns(2)
+            # PADEL_ANALYSIS_ROTATION_OPPONENT_CROSS_FILTER_2026-09-26 (op
+            # verzoek van Kim: "de tegenstanders match 2 worden niet
+            # aangepast (of niet correct) want ik kan bvb zelfde spelers van
+            # match 1 nog kiezen wat onmogelijk is aangezien een speler nooit
+            # in 2 matchen tegelijk kan spelen")
+            # ------------------------------------------------------------
+            # ROOT CAUSE: beide selectboxen kregen dezelfde, volledige
+            # `paar_labels`-lijst - de overlap werd pas ACHTERAF gemeld als
+            # foutmelding, nooit VOORAF onmogelijk gemaakt. Dat is exact het
+            # patroon dat al eerder in de Sandbox gefixt is (PADEL_ANALYSIS_
+            # SANDBOX_MATCH2_LINKED_TO_MATCH1_2026-09-26) - hier ontbrak die
+            # fix nog, omdat de Rotatieplanner koppel-dropdowns gebruikt
+            # i.p.v. losse multiselects en dus een aparte implementatie had.
+            # FIX: Match 2 toont nu enkel nog koppels die GEEN speler delen
+            # met het al gekozen koppel van Match 1 (en omgekeerd, voor het
+            # geval iemand Match 2 eerst invult). Wijzigt Match 1 nadat Match
+            # 2 al gekozen was op een manier die een overlap veroorzaakt, dan
+            # wordt Match 2's keuze hier gereset - Streamlit toont anders een
+            # bestaande sessiewaarde die niet meer in de gefilterde opties zit.
+            def _opp_pair_uids(paar):
+                return {str(p.get("user_id")) for p in paar} if paar else set()
+
             gekozen_paren = [None, None]
-            for i, col in enumerate((col_o1, col_o2)):
-                with col:
+            col_o1, col_o2 = st.columns(2)
+            cols = (col_o1, col_o2)
+            for i in range(2):
+                andere = 1 - i
+                uitgesloten_uids = _opp_pair_uids(gekozen_paren[andere])
+                if uitgesloten_uids:
+                    beschikbare_labels = [geen_keuze] + [
+                        _pair_label(p1, p2) for p1, p2 in alle_paren
+                        if not ({str(p1.get("user_id")), str(p2.get("user_id"))} & uitgesloten_uids)
+                    ]
+                else:
+                    beschikbare_labels = paar_labels
+                key_i = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_{i}"
+                if key_i in st.session_state and st.session_state[key_i] not in beschikbare_labels:
+                    st.session_state[key_i] = geen_keuze
+                with cols[i]:
                     keuze_lbl = st.selectbox(
-                        f"Tegenstander match {i + 1}", paar_labels,
-                        index=voorstel_idx[i],
-                        key=f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_{i}",
+                        f"Tegenstander match {i + 1}", beschikbare_labels,
+                        index=min(voorstel_idx[i], len(beschikbare_labels) - 1),
+                        key=key_i,
                     )
                     if keuze_lbl != geen_keuze:
                         gekozen_paren[i] = paar_map[keuze_lbl]
+                # Match 2 moet ONMIDDELLIJK weten wat Match 1 net koos (niet
+                # pas volgende rerun) - vandaar deze berekening PER ITERATIE,
+                # i.p.v. na de hele loop.
 
             if gekozen_paren[0] and gekozen_paren[1]:
-                uids0 = {str(p.get("user_id")) for p in gekozen_paren[0]}
-                uids1 = {str(p.get("user_id")) for p in gekozen_paren[1]}
-                overlap_namen = {p.get("name", "?") for p in gekozen_paren[0] if str(p.get("user_id")) in (uids0 & uids1)}
-                if overlap_namen:
-                    st.error(
-                        f"\u26A0\uFE0F {', '.join(overlap_namen)} kan niet in beide gelijktijdige "
-                        "matchen van dezelfde rotatie staan."
-                    )
-                else:
-                    rotation_opponent_boards = [
-                        {"opponent_pair": list(gekozen_paren[0])},
-                        {"opponent_pair": list(gekozen_paren[1])},
-                    ]
-                    st.caption("\u2705 Winkansen hieronder zijn berekend tegen deze tegenstander-opstelling.")
+                rotation_opponent_boards = [
+                    {"opponent_pair": list(gekozen_paren[0])},
+                    {"opponent_pair": list(gekozen_paren[1])},
+                ]
+                st.caption("\u2705 Winkansen hieronder zijn berekend tegen deze tegenstander-opstelling.")
             elif gekozen_paren[0] or gekozen_paren[1]:
                 st.caption("Kies ook een koppel voor de andere match om de winkansen te herberekenen.")
 
