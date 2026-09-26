@@ -770,25 +770,29 @@ def _rank_text_for_opponent(player: dict) -> str:
     return " / ".join(delen)
 
 
-def _fixture_rows(boards: list) -> list:
+def _fixture_rows(
+    boards: list, home_team: str = None, away_team: str = None,
+    is_opponent_home: bool = None,
+) -> list:
     """Zet de dubbels van 1 ontmoeting om naar tabelrijen, MET klassement.
 
-    PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25 (op verzoek van
-    Kim: "kolom resultaat moet kolom 'winnaar' worden waar de naam van de
-    ploeg komt die die match gewonnen heeft en die lijn in het groen als
-    het de ploeg is die de volgende tegenstander wordt"):
+    PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-26 (op verzoek van Kim: "Bij
+    winnaar toon je de naam van de spelers bij de eerdere ontmoetingen. De
+    ploegnaam is daar beter"):
     ----------------------------------------------------------------------
-    ROOT CAUSE van "Resultaat: Onbekend": scrape_uitslagenblad() zocht naar
-    een niet-bestaande "W"/"V"-letter i.p.v. het echte "Uitslag"-veld
-    (0-1/1-0) - zie PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25 in
-    scraper_v2.py voor de volledige analyse en fix, bevestigd tegen de
-    echte HTML. Met die fix is "opponent_won" hier eindelijk bruikbaar.
+    Elke rij toont al "Speler 1"/"Speler 2" apart - een DERDE keer namen
+    tonen in de kolom "Winnaar" voegt weinig toe. De ploegnaam maakt in 1
+    oogopslag duidelijk WELKE ploeg dat bord won, zonder de namen in de 2
+    kolommen ernaast te moeten herkennen.
 
-    FIX: kolom "Winnaar" toont nu de NAAM van de winnende duo (via het
-    nieuwe "other_pair"-veld uit opponent_scout.py - de tot nu toe
-    weggegooide, niet-gescoute kant van elk bord), niet enkel een
-    Gewonnen/Verloren-label. Een apart "opponent_won"-veld per rij (bool of
-    None) bepaalt de kleur in _render_fixture_rows_table() hieronder."""
+    FIX: is home_team/away_team/is_opponent_home meegegeven (zie
+    _fixture_final_score(), die dit nu berekent), dan toont "Winnaar" de
+    PLOEGNAAM. Ontbreekt die info (bv. een ouder uitslagenblad zonder
+    team-samenvatting), dan valt dit terug op de spelersnamen - het
+    bestaande, werkende gedrag blijft dus als vangnet intact."""
+    heeft_teaminfo = (
+        home_team is not None and away_team is not None and is_opponent_home is not None
+    )
     rows = []
     for b in sorted(boards, key=lambda x: x.get("board_position") or 0):
         pair = b.get("opponent_pair") or []
@@ -799,12 +803,19 @@ def _fixture_rows(boards: list) -> list:
         m_in_rot = 1 if (pos and int(pos) % 2 == 1) else 2
         opponent_won = b.get("opponent_won")
         other_pair = b.get("other_pair") or []
+
+        winnaar_namen = "Onbekend"
         if opponent_won is True:
-            winnaar_namen = " / ".join(p.get("name", "?") for p in pair)
-        elif opponent_won is False and len(other_pair) == 2:
-            winnaar_namen = " / ".join(p.get("name", "?") for p in other_pair)
-        else:
-            winnaar_namen = "Onbekend"
+            if heeft_teaminfo:
+                winnaar_namen = home_team if is_opponent_home else away_team
+            else:
+                winnaar_namen = " / ".join(p.get("name", "?") for p in pair)
+        elif opponent_won is False:
+            if heeft_teaminfo:
+                winnaar_namen = away_team if is_opponent_home else home_team
+            elif len(other_pair) == 2:
+                winnaar_namen = " / ".join(p.get("name", "?") for p in other_pair)
+
         rows.append({
             "Match": f"Rotatie {rot} — Match {m_in_rot}" if pos else "Match ?",
             "Speler 1": pair[0].get("name", "?"),
@@ -899,28 +910,19 @@ def _fixture_final_score(
 ):
     """Eindscore van 1 volledige ontmoeting: matchen/sets/spellen + winnaar.
 
-    PADEL_ANALYSIS_WINNER_COLUMN_AND_TEAM_SCORE_2026-09-25 (op verzoek van
-    Kim: "totaal resultaat met games en sets en totale score wordt ook niet
-    getoond"):
+    PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-26 (op verzoek van Kim: "Bij
+    winnaar toon je de naam van de spelers bij de eerdere ontmoetingen. De
+    ploegnaam is daar beter"):
     ----------------------------------------------------------------------
-    ROOT CAUSE: deze functie leidde de eindscore voorheen af door borden te
-    TELLEN (via opponent_won) - dat gaf enkel het aantal gewonnen MATCHEN,
-    nooit Sets of Spellen, want die informatie zit niet op bordniveau
-    samengevat. De ECHTE eindscore staat rechtstreeks op de pagina, in de
-    "Samenvatting"-sectie (Uitslag/Sets/Spellen) - scrape_uitslagenblad()
-    leest dit nu expliciet (zie PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25
-    in scraper_v2.py) en opponent_scout.py geeft het door als
-    fixture_bundle["team_score_matches"/"team_score_sets"/"team_score_games"].
-
-    FIX: gebruikt nu RECHTSTREEKS die gescrapete team-niveau velden. Enkel
-    als die (bv. bij een ouder, nog niet herscraped uitslagenblad)
-    ontbreken, valt dit terug op de oude bordentelling - dan ontbreken Sets
-    en Spellen noodgedwongen, maar het aantal gewonnen matchen blijft
-    beschikbaar.
+    Geeft nu ook "is_scouted_home" mee terug: was de GESCOUTE tegenstander
+    (scouted_team_name/opponent_ploeg_id) in DEZE historische ontmoeting de
+    THUIS- of UITploeg? Die berekening bestond al intern in deze functie
+    (nodig voor de bordentelling-terugval), maar werd nooit doorgegeven -
+    _fixture_rows() kon daardoor de ploegnaam van de winnaar per bord niet
+    tonen en viel terug op spelersnamen.
 
     Geeft een dict terug: {"home_name", "away_name", "matches", "sets",
-    "games", "winner"} - "matches"/"sets"/"games" zijn elk (thuis, uit) of
-    None, "winner" is de teamnaam of None.
+    "games", "winner", "is_scouted_home"}.
     """
     fixture_bundle = fixture_bundle or {}
     home_name = fixture_bundle.get("home_team") or fx.get("home_name") or ""
@@ -931,6 +933,18 @@ def _fixture_final_score(
     sets_pair = fixture_bundle.get("team_score_sets")
     games_pair = fixture_bundle.get("team_score_games")
 
+    is_scouted_home = None
+    if opponent_ploeg_id is not None:
+        if str(fx.get("home_ploeg_id")) == str(opponent_ploeg_id):
+            is_scouted_home = True
+        elif str(fx.get("away_ploeg_id")) == str(opponent_ploeg_id):
+            is_scouted_home = False
+    if is_scouted_home is None and scouted_team_name and home_name:
+        is_scouted_home = bool(
+            _clean_name(scouted_team_name) in _clean_name(home_name)
+            or _clean_name(home_name) in _clean_name(scouted_team_name)
+        )
+
     if matches_pair is None:
         # Terugval (oud gedrag): tellen via de borden - enkel het aantal
         # gewonnen matchen is dan beschikbaar, geen sets/spellen.
@@ -939,17 +953,6 @@ def _fixture_final_score(
         known = scouted_wins + other_wins
         if known == 0:
             return None
-        is_scouted_home = None
-        if opponent_ploeg_id is not None:
-            if str(fx.get("home_ploeg_id")) == str(opponent_ploeg_id):
-                is_scouted_home = True
-            elif str(fx.get("away_ploeg_id")) == str(opponent_ploeg_id):
-                is_scouted_home = False
-        if is_scouted_home is None and scouted_team_name and home_name:
-            is_scouted_home = bool(
-                _clean_name(scouted_team_name) in _clean_name(home_name)
-                or _clean_name(home_name) in _clean_name(scouted_team_name)
-            )
         matches_pair = (
             (scouted_wins, other_wins) if is_scouted_home else (other_wins, scouted_wins)
         )
@@ -966,6 +969,7 @@ def _fixture_final_score(
         "sets": sets_pair,
         "games": games_pair,
         "winner": winner,
+        "is_scouted_home": is_scouted_home,
     }
 
 
@@ -1053,7 +1057,14 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
                 "Rechtstreeks van de 'Samenvatting'-sectie van het uitslagenblad - niet afgeleid "
                 "uit de bordresultaten hieronder."
             )
-        rows = _fixture_rows(bruikbaar[keuze].get("boards") or [])
+        # PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-26: ploegnaam i.p.v.
+        # spelersnamen in de kolom "Winnaar" - zie _fixture_rows().
+        rows = _fixture_rows(
+            bruikbaar[keuze].get("boards") or [],
+            home_team=(score or {}).get("home_name"),
+            away_team=(score or {}).get("away_name"),
+            is_opponent_home=(score or {}).get("is_scouted_home"),
+        )
         _render_fixture_rows_table(rows)
 
 
@@ -3371,6 +3382,55 @@ def _render_saved_lineup_analyses(name_lookup_global: dict):
         fb.delete_lineup_analysis(analysis["_doc_id"])
         st.success("Analyse verwijderd.")
         st.rerun()
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_RANGSCHIKKING_LINK_2026-09-26
+# ─────────────────────────────────────────────
+def _build_rangschikking_url(reeks_url: str) -> str | None:
+    """Bouwt de link naar de officiele TVL-rangschikkingspagina van deze
+    poule, op basis van de al gekende poule/tabel-URL (reeks_url).
+
+    Gebruikt DEZELFDE spelgroepId + pouleId als die poule/tabel-URL - geen
+    nieuwe scrape nodig, enkel de query-parameters overnemen. Geeft None
+    terug als reeks_url ontbreekt of niet het verwachte formaat heeft (dan
+    toont de aanroeper een duidelijke uitleg i.p.v. een kapotte link)."""
+    if not reeks_url:
+        return None
+    try:
+        from urllib.parse import urlparse, parse_qs, urlencode
+        parsed = urlparse(reeks_url)
+        qs = parse_qs(parsed.query)
+        spelgroep_id = (qs.get("spelgroepId") or [None])[0]
+        poule_id = (qs.get("pouleId") or [None])[0]
+        if not spelgroep_id or not poule_id:
+            return None
+        base = "https://www.tennisenpadelvlaanderen.be/nl/clubdashboard/interclub-rangschikking"
+        return f"{base}?{urlencode({'spelgroepId': spelgroep_id, 'pouleId': poule_id})}"
+    except Exception:
+        return None
+
+
+def _render_rangschikking_link(reeks_url: str) -> None:
+    """PADEL_ANALYSIS_RANGSCHIKKING_LINK_2026-09-26 (op verzoek van Kim:
+    "zou ik daar een extra tab willen met rangschikking en daar gewoon in
+    1ste instantie een link naar de rangschikking"):
+    de tab "🏆 Rangschikking" bestaat al (roept oa.render_ranking_tab() aan
+    - een eigen berekende tabel); dit voegt bovenaan die tab enkel de
+    gevraagde rechtstreekse link naar de OFFICIELE TVL-pagina toe."""
+    url = _build_rangschikking_url(reeks_url)
+    if url:
+        try:
+            st.link_button("\U0001F517 Bekijk de officiele rangschikking op TVL", url)
+        except AttributeError:
+            st.markdown(f"[\U0001F517 Bekijk de officiele rangschikking op TVL]({url})")
+        st.caption(url)
+    else:
+        st.info(
+            "Kon de rangschikkingslink nog niet automatisch afleiden - het poule/tabel-schema "
+            "moet eerst geladen zijn (zie 'Volgende match' hierboven)."
+        )
+    st.divider()
+
+
 def page_lineup_lab():
     st.header("🧩 Opstelling-analyse")
     profiles = _get_all_profiles()
@@ -3448,6 +3508,9 @@ def page_lineup_lab():
                 else:
                     st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
             with sub_rangschikking:
+                # PADEL_ANALYSIS_RANGSCHIKKING_LINK_2026-09-26: link naar
+                # de officiele TVL-rangschikking, bovenaan deze tab.
+                _render_rangschikking_link(reeks_url)
                 if report_for_ai is not None:
                     oa.render_ranking_tab(report_for_ai)
                 else:
