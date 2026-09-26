@@ -2639,20 +2639,36 @@ def _render_all_valid_matchups(
                     f"({needed}). Pas de aantallen hierboven aan."
                 )
             else:
-                lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
-                    chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
-                    opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
-                )
-                st.caption(f"🔢 **{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
-                if meta["truncated"]:
-                    st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
+                # PADEL_ANALYSIS_THEORETICAL_BOARDS_ACTUAL_CACHE_2026-09-26 (op
+                # verzoek van Kim: "toch nog veel trage reacties [...] sommige
+                # zaken wil je enkel doen wanneer je analyse effectief start en
+                # niet ervoor"):
+                # ROOT CAUSE: _generate_theoretical_opponent_boards_with_repeats()
+                # (een backtracking-enumeratie met call_budget=300.000) werd
+                # voorheen ALTIJD aangeroepen, ongeacht of de signature
+                # gewijzigd was - de if-check hieronder bepaalde enkel of het
+                # resultaat WEGGESCHREVEN werd, niet of het BEREKEND werd. Bij
+                # elke klik waar dan ook op de pagina (deze sectie staat vóór
+                # de tabs) liep deze dure enumeratie dus onnodig opnieuw.
+                # FIX: de aanroep zelf staat nu BINNEN de if-check, net als bij
+                # alle andere signature-caches in dit bestand.
                 compute_key = f"theoretical_boards_{opp['ploeg_id']}"
+                meta_key = f"theoretical_boards_meta_{opp['ploeg_id']}"
                 sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
                 signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
                 if st.session_state.get(sig_key) != signature:
+                    lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
+                        chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
+                        opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
+                    )
                     st.session_state[compute_key] = lineups
+                    st.session_state[meta_key] = meta
                     st.session_state[sig_key] = signature
                 theoretical_boards = st.session_state.get(compute_key) or []
+                meta = st.session_state.get(meta_key) or {"total_theoretical": 0, "truncated": False}
+                st.caption(f"🔢 **{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
+                if meta["truncated"]:
+                    st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
     if not unique_opponent_lineups:
         st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
