@@ -231,9 +231,37 @@ def _render_schema_refresh_button(sel_player_id: str) -> None:
             key_prefix=f"vm_schema_{sel_player_id}", player_ids=str(sel_player_id),
             mode="missing", label="🔄 Schema nu verversen",
         )
-def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches):
+def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_display_name=None):
+    """PADEL_ANALYSIS_OWN_NAME_MISSING_FIX_2026-09-26 (op verzoek van Kim,
+    via diagnose_identify_own_ploeg.py: voor speler 1790766/Kim Verbeke
+    faalde de eigen-ploeg-identificatie voor ALLE 6 technisch perfect
+    leesbare kandidaat-fixtures).
+
+    ROOT CAUSE (bevestigd in schedule_scraper.py): een matchrecord in
+    doc["matches"] beschrijft ALTIJD de matchen van de speler wiens EIGEN
+    document het is - de speler zelf komt in dat record dus nooit als naam
+    voor, enkel de partner ("partner_name") en de tegenstanders ("opp1_
+    name"/"opp2_name"). ss.identify_own_ploeg_id()'s interne naam-
+    vergelijking kon own_side daardoor STRUCTUREEL nooit meer dan de
+    partnernaam laten bevatten, nooit de naam van sel_player_id zelf - bij
+    een gelijke of bijna-gelijke overlapscore werd de kandidaat dan
+    overgeslagen (zie _known_names_for_date() in schedule_scraper.py voor
+    de volledige analyse en het reeds toegepaste fix-gedeelte daar).
+
+    FIX (dit bestand, de andere helft): schedule_scraper.identify_own_
+    ploeg_id() kreeg een nieuwe, optionele own_display_name-parameter die
+    daar altijd aan own_side wordt toegevoegd - maar zolang de AANROEP
+    hier die parameter niet meegaf, bleef hij op None staan en had de fix
+    in schedule_scraper.py in de praktijk NUL effect. own_display_name is
+    hier nieuw (optioneel, default None voor achterwaartse compatibiliteit
+    met eventuele andere aanroepers) en wordt door _render_volgende_match_
+    and_scout() meegegeven als sel_label - de weergavenaam van de
+    geselecteerde speler, al beschikbaar via de closure daar.
+    """
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
-    home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(fixtures, own_interclub_matches)
+    home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(
+        fixtures, own_interclub_matches, own_display_name=own_display_name,
+    )
     own_ploeg_id = st.session_state.get(override_team_key)
     if not own_ploeg_id and matched_fx:
         own_ploeg_id = matched_fx.get("resolved_own_ploeg_id")
@@ -282,7 +310,13 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"]
     def _finish(fixtures, reeks_url_val):
-        own_ploeg_id = _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches)
+        # PADEL_ANALYSIS_OWN_NAME_MISSING_FIX_2026-09-26: sel_label (de
+        # weergavenaam van de geselecteerde speler, al beschikbaar via
+        # deze closure) wordt nu doorgegeven als own_display_name - zie
+        # de uitgebreide toelichting in _resolve_own_ploeg_id() hierboven.
+        own_ploeg_id = _resolve_own_ploeg_id(
+            sel_player_id, fixtures, own_interclub_matches, own_display_name=sel_label,
+        )
         if not own_ploeg_id:
             return None
         st.session_state[f"vm_fixtures_{sel_player_id}"] = fixtures
