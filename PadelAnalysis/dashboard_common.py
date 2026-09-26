@@ -433,9 +433,26 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
     return fixtures, None, meta
 def _clean_name(text: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
-def _get_all_profiles() -> list:
-    """PADEL_ANALYSIS_GHOST_PROFILE_FILTER_2026-09-12:
-    Filtert documenten zonder display_name/player_id uit de Spelers-lijst."""
+# PADEL_ANALYSIS_ALL_PROFILES_CACHE_2026-09-26 (op verzoek van Kim: "bekijk
+# nu eens grondig dat lange wachten bij alle acties. ik merk daar weinig tot
+# geen verbetering"):
+# ROOT CAUSE: _get_all_profiles() deed een VOLLEDIGE Firestore-collectiescan
+# ZONDER enige cache, en page_lineup_lab() riep dit ONVOORWAARDELIJK aan
+# BOVENAAN de functie - dus bij ELKE widget-interactie op de hele pagina
+# (Streamlit voert bij elke klik het volledige script opnieuw uit). Met 45+
+# profielen en groeiend was dit een zware, herhaalde netwerkkost die door
+# geen van de eerdere caching-rondes in page_lineup_lab.py geraakt werd -
+# die zitten in een ANDER bestand en cachen andere dingen (rating-lookups
+# per speler, matchdocumenten van de geselecteerde spelers), niet deze
+# volledige-collectie-scan.
+#
+# FIX: st.cache_data(ttl=300) - dezelfde 5-minuten-conventie als de
+# bestaande caches. clear_all_profiles_cache() hieronder laat de bestaande
+# "Ploeg opnieuw ophalen"-knop in page_lineup_lab.py deze cache mee legen,
+# zodat een net toegevoegde/ontdekte speler niet tot 5 minuten onzichtbaar
+# blijft na een expliciete ververs-actie.
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_all_profiles_cached() -> list:
     try:
         docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()
         profiles = [d.to_dict() for d in docs]
@@ -445,6 +462,28 @@ def _get_all_profiles() -> list:
         ]
     except Exception:
         return []
+
+
+def _get_all_profiles() -> list:
+    """PADEL_ANALYSIS_GHOST_PROFILE_FILTER_2026-09-12:
+    Filtert documenten zonder display_name/player_id uit de Spelers-lijst.
+
+    PADEL_ANALYSIS_ALL_PROFILES_CACHE_2026-09-26: gaat nu door
+    _get_all_profiles_cached() - zie de toelichting hierboven voor waarom
+    dit de dominante bron van traagheid was."""
+    return _get_all_profiles_cached()
+
+
+def clear_all_profiles_cache() -> None:
+    """PADEL_ANALYSIS_ALL_PROFILES_CACHE_2026-09-26: leegt de cache
+    hierboven. Aan te roepen vanuit elke "ververs"-knop die een nieuw
+    profiel kan hebben aangemaakt of gewijzigd (bv. "Ploeg opnieuw ophalen"
+    in page_lineup_lab.py), zodat het resultaat niet tot 5 minuten
+    onzichtbaar blijft na een expliciete gebruikersactie."""
+    try:
+        _get_all_profiles_cached.clear()
+    except Exception:
+        pass
 def _get_saved_poule_url(player_id: str) -> Optional[str]:
     try:
         prof = fb.get_player_profile(player_id) or {}
