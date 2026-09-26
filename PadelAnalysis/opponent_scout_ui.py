@@ -352,11 +352,38 @@ def _is_known(player_id: str) -> bool:
         return bool(doc.get("matches"))
     except Exception:
         return False
+# PADEL_ANALYSIS_SPEED_AUDIT_ROUND4_2026-09-26 (op verzoek van Kim: "ik heb
+# nu al 3 fixes gedaan voor snelheid [...] graag alles ineens"):
+# _is_known() doet 2 Firestore-reads PER SPELER, zonder cache. Dit wordt via
+# _unknown_players() ONVOORWAARDELIJK aangeroepen in prepare_team_docs() -
+# dus bij ELKE Streamlit-rerun, voor de VOLLEDIGE tegenstander-roster. Bij
+# 6-8 spelers is dat 12-16 Firestore-reads per klik, ongeacht wat je
+# eigenlijk deed. Dit werd door de vorige 3 caching-rondes NIET geraakt: die
+# cachten all_docs en de completeness-telling apart, maar deze aanroep zit
+# er los naast. De oorspronkelijke, ongecachte _is_known() blijft
+# ongewijzigd bestaan (bv. voor _run_scout_and_scrape(), waar dit al achter
+# een knop zit en dus geen probleem is) - enkel _unknown_players()
+# hieronder gebruikt nu de gecachete variant.
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_is_known(player_id: str) -> bool:
+    return _is_known(player_id)
+
+
+def clear_is_known_cache() -> None:
+    """Leegt de cache hierboven. Aan te roepen na elke geslaagde sync-actie
+    voor de tegenstander-roster, zodat een net gescrapete speler niet tot
+    5 minuten als 'nog onbekend' blijft gelden."""
+    try:
+        _cached_is_known.clear()
+    except Exception:
+        pass
+
+
 def _unknown_players(bundle: dict) -> list[dict]:
     return [
         player
         for player in (bundle.get("unique_players", []) or [])
-        if not _is_known(player["user_id"])
+        if not _cached_is_known(player["user_id"])
     ]
 # PADEL_ANALYSIS_DATA_COMPLETENESS_CACHE_2026-09-26 (op verzoek van
 # Kim: "bij eerdere ontmoetingen een andere ontmoeting duren duurt
@@ -968,6 +995,10 @@ def _render_unified_team_sync_trigger(
         # matchdocumenten-cache in prepare_team_docs() - anders toont het
         # team-rapport tot 5 minuten nog de OUDE matchdata na deze sync.
         clear_opponent_docs_cache()
+        # PADEL_ANALYSIS_SPEED_AUDIT_ROUND4_2026-09-26: idem voor de nieuwe
+        # _is_known()-cache hierboven - anders blijft een net gescrapete
+        # speler tot 5 minuten als 'nog onbekend' gelden ondanks deze sync.
+        clear_is_known_cache()
         st.rerun()
     return {"missing_matchdata": len(missing_matchdata_ids), "missing_klassement": len(missing_klassement_ids)}
 def render_scout_header(

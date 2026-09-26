@@ -258,13 +258,28 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches):
                 st.rerun()
         return None
     return own_ploeg_id
+# PADEL_ANALYSIS_SPEED_AUDIT_ROUND4_2026-09-26: zie toelichting bij de
+# aanroep in _render_volgende_match_and_scout() hieronder.
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_own_full_doc(player_id: str):
+    try:
+        return fb.get_player(player_id)
+    except Exception:
+        return None
+
+
 def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     st.markdown('<div class="section-header">📅 Volgende match</div>', unsafe_allow_html=True)
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     load_key = f"vm_loaded_{sel_player_id}"
     _render_schema_refresh_button(sel_player_id)
-    sel_doc = fb.get_player(sel_player_id)
+    # PADEL_ANALYSIS_SPEED_AUDIT_ROUND4_2026-09-26: fb.get_player(sel_player_id)
+    # haalt het VOLLEDIGE matchdocument van de GESELECTEERDE (eigen) speler op
+    # (mogelijk honderden matchrecords), zonder cache, bij ELKE rerun zolang je
+    # in het "Analyseren"-tabblad zit. Nu gecacht met dezelfde 5-minuten-TTL-
+    # conventie als de rest van dit bestand.
+    sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"]
     def _finish(fixtures, reeks_url_val):
         own_ploeg_id = _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches)
@@ -662,6 +677,14 @@ def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
 # ─────────────────────────────────────────────
 # Reglement-selector
 # ─────────────────────────────────────────────
+# PADEL_ANALYSIS_SPEED_AUDIT_ROUND4_2026-09-26 (op verzoek van Kim: "ik heb
+# nu al 3 fixes gedaan voor snelheid [...] graag alles ineens"):
+# doet 1 Firestore-read (get_player_profile), zonder cache. Aangeroepen
+# vanuit _render_tournament_rules_selector(), die ONVOORWAARDELIJK
+# aangeroepen wordt in _render_opstelling_scenario() - dus bij elke rerun.
+# Kleiner in omvang dan de tegenstander-roster-vondsten, maar even
+# structureel: elke klik op de pagina deed deze read opnieuw.
+@st.cache_data(ttl=300, show_spinner=False)
 def _load_saved_rules_selection(sel_player_id: str, ploeg_id: str) -> dict:
     try:
         profile = fb.get_player_profile(sel_player_id) or {}
