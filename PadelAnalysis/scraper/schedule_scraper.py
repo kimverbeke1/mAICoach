@@ -13,7 +13,6 @@ BUG (opgelost): parse_poule_schedule() gaf 287 fixtures terug voor een poule
 die er 15 telt. Oorzaak: de functie liep over ALLE <table>-elementen van de
 pagina. De clubdashboard-poule-tabel bevat echter veel meer dan de gevraagde
 poule:
-
   <div class="tab-pane active" id="tab673692">      <- voorronde
       <div class="poule">
           <div class="poule-header" id="371305">    <- de gevraagde poule
@@ -47,7 +46,6 @@ De eindronde-tabs dekken alfabetische poulereeksen ("Eindronde Q TOT AF").
 find_eindronde_for_poule() kiest op basis daarvan de juiste tab: Poule AA
 valt in Q..AF, dus spelgroepId 21011.
 """
-
 from __future__ import annotations
 
 import re
@@ -181,7 +179,6 @@ def _select_tables(soup, poule_id: Optional[str]) -> list[tuple]:
                     out.append((table, label))
         if out:
             return out
-
     # Fallback voor afwijkende paginastructuren: oud gedrag, maar nooit de
     # eindronde-brackets.
     return [
@@ -199,7 +196,6 @@ def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict
     """
     soup = BeautifulSoup(html, "html.parser")
     fixtures = []
-
     for table, poule_label in _select_tables(soup, poule_id):
         for row in table.find_all("tr"):
             if "hidden" in (row.get("class") or []):
@@ -207,17 +203,14 @@ def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict
             columns = row.find_all("td")
             if len(columns) < 3:
                 continue
-
             row_text = _clean(row.get_text())
             links = row.find_all("a")
             team_links = [a for a in links if _param_from_url(a.get("href"), "ploegId")]
             if len(team_links) < 2:
                 continue
-
             home_link, away_link = team_links[0], team_links[1]
             home_name = _clean(home_link.get_text())
             away_name = _clean(away_link.get_text())
-
             group_id = (
                 _param_from_url(home_link.get("href"), "spelgroepId")
                 or _param_from_url(away_link.get("href"), "spelgroepId")
@@ -227,16 +220,13 @@ def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict
             )
             match_id = _param_from_url(match_link.get("href"), "matchId") if match_link else None
             result_url = match_link.get("href") if match_link else None
-
             date_match = _DATE_IN_TEXT_RE.search(row_text)
             date_text = date_match.group(0) if date_match else ""
-
             remainder = row_text.replace(home_name, "").replace(away_name, "")
             if date_text:
                 remainder = remainder.replace(date_text, "")
             scores = re.findall(r"\d+[-/]\d+(?:\s*/\s*\d+[-/]\d+)*", remainder)
             score = scores[0] if scores else None
-
             fixtures.append({
                 "stage": "voorronde",
                 "poule_label": poule_label,
@@ -253,7 +243,6 @@ def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict
                 "played": bool(score),
                 "pending": False,
             })
-
     return fixtures
 
 
@@ -269,12 +258,10 @@ def parse_eindronde_tabs(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     tabs: list[dict] = []
     seen: set[str] = set()
-
     for anchor in soup.find_all("a"):
         text = _clean(anchor.get_text())
         if not text or "eindronde" not in text.lower():
             continue
-
         spelgroep_id = anchor.get("tab-id")
         if not spelgroep_id:
             match = _CHANGEPARAM_RE.search(anchor.get("onclick") or "")
@@ -282,11 +269,9 @@ def parse_eindronde_tabs(html: str) -> list[dict]:
         if not spelgroep_id or str(spelgroep_id) in seen:
             continue
         seen.add(str(spelgroep_id))
-
         range_match = _EINDRONDE_RANGE_RE.search(text)
         from_letters = range_match.group(1).upper() if range_match else None
         to_letters = range_match.group(2).upper() if range_match else None
-
         tabs.append({
             "spelgroep_id": str(spelgroep_id),
             "name": text,
@@ -295,7 +280,6 @@ def parse_eindronde_tabs(html: str) -> list[dict]:
             "from_index": poule_letter_index(from_letters),
             "to_index": poule_letter_index(to_letters),
         })
-
     return tabs
 
 
@@ -333,18 +317,15 @@ def _team_from_cell(cell) -> dict:
     """Lees ploegnaam, ploeg_id, seed-label en thuis/uit uit een bracketcel."""
     if cell is None:
         return {"name": None, "ploeg_id": None, "seed": None, "side": None}
-
     link = next(
         (a for a in cell.find_all("a") if _param_from_url(a.get("href"), "ploegId")), None
     )
     raw = _clean(link.get_text()) if link is not None else _clean(cell.get_text())
-
     seed_match = _SEED_RE.search(raw)
     side_match = _SIDE_RE.search(raw)
     name = _SEED_RE.sub("", raw)
     name = re.sub(r"\([TU]\)", "", name)
     name = _clean(name)
-
     return {
         "name": name or None,
         "ploeg_id": _param_from_url(link.get("href"), "ploegId") if link is not None else None,
@@ -381,7 +362,6 @@ def parse_eindronde_bracket(
     """
     soup = BeautifulSoup(html, "html.parser")
     matches: list[dict] = []
-
     panes = soup.find_all("div", class_="tab-pane")
     for pane in panes:
         pane_id = (pane.get("id") or "")
@@ -392,9 +372,7 @@ def parse_eindronde_bracket(
             continue
         if not pane.find("table", class_="game-table"):
             continue
-
         labels = _round_labels(pane)
-
         for content in pane.find_all("div", class_="wizard-content"):
             ronde = labels.get(content.get("id") or "", "")
             for table in content.find_all("table", class_="game-table"):
@@ -405,12 +383,10 @@ def parse_eindronde_bracket(
                     row2 = row1.find_next_sibling("tr")
                     if row2 is not None and "hidden" in (row2.get("class") or []):
                         row2 = None
-
                     cells1 = row1.find_all("td")
                     team1 = _team_from_cell(cells1[0] if cells1 else None)
                     cells2 = row2.find_all("td") if row2 is not None else []
                     team2 = _team_from_cell(cells2[0] if cells2 else None)
-
                     winner_link = next(
                         (a for a in winner_cell.find_all("a")
                          if _param_from_url(a.get("href"), "ploegId")),
@@ -426,17 +402,13 @@ def parse_eindronde_bracket(
                     if date_span is not None:
                         found = _DATE_IN_TEXT_RE.search(_clean(date_span.get_text()))
                         date_text = found.group(0) if found else ""
-
                     scores1 = _scores_from_row(row1)
                     scores2 = _scores_from_row(row2) if row2 is not None else []
                     has_score = any(s for s in scores1) and any(s for s in scores2)
                     status_text = _clean(status_link.get_text()) if status_link is not None else ""
-
                     pending = not (team1["ploeg_id"] and team2["ploeg_id"])
-
                     if not (team1["name"] or team2["name"] or status_link is not None):
                         continue
-
                     matches.append({
                         "stage": "eindronde",
                         "spelgroep_id": pane_group,
@@ -465,7 +437,6 @@ def parse_eindronde_bracket(
                         "played": bool(has_score and status_text),
                         "pending": pending,
                     })
-
     return matches
 
 
@@ -571,7 +542,6 @@ def _fixture_player_sides(fixture: dict) -> tuple[set[str], set[str]]:
         data = scrape_uitslagenblad(requests.Session(), url)
     except Exception:
         return set(), set()
-
     home_players: set[str] = set()
     away_players: set[str] = set()
     for board in data.get("matches", []) or []:
@@ -629,14 +599,12 @@ def identify_own_ploeg_id(
         for parsed in [_parse_date_text(match.get("match_date") or "")]
         if parsed
     }
-
     candidates = []
     for fixture in fixtures:
         parsed = _parse_date_text(fixture.get("date_text") or "")
         if fixture.get("played") and parsed and parsed in own_dates:
             candidates.append((parsed, fixture))
     candidates.sort(key=lambda item: item[0], reverse=True)
-
     for date_key, fixture in candidates:
         own_names, opponent_names = _known_names_for_date(
             own_known_matches, date_key, own_display_name=own_display_name,
@@ -653,7 +621,6 @@ def identify_own_ploeg_id(
             resolved = dict(fixture)
             resolved["resolved_own_ploeg_id"] = own_id
             return own_id, own_id, resolved
-
     return None, None, None
 
 
@@ -682,24 +649,19 @@ def get_next_match(
     for fixture in team_fixtures or []:
         if not fixture.get("played"):
             return fixture
-
     if not eindronde_matches:
         return None
-
     own_id = ploeg_id
     if own_id is None and team_fixtures:
         ids = {f.get("home_ploeg_id") for f in team_fixtures} & {
             f.get("away_ploeg_id") for f in team_fixtures
         }
         own_id = next(iter(ids), None)
-
     relevant = eindronde_for_team(eindronde_matches, own_id) if own_id else []
-
     # 1) Staat de ploeg al ingeschreven voor een nog niet gespeelde bracketplek?
     for match in relevant:
         if not match.get("played"):
             return match
-
     # 2) Anders: heeft ze haar laatste bracketwedstrijd GEWONNEN? Dan volgt er
     #    nog een ronde, maar die plek draagt haar naam nog niet. We tonen de
     #    eerstvolgende openstaande plek, zodat de app niet onterecht meldt dat
@@ -708,7 +670,6 @@ def get_next_match(
         last = relevant[-1]
         if own_id and last.get("winner_ploeg_id") and last["winner_ploeg_id"] != own_id:
             return None
-
     upcoming = [
         m for m in eindronde_matches
         if not m.get("played") and (m.get("pending") or m.get("home_ploeg_id") == own_id

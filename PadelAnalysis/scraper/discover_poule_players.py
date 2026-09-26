@@ -50,6 +50,30 @@ Per gevolgd profiel wordt (via schedule_scraper.identify_own_ploeg_id(),
 dezelfde functie die de UI gebruikt) de EIGEN ploeg herkend en uitgesloten
 — we willen enkel de ANDERE ploegen in de poule pre-scannen.
 
+PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26 (op verzoek van
+Kim: "waarom zou dat nu plots wel moeten werken als het daarnet niet
+werkte [...] los nu eindelijk eens dat probleem op")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de nachtelijke discover-log opnieuw te
+analyseren nadat de own_display_name-fix al in schedule_scraper.py EN
+page_lineup_lab.py stond, maar de discover-log toch nog steeds "Eigen
+ploeg niet herkenbaar" bleef melden voor zo goed als elk gevolgd profiel):
+identify_own_ploeg_id() werd HIER, in discover_all_poule_teams(), nog
+steeds aangeroepen ZONDER de own_display_name-parameter:
+
+    own_id, _own_id2, _resolved = ss.identify_own_ploeg_id(fixtures, own_matches)
+
+_known_names_for_date() (schedule_scraper.py) kan own_side daardoor
+STRUCTUREEL nooit meer dan de partnernaam bevatten, nooit de naam van de
+speler zelf (zie de uitgebreide root-cause-analyse in schedule_scraper.py
+en page_lineup_lab.py._resolve_own_ploeg_id()) — exact dezelfde bug als
+eerder gevonden voor de interactieve UI, maar hier NOOIT gefixt, want dit
+is een DERDE, apart aanroeppunt van dezelfde functie.
+
+FIX: own_display_name (= profile.get("display_name") of, bij ontbreken,
+het label dat al gebruikt wordt in de logregels) wordt hier nu expliciet
+meegegeven aan identify_own_ploeg_id(), exact zoals in page_lineup_lab.py.
+
 --------------------------------------------------------------------------
 STAP 2: per andere ploeg, hun spelers ophalen uit reeds gespeelde matchen
 --------------------------------------------------------------------------
@@ -226,6 +250,7 @@ def _mark_team_players_frozen_state(
 def discover_all_poule_teams() -> dict:
     """Doorloopt elk gevolgd eigen-profiel, herkent de eigen ploeg, en
     verzamelt ALLE ANDERE ploegen (over alle gevolgde poules heen).
+
     Returns {ploeg_id: {"name":..., "poule_label":..., "fixtures": [...]}}.
     Bij meerdere gevolgde profielen in DEZELFDE poule wordt de eerste
     gevonden fixtures-lijst gebruikt (ze zijn identiek, gewoon uit een
@@ -241,7 +266,14 @@ def discover_all_poule_teams() -> dict:
             continue
         own_matches = _own_known_interclub_matches(pid)
         try:
-            own_id, _own_id2, _resolved = ss.identify_own_ploeg_id(fixtures, own_matches)
+            # PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26: zie
+            # de uitgebreide toelichting in de moduledocstring hierboven -
+            # own_display_name werd hier voorheen NIET meegegeven, waardoor
+            # de own_display_name-fix in schedule_scraper.py hier in de
+            # praktijk NUL effect had, ook al stond die fix er wel al in.
+            own_id, _own_id2, _resolved = ss.identify_own_ploeg_id(
+                fixtures, own_matches, own_display_name=label,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[{label}] Kon eigen ploeg niet herkennen ({e}) — dit poule-schema overgeslagen.")
             continue
@@ -322,12 +354,15 @@ def _save_prescan_summary(
 def main() -> int:
     new_players_max = get_new_players_max()
     delay = get_delay_between_teams()
+
     teams = discover_all_poule_teams()
     if not teams:
         logger.info("Geen andere ploegen gevonden in gevolgde poules — niets te doen.")
         _write_output("", 0)
         return 0
+
     logger.info(f"{len(teams)} andere ploeg(en) gevonden over alle gevolgde poules.")
+
     all_players: dict[str, str] = {}
     frozen_count, unfrozen_count = 0, 0
     for i, (ploeg_id, info) in enumerate(teams.items(), start=1):
@@ -340,6 +375,7 @@ def main() -> int:
             found = {}
         for pid, name in found.items():
             all_players.setdefault(pid, name)
+
         # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (op verzoek van
         # Kim: "gewoon automatisch afzetten als match gespeeld is"): heeft
         # deze ploeg nog een NIET-gespeelde fixture in het gevolgde
@@ -357,18 +393,23 @@ def main() -> int:
                 unfrozen_count += len(found)
             else:
                 frozen_count += len(found)
+
         if i < len(teams):
             time.sleep(delay)
+
     if frozen_count or unfrozen_count:
         logger.info(
             f"Automatisch bijwerken: {frozen_count} speler(s) bevroren (geen geplande "
             f"ontmoeting meer), {unfrozen_count} speler(s) actief (nog minstens 1 geplande "
             "ontmoeting) - status is elke run opnieuw herberekend."
         )
+
     logger.info(f"{len(all_players)} unieke speler(s) gevonden over {len(teams)} ploeg(en) samen.")
+
     new_ids, known_ids = [], []
     for pid in all_players:
         (new_ids if _is_fully_new_player(pid) else known_ids).append(pid)
+
     capped_new = new_ids[:new_players_max]
     overflow = len(new_ids) - len(capped_new)
     logger.info(
@@ -376,10 +417,12 @@ def main() -> int:
         f"waarvan {len(capped_new)} deze run meegenomen (limiet {new_players_max})"
         + (f", {overflow} volgen bij een volgende run." if overflow else ".")
     )
+
     # Nieuwe spelers EERST in de lijst: geeft hen voorrang binnen het
     # padelstat/klassement-run-budget zodra iedereen al matchdata heeft
     # (zie enrich_opponents._prioritize()).
     final_ids = capped_new + known_ids
+
     _save_prescan_summary(teams, all_players, new_ids, known_ids, capped_new)
     _write_output(",".join(final_ids), len(final_ids))
     return 0
