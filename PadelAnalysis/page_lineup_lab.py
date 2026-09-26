@@ -3101,12 +3101,32 @@ def _render_lineup_sandbox(
             m2_own, m2_opp = matches[1]
             own_overlap = set(m1_own) & set(m2_own)
             opp_overlap = set(m1_opp) & set(m2_opp)
+            # PADEL_ANALYSIS_SANDBOX_OVERLAP_BLOCKS_COMPUTE_2026-09-26 (op
+            # verzoek van Kim: "ik kan bvb zelfde spelers van match 1 nog
+            # kiezen wat onmogelijk is aangezien een speler nooit in 2
+            # matchen tegelijk kan spelen"):
+            # De detectie hieronder (own_overlap/opp_overlap) bestond al,
+            # maar bleef PUUR COSMETISCH - de st.error() verscheen wel, maar
+            # de berekening ging gewoon door met de overlappende selectie.
+            # rotation_has_overlap zorgt er nu voor dat de paren van DEZE
+            # rotatie NIET meer worden toegevoegd aan own_ordered_pairs/
+            # opp_boards zodra er overlap is - een fysiek onmogelijke
+            # opstelling kan dus nooit meer een winkans-percentage krijgen.
+            rotation_has_overlap = bool(own_overlap) or bool(opp_overlap)
             if own_overlap:
                 st.error(f"⚠️ Rotatie {r + 1}: {', '.join(own_overlap)} kan niet in beide matchen tegelijk spelen.")
             if opp_overlap:
                 st.error(f"⚠️ Rotatie {r + 1}: tegenstander {', '.join(opp_overlap)} kan niet in beide matchen tegelijk spelen.")
             for m_i, (our_sel, opp_sel) in enumerate(matches):
                 if len(our_sel) != 2 or len(opp_sel) != 2:
+                    incomplete = True
+                    continue
+                if rotation_has_overlap:
+                    # Overlap in deze rotatie gedetecteerd (zie hierboven) -
+                    # deze match NIET meenemen in de berekening, zodat een
+                    # onmogelijke dubbele inzet van een speler nooit een
+                    # winkans krijgt getoond alsof het een geldige
+                    # opstelling was.
                     incomplete = True
                     continue
                 p1, p2 = own_label_to_id[our_sel[0]], own_label_to_id[our_sel[1]]
