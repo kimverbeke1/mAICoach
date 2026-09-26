@@ -46,24 +46,35 @@
 # onmiddellijk.
 #
 # --------------------------------------------------------------------------
-# WAAROM GEEN "schedule:"-trigger HIER (belangrijk, lees dit voor je dit
-# workflow-bestand activeert)
+# PADEL_ANALYSIS_PRESCAN_DAILY_SCHEDULE_2026-09-26 (op verzoek van Kim:
+# "bedoeling is om dat bestand aan te passen om dagelijks uitgevoerd te
+# worden [...] Geef prescan-poule.yml gewoon dezelfde, bewezen schedule:-
+# aanpak als refresh-klassement.yml/refresh-padelstat.yml — die draaien
+# overduidelijk al probleemloos op GitHub's cron. Het 'onbetrouwbaar bij
+# piekbelasting'-argument gold specifiek voor scrape-padel.yml; er is geen
+# bewijs dat het ook voor deze workflows een probleem was.")
 # --------------------------------------------------------------------------
-# scrape-padel.yml se eigen geschiedenis (zie PADEL_ANALYSIS_CRON_UNRELIABLE_
-# 2026-09-17 in dat bestand) toont dat GitHub's eigen "schedule:"-trigger
-# onbetrouwbaar bleek (vertraagd of stilzwijgend overgeslagen bij piek-
-# belasting) en DAAROM vervangen is door een externe GCP Cloud Scheduler-job
-# die de workflow_dispatch-API aanroept. Om diezelfde, bewust gekozen
-# betrouwbaarheid te behouden, heeft DIT workflow-bestand BEWUST ENKEL een
-# workflow_dispatch-trigger (handmatig testbaar, en programmatisch
-# triggerbaar) — GEEN natieve "schedule:". Voeg dit workflow-bestand toe aan
-# je bestaande GCP Cloud Scheduler-mechanisme (dezelfde Cloud Run function
-# die scrape-padel.yml/sync-mAIcoach.yml al aanstuurt, zie gcp-triggers/
-# maicoach-sync-trigger/main.py) met een tijdstip kort na middernacht, zodat
-# dit consistent even betrouwbaar draait als je bestaande nachtelijke taken.
-# Ik heb dat GCP-scriptbestand zelf niet gezien, dus kan dit niet voor je
-# instellen — voeg gewoon "prescan-poule.yml" toe aan de lijst van
-# workflow_file-waarden die die Cloud Run function al ondersteunt.
+# HERZIENING van de vorige beslissing hieronder bewaard als geschiedenis
+# (zie de nu VERVANGEN toelichting die hier eerder stond): scrape-padel.yml
+# liet zijn "schedule:"-trigger vallen wegens vertraagde/overgeslagen runs
+# bij piekbelasting, en DIE redenering werd hier destijds automatisch
+# doorgetrokken zonder dat er voor prescan-poule.yml zelf concreet bewijs
+# van hetzelfde probleem was. refresh-klassement.yml (dagelijks, 04:22 UTC)
+# en refresh-padelstat.yml (elk uur, :13) gebruiken al langer een natieve
+# "schedule:"-trigger en draaien aantoonbaar betrouwbaar - dus dezelfde,
+# bewezen aanpak toegepast hier, i.p.v. het onnodige, aparte GCP Cloud
+# Scheduler-omweg-mechanisme dat voorheen expliciet vereist was.
+# Gekozen tijdstip: 00:37 UTC - kort na middernacht (zoals de oorspronkelijke
+# aanvraag van 2026-09-19 al vroeg: "om middernacht. Dat kan gemakkelijk na
+# match 1"), en bewust op een ANDER minuutteken dan refresh-padelstat.yml
+# (:13, elk uur) en refresh-klassement.yml (04:22), zodat GitHub Actions'
+# gedeelde runner-capaciteit niet meerdere van deze workflows exact
+# tegelijk hoeft te starten. Net als de andere schedules: bewust NIET op
+# het volle uur/minuut :00 (bekende GitHub Actions schedule-onbetrouwbaar-
+# heid rond :00). Een gemiste dag is onschuldig - de volgende dag pikt
+# gewoon verder op, net als bij refresh-klassement.yml.
+# Handmatig forceren blijft gewoon mogelijk via workflow_dispatch
+# hieronder, met dezelfde inputs als voorheen.
 #
 # Vereist repo secret (zelfde als de andere workflows):
 #   FIREBASE_SERVICE_ACCOUNT_JSON
@@ -72,6 +83,10 @@
 name: Poule pre-scan
 
 on:
+  schedule:
+    # PADEL_ANALYSIS_PRESCAN_DAILY_SCHEDULE_2026-09-26: dagelijks om 00:37
+    # UTC, kort na middernacht - zie toelichting bovenaan dit bestand.
+    - cron: "37 0 * * *"
   workflow_dispatch:
     inputs:
       new_players_max:
