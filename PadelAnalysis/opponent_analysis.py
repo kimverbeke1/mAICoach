@@ -165,6 +165,35 @@ import streamlit as st
 import firebase_service as fb
 import opponent_dossier as od
 import freshness_cache as fcache
+
+
+# PADEL_ANALYSIS_TEAM_REPORT_SNAPSHOT_CACHE_2026-09-25 (op verzoek van Kim:
+# "pak de traagheid aan")
+# ---------------------------------------------------------------------------
+# ROOT CAUSE: _build_report() riep, voor ELKE speler in de tegenploeg,
+# fb.get_official_klassement_via_padelstat(player_id) ONVOORWAARDELIJK aan -
+# ongeacht of dat resultaat achteraf effectief gebruikt werd. Twee dingen
+# maakten dit onnodig traag:
+#   1. Geen caching: bij een team van bv. 8 spelers is dit 8 losse,
+#      ongecachete Firestore-reads, TELKENS wanneer het rapport herbouwd
+#      wordt (dus bij vrijwel elke widget-interactie zodra _needs_rebuild()
+#      true teruggeeft) - exact hetzelfde patroon dat al opgelost was in
+#      page_lineup_lab.py via _cached_official_rank(), maar hier nog niet.
+#   2. Onnodig zelfs als niet nodig: de check "is dit sowieso al gevuld uit
+#      de TVL-historiek" (summary.get("current_rank") is None) gebeurde pas
+#      NA de fetch, niet ervoor - de snapshot-fallback werd dus ALTIJD
+#      opgehaald, ook voor de meerderheid van spelers die al een geldig
+#      current_rank uit hun eigen historiek hadden en de snapshot-waarde
+#      toch nooit zouden gebruiken.
+# FIX: de fetch is nu (a) LUI - enkel uitgevoerd als summary["current_rank"]
+# effectief None is - en (b) gecachet per player_id met een TTL van 5
+# minuten, consistent met de bestaande cache in page_lineup_lab.py.
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_official_klassement_via_padelstat(player_id: str) -> dict:
+    try:
+        return fb.get_official_klassement_via_padelstat(player_id) or {}
+    except Exception:  # noqa: BLE001
+        return {}
 try:
     import team_ai_advisor as taa
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
@@ -238,19 +267,21 @@ def _build_report(
         # padelstat-opzoeking is de meest actuele snapshot en krijgt hier dus
         # voorrang op oudere TVL-historiek/fallbacks. "Beste ooit" blijft
         # uitsluitend uit echte TVL-historiek komen - nooit uit een snapshot.
-        try:
-            snapshot = fb.get_official_klassement_via_padelstat(player_id) or {}
-        except Exception:
-            snapshot = {}
-        snapshot_rank = snapshot.get("klassement")
         # PADEL_ANALYSIS_OFFICIAL_RANK_TVL_FIRST_2026-09-25: enkel nog terugval. Voorheen overschreef deze regel
         # het TVL-klassement ALTIJD met de padelstat-zoekkaartwaarde,
         # waardoor elke speler het achterlopende cijfer toonde.
-        if snapshot_rank is not None and summary.get("current_rank") is None:
-            try:
-                summary["current_rank"] = int(snapshot_rank)
-            except (TypeError, ValueError):
-                pass
+        # PADEL_ANALYSIS_TEAM_REPORT_SNAPSHOT_CACHE_2026-09-25: de fetch
+        # gebeurt nu ENKEL als current_rank effectief nog ontbreekt (lui),
+        # en gaat door de sessie-lokale cache hierboven i.p.v. bij elke
+        # rapport-herbouw opnieuw rechtstreeks Firestore te bevragen.
+        if summary.get("current_rank") is None:
+            snapshot = _cached_official_klassement_via_padelstat(player_id)
+            snapshot_rank = snapshot.get("klassement")
+            if snapshot_rank is not None:
+                try:
+                    summary["current_rank"] = int(snapshot_rank)
+                except (TypeError, ValueError):
+                    pass
         history_rows = summary.get("history") or []
         summary["best_rank"] = max(
             (row.get("rank") for row in history_rows if row.get("rank") is not None),
