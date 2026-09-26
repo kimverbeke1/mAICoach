@@ -358,6 +358,15 @@ def _unknown_players(bundle: dict) -> list[dict]:
         for player in (bundle.get("unique_players", []) or [])
         if not _is_known(player["user_id"])
     ]
+# PADEL_ANALYSIS_DATA_COMPLETENESS_CACHE_2026-09-26 (op verzoek van
+# Kim: "bij eerdere ontmoetingen een andere ontmoeting duren duurt
+# toch wel lang [...] bevestig rotatie 1 of een koppel kiezen enz"):
+# deze functie deed 3 Firestore-reads PER SPELER, ONVOORWAARDELIJK bij
+# ELKE rerun van de pagina (elke widget-klik, niet enkel een expliciete
+# ververs-actie) - zie de uitgebreide toelichting in
+# apply_data_completeness_cache_fix.py. Nu gecacht met dezelfde
+# 5-minuten-TTL-conventie als de overige caches in dit project.
+@st.cache_data(ttl=300, show_spinner=False)
 def _data_completeness(player_id: str) -> dict:
     """PADEL_ANALYSIS_TEAM_UNIFIED_SYNC_2026-09-19 (op verzoek van Kim, zie
     Fase C): "Er bestaat al een 'onvolledige data'-check (_has_incomplete_
@@ -945,6 +954,14 @@ def _render_unified_team_sync_trigger(
         try:
             import freshness_cache as fcache
             fcache.invalidate_all()
+        except Exception:
+            pass
+        # PADEL_ANALYSIS_DATA_COMPLETENESS_CACHE_2026-09-26: idem voor de
+        # nieuwe _data_completeness()-cache hierboven - anders blijft de
+        # "N van M spelers"-telling tot 5 minuten de OUDE status tonen,
+        # ondanks deze expliciete sync-actie.
+        try:
+            _data_completeness.clear()
         except Exception:
             pass
         st.rerun()
