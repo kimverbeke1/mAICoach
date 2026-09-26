@@ -639,8 +639,22 @@ def build_player_summary(
     )
     wins_cur = sum(1 for m in current_matches if m.get("won") is True)
     losses_cur = sum(1 for m in current_matches if m.get("won") is False)
-    wins_hist = sum(1 for m in history_matches if m.get("won") is True)
-    losses_hist = sum(1 for m in history_matches if m.get("won") is False)
+    # PADEL_ANALYSIS_HISTORY_INCLUDES_CURRENT_POULE_2026-09-26 (op verzoek
+    # van Kim: "toch nog altijd vreemd dat die ene man 3 matchen heeft maar
+    # matchhistoriek nul [...] huidige interclub mag meetellen bij het
+    # verleden"):
+    # ROOT CAUSE: split_matches() scheidt STRIKT "deze poule" (Laag 1) van
+    # "alle OVERIGE interclubmatches" (Laag 2) - een speler die AL zijn
+    # matchen in de huidige poule speelde, kreeg dus 0 in "Matchen
+    # historiek", ook al had die speler wel degelijk al matchen gespeeld.
+    # FIX: de historiek-cijfers hieronder gaan voortaan over ALLE
+    # interclubmatchen (huidige poule + historiek samen), niet enkel de
+    # matchen uit ANDERE poules. "Deze poule" hierboven (wins_cur/
+    # losses_cur, matches_relevant, ...) blijft ONGEWIJZIGD strikt beperkt
+    # tot de huidige poule.
+    all_interclub_matches = current_matches + history_matches
+    wins_hist = sum(1 for m in all_interclub_matches if m.get("won") is True)
+    losses_hist = sum(1 for m in all_interclub_matches if m.get("won") is False)
     rank_search_docs = global_docs if global_docs else all_docs
     current_rank, best_rank, best_when, history_rows = _history_summary(ranking_doc)
     # PADEL_ANALYSIS_VIRTUAL_VS_OFFICIAL_KLASSEMENT_FIX_2026-09-19: het
@@ -724,15 +738,17 @@ def build_player_summary(
         "poule_results_exact": bool(current_matches),
         "poule_matched_on": meta["matched_on"],
         "poule_spelgroep_id": meta["target_spelgroep_id"],
-        # Laag 2: historiek uit vorige periodes
-        "matches_history": len(history_matches),
+        # Laag 2: historiek - ALLE interclubmatchen (huidige poule +
+        # vorige periodes samen), zie PADEL_ANALYSIS_HISTORY_INCLUDES_
+        # CURRENT_POULE_2026-09-26 hierboven.
+        "matches_history": len(all_interclub_matches),
         "wins_history": wins_hist,
         "losses_history": losses_hist,
         "winrate_history": _winrate_display(wins_hist, losses_hist),
-        "partners_history": _partner_rows(history_matches),
-        "history_results": _result_rows(history_matches, limit=15),
-        "history_periods": _period_breakdown(history_matches),
-        "form_history": _form_string(history_matches),
+        "partners_history": _partner_rows(all_interclub_matches),
+        "history_results": _result_rows(all_interclub_matches, limit=15),
+        "history_periods": _period_breakdown(all_interclub_matches),
+        "form_history": _form_string(all_interclub_matches),
         # Totaal
         "matches_total": len(matches),
     }
