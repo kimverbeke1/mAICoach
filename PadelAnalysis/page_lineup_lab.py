@@ -2611,26 +2611,8 @@ def _render_all_valid_matchups(
             roster_sig_key = f"opp_roster_sig_{opp['ploeg_id']}"
             roster_signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
             if st.session_state.get(roster_sig_key) != roster_signature:
-                # PADEL_ANALYSIS_OPPONENT_ROSTER_RESET_HARDEN_2026-09-26 (op
-                # verzoek van Kim: "speler weglikken bij tegenstander [...]
-                # in mijn vb was er een match te weinig na wegklikken
-                # speler"): de verdelingsformule (_default_opponent_max_
-                # per_player) en deze reset zelf zijn nagerekend en kloppen
-                # wiskundig - de som klopt altijd op `needed`. Om een
-                # klasse van gekende Streamlit-eigenaardigheden uit te
-                # sluiten (een net gewiste widget-key die bij dezelfde
-                # rerun opnieuw met `value=` aangemaakt wordt, kan in
-                # sommige Streamlit-versies nog 1 render lang de vorige,
-                # niet-gesynchroniseerde frontend-waarde tonen wanneer
-                # MEERDERE widgets in dezelfde rerun wijzigen), wordt de
-                # nieuwe waarde nu EXPLICIET in session_state gezet i.p.v.
-                # enkel te vertrouwen op het `value=`-argument bij het
-                # opnieuw aanmaken van de widget hieronder.
-                for pid in chosen_opp_ids:
-                    st.session_state[f"opp_max_{opp['ploeg_id']}_{pid}"] = default_opp_max.get(pid, 0)
                 prefix = f"opp_max_{opp['ploeg_id']}_"
-                valid_keys = {f"{prefix}{pid}" for pid in chosen_opp_ids}
-                for stale_key in [k for k in list(st.session_state) if str(k).startswith(prefix) and k not in valid_keys]:
+                for stale_key in [k for k in list(st.session_state) if str(k).startswith(prefix)]:
                     st.session_state.pop(stale_key, None)
                 st.session_state[roster_sig_key] = roster_signature
 
@@ -2657,54 +2639,20 @@ def _render_all_valid_matchups(
                     f"({needed}). Pas de aantallen hierboven aan."
                 )
             else:
-                # PADEL_ANALYSIS_THEORETICAL_BOARDS_EAGER_FIX_2026-09-26 (op
-                # verzoek van Kim: "aantal matchen van spelers aanpassen
-                # zorgt ook voor laden. dat moet maar gebeuren bij berekenen
-                # matchup" + "andere eerste rotatie aanklikken zorgt ook al
-                # voor laden" + "de knop bevestig rotatie duurt dan ook weer
-                # lang, bijna 20s" + "snel invullen met een standaardoptie
-                # is ook super traag")
-                # ------------------------------------------------------------
-                # ROOT CAUSE (bevestigd, de dominante bottleneck van deze
-                # hele pagina): _generate_theoretical_opponent_boards_with_
-                # repeats() werd hier ONVOORWAARDELIJK aangeroepen, bij ELKE
-                # rerun - de signature-vergelijking hieronder bepaalde enkel
-                # of het RESULTAAT opnieuw in session_state gezet werd, niet
-                # of de FUNCTIE zelf uitgevoerd werd. Streamlit herbouwt het
-                # VOLLEDIGE script bij elke widget-interactie, ongeacht waar
-                # op de pagina die widget staat. Omdat deze functie boven de
-                # Rotatieplanner en de Sandbox in het script staat, betekende
-                # dit dat ELKE klik daar - "Bevestig rotatie", een radio-
-                # keuze aanklikken, een sandbox-preset-knop, "Bereken
-                # sandbox" - EERST deze zware backtracking-enumeratie
-                # (_enumerate_rotation_aware_pairings, tot 300.000 call-
-                # budget) opnieuw liet lopen, VOOR de eigenlijke, relevante
-                # widget-actie zelfs verwerkt werd. Dat verklaart in één keer
-                # zowat elke "onnodige laadactie" die Kim meldde: het was
-                # nooit de widget die traag was, het was deze ongerelateerde
-                # herberekening die toevallig ervoor in het script staat.
-                # FIX: de functie wordt nu ENKEL nog aangeroepen als de
-                # signature effectief gewijzigd is - exact hetzelfde patroon
-                # dat al correct toegepast was op _generate_rotation_
-                # candidates() in de Rotatieplanner (rot_sig_key/
-                # rot_cache_key hierboven).
-                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
-                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
-                meta_key = f"theoretical_boards_meta_{opp['ploeg_id']}"
-                signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
-                if st.session_state.get(sig_key) != signature:
-                    lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
-                        chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
-                        opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
-                    )
-                    st.session_state[compute_key] = lineups
-                    st.session_state[meta_key] = meta
-                    st.session_state[sig_key] = signature
-                theoretical_boards = st.session_state.get(compute_key) or []
-                meta = st.session_state.get(meta_key) or {"total_theoretical": 0, "truncated": False}
+                lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
+                    chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
+                    opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
+                )
                 st.caption(f"🔢 **{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
                 if meta["truncated"]:
                     st.warning(f"⚠️ Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
+                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
+                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
+                signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
+                if st.session_state.get(sig_key) != signature:
+                    st.session_state[compute_key] = lineups
+                    st.session_state[sig_key] = signature
+                theoretical_boards = st.session_state.get(compute_key) or []
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
     if not unique_opponent_lineups:
         st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
@@ -3084,82 +3032,58 @@ def _render_lineup_sandbox(
                 labels_random = [_speler_label(pid) for pid in shuffled]
                 _apply_sandbox_preset(ploeg_key, n_rotations, own_pair_labels=labels_random)
                 st.rerun()
-    # PADEL_ANALYSIS_SANDBOX_MATCH2_LINKED_TO_MATCH1_2026-09-26 (op
-    # verzoek van Kim: "tegenstander match2 is nog altijd niet gelinkt aan
-    # wat je in match 1 invult. bij de sandbox 'snel invullen met een
-    # standaard optie' is ook super traag")
-    # --------------------------------------------------------------------
-    # ROOT CAUSE (koppeling): binnen een st.form() worden widgets pas bij
-    # de submit-knop uitgelezen - er is GEEN rerun tussen het invullen van
-    # Match 1 en Match 2, dus de opties van Match 2 konden nooit dynamisch
-    # aangepast worden op basis van wat net in Match 1 gekozen werd. De
-    # enige controle was een WAARSCHUWING NA het invullen (overlap-check
-    # hieronder, die blijft bestaan als extra vangnet), nooit een echte
-    # UITSLUITING vooraf.
-    # FIX: het formulier is vervangen door gewone widgets (elke wijziging
-    # triggert nu een rerun). Match 2 toont enkel nog de spelers die in
-    # Match 1 van DEZELFDE rotatie nog niet gekozen zijn - zowel voor ONS
-    # duo als voor het tegenstander-duo. Dit was voorheen ONUITVOERBAAR
-    # zonder de pagina traag te maken, want élke rerun triggerde ook de
-    # zware, ongerelateerde theoretische-opstellingen-berekening hierboven
-    # (zie PADEL_ANALYSIS_THEORETICAL_BOARDS_EAGER_FIX_2026-09-26) - nu die
-    # gefixt is, is een rerun per selectie weer snel genoeg. Dat verklaart
-    # meteen ook Kim's 2de klacht hier ("snel invullen [...] is super
-    # traag"): de preset-knoppen deden altijd al een st.rerun(), en liepen
-    # dus tegen exact diezelfde, nu-verholpen bottleneck aan.
     own_ordered_pairs, opp_boards, rotation_meta = [], [], []
     used_own_pairs_seen: dict = {}
     incomplete = False
-    for r in range(int(n_rotations)):
-        st.markdown(f"**Rotatie {r + 1}**")
-        col_m1, col_m2 = st.columns(2)
-        matches = []
-        used_own_this_rotation: set = set()
-        used_opp_this_rotation: set = set()
-        for m_i, col in enumerate((col_m1, col_m2)):
-            with col:
-                st.markdown(f"Match {m_i + 1}" + (" *(sterkste duo, art. 6.6)*" if m_i == 0 else ""))
-                own_key = f"sandbox_own_r{r}_m{m_i}_{ploeg_key}"
-                opp_key = f"sandbox_opp_r{r}_m{m_i}_{ploeg_key}"
-                own_options = [lbl for lbl in own_labels if lbl not in used_own_this_rotation]
-                opp_options = [lbl for lbl in opp_labels if lbl not in used_opp_this_rotation]
-                # Een vooraf opgeslagen selectie kan een speler bevatten
-                # die NET in Match 1 van dezelfde rotatie gekozen werd -
-                # die moet hier eerst weg, anders klaagt Streamlit dat de
-                # bestaande waarde niet meer in `options` voorkomt.
-                if own_key in st.session_state:
-                    st.session_state[own_key] = [v for v in st.session_state[own_key] if v in own_options]
-                if opp_key in st.session_state:
-                    st.session_state[opp_key] = [v for v in st.session_state[opp_key] if v in opp_options]
-                our_sel = st.multiselect("Ons duo", own_options, max_selections=2, key=own_key)
-                opp_sel = st.multiselect("Tegenstander-duo", opp_options, max_selections=2, key=opp_key)
-                matches.append((our_sel, opp_sel))
-                used_own_this_rotation.update(our_sel)
-                used_opp_this_rotation.update(opp_sel)
-        for m_i, (our_sel, opp_sel) in enumerate(matches):
-            if len(our_sel) != 2 or len(opp_sel) != 2:
-                incomplete = True
-                continue
-            p1, p2 = own_label_to_id[our_sel[0]], own_label_to_id[our_sel[1]]
-            pair_key = frozenset({p1, p2})
-            if pair_key in used_own_pairs_seen:
-                prev_rot = used_own_pairs_seen[pair_key]
-                st.warning(
-                    f"⚠️ Rotatie {r + 1} Match {m_i + 1}: koppel {our_sel[0]}+{our_sel[1]} speelde al samen in "
-                    f"Rotatie {prev_rot} — een zelfde koppel mag normaliter niet 2× samenspelen."
-                )
-            used_own_pairs_seen[pair_key] = r + 1
-            opp_players = [opp_label_to_player[lbl] for lbl in opp_sel]
-            own_ordered_pairs.append((p1, p2))
-            opp_boards.append({"opponent_pair": opp_players})
-            rotation_meta.append((r + 1, m_i + 1))
-    if incomplete:
-        st.info("Vul voor elke match exact 2 eigen spelers en 2 tegenstander-spelers in om de resultaten te zien.")
-    sandbox_clicked = st.button(
-        "🚀 Bereken sandbox", type="primary", key=f"sandbox_compute_{ploeg_key}",
-        help="Vul eerst alle matchen hierboven in (of gebruik een standaardoptie hierboven), klik dan pas "
-             "op deze knop — pas dan wordt er iets herberekend.",
-    )
+    with st.form(key=f"sandbox_form_{ploeg_key}"):
+        for r in range(int(n_rotations)):
+            st.markdown(f"**Rotatie {r + 1}**")
+            col_m1, col_m2 = st.columns(2)
+            matches = []
+            for m_i, col in enumerate((col_m1, col_m2)):
+                with col:
+                    st.markdown(f"Match {m_i + 1}" + (" *(sterkste duo, art. 6.6)*" if m_i == 0 else ""))
+                    our_sel = st.multiselect(
+                        "Ons duo", own_labels, max_selections=2,
+                        key=f"sandbox_own_r{r}_m{m_i}_{ploeg_key}",
+                    )
+                    opp_sel = st.multiselect(
+                        "Tegenstander-duo", opp_labels, max_selections=2,
+                        key=f"sandbox_opp_r{r}_m{m_i}_{ploeg_key}",
+                    )
+                    matches.append((our_sel, opp_sel))
+            m1_own, m1_opp = matches[0]
+            m2_own, m2_opp = matches[1]
+            own_overlap = set(m1_own) & set(m2_own)
+            opp_overlap = set(m1_opp) & set(m2_opp)
+            if own_overlap:
+                st.error(f"⚠️ Rotatie {r + 1}: {', '.join(own_overlap)} kan niet in beide matchen tegelijk spelen.")
+            if opp_overlap:
+                st.error(f"⚠️ Rotatie {r + 1}: tegenstander {', '.join(opp_overlap)} kan niet in beide matchen tegelijk spelen.")
+            for m_i, (our_sel, opp_sel) in enumerate(matches):
+                if len(our_sel) != 2 or len(opp_sel) != 2:
+                    incomplete = True
+                    continue
+                p1, p2 = own_label_to_id[our_sel[0]], own_label_to_id[our_sel[1]]
+                pair_key = frozenset({p1, p2})
+                if pair_key in used_own_pairs_seen:
+                    prev_rot = used_own_pairs_seen[pair_key]
+                    st.warning(
+                        f"⚠️ Rotatie {r + 1} Match {m_i + 1}: koppel {our_sel[0]}+{our_sel[1]} speelde al samen in "
+                        f"Rotatie {prev_rot} — een zelfde koppel mag normaliter niet 2× samenspelen."
+                    )
+                used_own_pairs_seen[pair_key] = r + 1
+                opp_players = [opp_label_to_player[lbl] for lbl in opp_sel]
+                own_ordered_pairs.append((p1, p2))
+                opp_boards.append({"opponent_pair": opp_players})
+                rotation_meta.append((r + 1, m_i + 1))
+        if incomplete:
+            st.info("Vul voor elke match exact 2 eigen spelers en 2 tegenstander-spelers in om de resultaten te zien.")
+        sandbox_clicked = st.form_submit_button(
+            "🚀 Bereken sandbox", type="primary",
+            help="Vul eerst alle matchen hierboven in (of gebruik een standaardoptie hierboven), klik dan pas "
+                 "op deze knop — pas dan wordt er iets herberekend.",
+        )
     if not own_ordered_pairs:
         return
     sandbox_settings_signature = (
@@ -3514,14 +3438,21 @@ def _render_rangschikking_link(reeks_url: str) -> None:
     1ste instantie een link naar de rangschikking"):
     de tab "🏆 Rangschikking" bestaat al (roept oa.render_ranking_tab() aan
     - een eigen berekende tabel); dit voegt bovenaan die tab enkel de
-    gevraagde rechtstreekse link naar de OFFICIELE TVL-pagina toe."""
+    gevraagde rechtstreekse link naar de OFFICIELE TVL-pagina toe.
+
+    PADEL_ANALYSIS_RANGSCHIKKING_NO_RAW_URL_2026-09-26 (op verzoek van Kim:
+    "de url [...] moet niet getoond worden want daar kan je ook op
+    klikken en gaat naar zelfde pagina"): de st.caption(url) hieronder
+    toonde de RUWE link ONDER de al klikbare knop - een dubbele,
+    overbodige weergave van exact dezelfde bestemming. Verwijderd; de
+    knop zelf blijft de enige, klikbare manier om de pagina te openen.
+    """
     url = _build_rangschikking_url(reeks_url)
     if url:
         try:
             st.link_button("\U0001F517 Bekijk de officiele rangschikking op TVL", url)
         except AttributeError:
             st.markdown(f"[\U0001F517 Bekijk de officiele rangschikking op TVL]({url})")
-        st.caption(url)
     else:
         st.info(
             "Kon de rangschikkingslink nog niet automatisch afleiden - het poule/tabel-schema "
@@ -3543,57 +3474,69 @@ def page_lineup_lab():
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
     labels = list(profile_map.keys())
     default_idx = labels.index(home_label) if home_label in labels else 0
-    tab_analyse, tab_poule, tab_saved = st.tabs(["🔍 Analyseren", "🌐 Andere ploegen", "💾 Opgeslagen analyses"])
-    with tab_analyse:
-        sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx, key="lineup_lab_sel_player")
-        sel_profile = profile_map[sel_label]
-        sel_player_id = sel_profile.get("player_id")
-        scout_result = _render_volgende_match_and_scout(str(sel_player_id), sel_label)
-        if scout_result:
-            bundle, opp, reeks_url, spelgroep_id = scout_result
-            # PADEL_ANALYSIS_FULL_ROSTER_IN_OVERVIEW_2026-09-24: vul de
-            # roster aan met spelers uit EERDERE ontmoetingen (zie
-            # _merge_full_opponent_roster()) VOORDAT het team-rapport
-            # opgebouwd wordt - anders ontbreken ze in de overzichtstabel,
-            # de theoretische scenario's en de sandbox.
-            _fixtures_voor_roster = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
-            bundle = _merge_full_opponent_roster(bundle, _fixtures_voor_roster, opp)
-            extra_namen = bundle.get("_roster_extended_with") or []
-            if extra_namen:
-                st.caption(
-                    f"\u2795 {len(extra_namen)} extra speler(s) uit eerdere ontmoetingen mee "
-                    f"opgenomen in deze analyse: {', '.join(extra_namen)}."
-                )
-                # PADEL_ANALYSIS_ROSTER_CONFIDENCE_LABEL_2026-09-25: zie
-                # _merge_full_opponent_roster() - toont expliciet WELKE van
-                # deze extra spelers slechts 1x gezien zijn en verder geen
-                # bekende matchdata hebben, zodat een onzekere roster niet
-                # blind als een bevestigd feit gepresenteerd wordt.
-                onzeker_namen = bundle.get("_roster_extended_low_confidence") or []
-                if onzeker_namen:
-                    st.caption(
-                        f"\u2753 Let op: {', '.join(onzeker_namen)} "
-                        + ("is" if len(onzeker_namen) == 1 else "zijn")
-                        + " slechts 1x waargenomen en heeft/hebben verder nog geen "
-                        "bekende matchdata bij ons - eerder een eenmalige invaller dan een "
-                        "bevestigde vaste speler."
-                    )
-            report_for_ai = None
-            if bundle.get("unique_players"):
-                all_docs, global_docs = osu.prepare_team_docs(bundle, str(sel_player_id))
-                report_for_ai = oa.get_team_report(
-                    bundle, opp, all_docs, current_reeks_url=reeks_url,
-                    current_spelgroep_id=spelgroep_id, global_docs=global_docs,
-                    key_prefix=f"scout_team_{sel_player_id}",
-                )
-                report_for_ai = oa.render_team_header(
-                    report_for_ai, bundle, opp, all_docs, current_reeks_url=reeks_url,
-                    current_spelgroep_id=spelgroep_id, global_docs=global_docs,
-                    key_prefix=f"scout_team_{sel_player_id}",
-                )
-            sub_overzicht, sub_detail, sub_rangschikking = st.tabs(
-                ["📊 Overzicht", "🔎 Detail per speler", "🏆 Rangschikking"]
+    # PADEL_ANALYSIS_RANGSCHIKKING_TOP_LEVEL_TAB_2026-09-26 (op verzoek van
+    # Kim: "rangschikking staat nu naast overzicht en detail per speler. ik
+    # zou rangschikken naast analyseren/andere ploegen en opgeslagen
+    # analyses willen"): de spelerselectie en de volledige scout/rapport-
+    # opbouw staan nu VOOR st.tabs(), dus BUITEN elk tabblad - Streamlit
+    # voert de code binnen ELK tabblad toch bij iedere rerun uit (enkel de
+    # WEERGAVE is verborgen voor niet-actieve tabbladen), dus deze opbouw
+    # 1x laten gebeuren en het resultaat hergebruiken in zowel het
+    # Analyseren- als het Rangschikking-tabblad voorkomt dat dezelfde,
+    # relatief zware scout/rapport-opbouw dubbel zou draaien.
+    sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx, key="lineup_lab_sel_player")
+    sel_profile = profile_map[sel_label]
+    sel_player_id = sel_profile.get("player_id")
+    scout_result = _render_volgende_match_and_scout(str(sel_player_id), sel_label)
+    bundle = opp = reeks_url = spelgroep_id = None
+    report_for_ai = None
+    if scout_result:
+        bundle, opp, reeks_url, spelgroep_id = scout_result
+        # PADEL_ANALYSIS_FULL_ROSTER_IN_OVERVIEW_2026-09-24: vul de
+        # roster aan met spelers uit EERDERE ontmoetingen (zie
+        # _merge_full_opponent_roster()) VOORDAT het team-rapport
+        # opgebouwd wordt - anders ontbreken ze in de overzichtstabel,
+        # de theoretische scenario's en de sandbox.
+        _fixtures_voor_roster = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
+        bundle = _merge_full_opponent_roster(bundle, _fixtures_voor_roster, opp)
+        extra_namen = bundle.get("_roster_extended_with") or []
+        if extra_namen:
+            st.caption(
+                f"\u2795 {len(extra_namen)} extra speler(s) uit eerdere ontmoetingen mee "
+                f"opgenomen in deze analyse: {', '.join(extra_namen)}."
             )
+            # PADEL_ANALYSIS_ROSTER_CONFIDENCE_LABEL_2026-09-25: zie
+            # _merge_full_opponent_roster() - toont expliciet WELKE van
+            # deze extra spelers slechts 1x gezien zijn en verder geen
+            # bekende matchdata hebben, zodat een onzekere roster niet
+            # blind als een bevestigd feit gepresenteerd wordt.
+            onzeker_namen = bundle.get("_roster_extended_low_confidence") or []
+            if onzeker_namen:
+                st.caption(
+                    f"\u2753 Let op: {', '.join(onzeker_namen)} "
+                    + ("is" if len(onzeker_namen) == 1 else "zijn")
+                    + " slechts 1x waargenomen en heeft/hebben verder nog geen "
+                    "bekende matchdata bij ons - eerder een eenmalige invaller dan een "
+                    "bevestigde vaste speler."
+                )
+        if bundle.get("unique_players"):
+            all_docs, global_docs = osu.prepare_team_docs(bundle, str(sel_player_id))
+            report_for_ai = oa.get_team_report(
+                bundle, opp, all_docs, current_reeks_url=reeks_url,
+                current_spelgroep_id=spelgroep_id, global_docs=global_docs,
+                key_prefix=f"scout_team_{sel_player_id}",
+            )
+            report_for_ai = oa.render_team_header(
+                report_for_ai, bundle, opp, all_docs, current_reeks_url=reeks_url,
+                current_spelgroep_id=spelgroep_id, global_docs=global_docs,
+                key_prefix=f"scout_team_{sel_player_id}",
+            )
+    tab_analyse, tab_rang, tab_poule, tab_saved = st.tabs(
+        ["🔍 Analyseren", "🏆 Rangschikking", "🌐 Andere ploegen", "💾 Opgeslagen analyses"]
+    )
+    with tab_analyse:
+        if scout_result:
+            sub_overzicht, sub_detail = st.tabs(["📊 Overzicht", "🔎 Detail per speler"])
             with sub_overzicht:
                 if report_for_ai is not None:
                     oa.render_overview_tab(report_for_ai)
@@ -3606,17 +3549,20 @@ def page_lineup_lab():
                     oa.render_player_detail_tab(report_for_ai, key_prefix=f"scout_team_{sel_player_id}")
                 else:
                     st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
-            with sub_rangschikking:
-                # PADEL_ANALYSIS_RANGSCHIKKING_LINK_2026-09-26: link naar
-                # de officiele TVL-rangschikking, bovenaan deze tab.
-                _render_rangschikking_link(reeks_url)
-                if report_for_ai is not None:
-                    oa.render_ranking_tab(report_for_ai)
-                else:
-                    st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
             if report_for_ai is not None:
                 st.divider()
                 oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
+    with tab_rang:
+        if scout_result:
+            # PADEL_ANALYSIS_RANGSCHIKKING_LINK_2026-09-26: link naar
+            # de officiele TVL-rangschikking, bovenaan deze tab.
+            _render_rangschikking_link(reeks_url)
+            if report_for_ai is not None:
+                oa.render_ranking_tab(report_for_ai)
+            else:
+                st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
+        else:
+            st.info("Kies eerst een speler bij 'Toon analyse voor' hierboven.")
     with tab_poule:
         try:
             import poule_teams_ui as ptu

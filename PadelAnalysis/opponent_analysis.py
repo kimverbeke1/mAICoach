@@ -477,20 +477,32 @@ def _render_ranking_tab(report: dict) -> None:
     niet naar het klassement van elke speler [...] Ik weil een aparte tab
     met een link naar de huidige rangschikking"): vervangt de vorige
     (foutief geïnterpreteerde) per-speler-klassement-links volledig.
-    Toont ÉÉN link naar de huidige interclub-poule-rangschikking op TVL,
+    Toont ÉÉN link naar de huidige interclub-poule/tabel-pagina op TVL,
     via report["reeks_url"] (al gezet in _build_report() - dezelfde URL
-    als poule_playwright.py gebruikt om de poule-tabel/rangschikking op te
-    halen, dus geen nieuwe URL-berekening nodig hier)."""
+    als poule_playwright.py gebruikt om de poule-tabel op te halen, dus
+    geen nieuwe URL-berekening nodig hier).
+
+    PADEL_ANALYSIS_RANKING_BUTTON_RENAME_2026-09-26 (op verzoek van Kim:
+    "dan is er ook nog een knop bekijk huidige rangschikking op TVL. maar
+    die knop moet anders noemen. bekijk poule/tabel"): reeks_url wijst
+    naar de POULE/TABEL-pagina (wedstrijdschema), niet naar de aparte
+    interclub-rangschikkingspagina - die laatste heeft ondertussen zijn
+    EIGEN, apart berekende link gekregen (zie page_lineup_lab.
+    _render_rangschikking_link(), boven de tab "🏆 Rangschikking").
+    Met TWEE knoppen die allebei "rangschikking" heetten maar naar
+    verschillende pagina's linkten, was het onderscheid onduidelijk. De
+    naam hieronder beschrijft nu correct WAT deze link toont.
+    """
     reeks_url = report.get("reeks_url")
     if not reeks_url:
         st.info(
-            "Nog geen link naar de interclub-rangschikking gekend voor deze ploeg. "
+            "Nog geen link naar het poule/tabel-schema gekend voor deze ploeg. "
             "Deze wordt automatisch aangevuld zodra het poule-schema voor deze ploeg "
             "opgehaald is."
         )
         return
-    st.caption("Rechtstreekse link naar de huidige rangschikking van deze interclub-poule op TVL.")
-    label = "🏆 Bekijk huidige rangschikking op TVL"
+    st.caption("Rechtstreekse link naar de huidige poule/tabel (wedstrijdschema) van deze interclub-poule op TVL.")
+    label = "📋 Bekijk poule/tabel"
     try:
         st.link_button(label, reeks_url, use_container_width=False)
     except AttributeError:
