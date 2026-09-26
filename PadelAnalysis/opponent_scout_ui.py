@@ -964,6 +964,10 @@ def _render_unified_team_sync_trigger(
             _data_completeness.clear()
         except Exception:
             pass
+        # PADEL_ANALYSIS_OPPONENT_DOCS_CACHE_2026-09-26: idem voor de
+        # matchdocumenten-cache in prepare_team_docs() - anders toont het
+        # team-rapport tot 5 minuten nog de OUDE matchdata na deze sync.
+        clear_opponent_docs_cache()
         st.rerun()
     return {"missing_matchdata": len(missing_matchdata_ids), "missing_klassement": len(missing_klassement_ids)}
 def render_scout_header(
@@ -1065,6 +1069,32 @@ def render_scout_header(
     if not bundle or not bundle.get("unique_players"):
         return (bundle, opp) if bundle else None
     return bundle, opp
+# PADEL_ANALYSIS_OPPONENT_DOCS_CACHE_2026-09-26 (zelfde bottleneck als
+# PADEL_ANALYSIS_UI_SPEED_CACHE_PHASE2_2026-09-25 in page_lineup_lab.py,
+# maar dan voor de TEGENSTANDER-roster i.p.v. onze eigen spelers - zie de
+# uitgebreide toelichting in apply_opponent_docs_cache_fix.py).
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_docs_for_players(player_ids: tuple) -> dict:
+    """Gecachete variant van ll.get_docs_for_players(). Sleutel is de
+    (gesorteerde) tuple van speler-ID's, zodat een gewijzigde tegenstander-
+    roster wel meteen een verse ophaling triggert, maar dezelfde roster
+    binnen de TTL nooit twee keer wordt opgehaald."""
+    try:
+        return ll.get_docs_for_players(list(player_ids))
+    except Exception:
+        return {}
+
+
+def clear_opponent_docs_cache() -> None:
+    """Leegt de cache hierboven. Aan te roepen na elke geslaagde sync-actie
+    voor de tegenstander-roster (matchdata/klassement/padelstat), zodat
+    verse data niet tot 5 minuten onzichtbaar blijft."""
+    try:
+        _cached_docs_for_players.clear()
+    except Exception:
+        pass
+
+
 def prepare_team_docs(
     bundle: dict, sel_player_id: str,
 ) -> tuple[dict, dict]:
@@ -1081,12 +1111,16 @@ def prepare_team_docs(
     render_scout_header()), die matchdata + klassement + playing strength
     in 1 klik regelt zodra dat nog nodig is. Deze functie toont hier enkel
     nog een informatieve caption, geen actieknop meer (voorkomt 2 knoppen
-    met overlappende functie op dezelfde pagina)."""
+    met overlappende functie op dezelfde pagina).
+    PADEL_ANALYSIS_OPPONENT_DOCS_CACHE_2026-09-26: all_docs gaat nu door
+    _cached_docs_for_players() i.p.v. rechtstreeks ll.get_docs_for_players()
+    - dit werd voorheen op ELKE Streamlit-rerun opnieuw opgehaald voor de
+    VOLLEDIGE tegenstander-roster, ongeacht welke widget je aanklikte."""
     unique_players = bundle.get("unique_players", []) or []
     if not unique_players:
         return {}, {}
     unknown_ids = {player["user_id"] for player in _unknown_players(bundle)}
-    all_docs = ll.get_docs_for_players([p["user_id"] for p in unique_players])
+    all_docs = _cached_docs_for_players(tuple(sorted(str(p["user_id"]) for p in unique_players)))
     if unknown_ids:
         st.caption(
             f"⚠️ {len(unknown_ids)} speler(s) nog niet volledig gekend qua matchdata — gebruik de "
