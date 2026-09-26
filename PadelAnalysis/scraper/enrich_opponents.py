@@ -475,6 +475,28 @@ def ensure_profiles(
 # ---------------------------------------------------------------------------
 # Gedeelde prioriteringshelper
 # ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (op verzoek van Kim: "ik
+# zit te denken dat ik niet al die oude spelers van gespeelde matchen
+# continu wil updaten qua padelstat score etc [...] gewoon automatisch
+# afzetten als match gespeeld is"):
+# discover_poule_players.py zet dit veld automatisch, elke run opnieuw
+# herberekend uit de actuele poule-schema's (zie dat bestand voor de
+# volledige toelichting) - GEEN handmatige markering.
+def _is_frozen(profile_or_id) -> bool:
+    """Aanvaardt ofwel een reeds opgehaald profiel-dict (0 extra reads,
+    gebruikt in run_padelstat_for_players() waar het profiel toch al in
+    bulk werd ingelezen) ofwel rechtstreeks een player_id (1 lichte
+    Firestore-read, gebruikt in run_klassement_for_players() dat geen
+    bulk-profielenlijst heeft)."""
+    if isinstance(profile_or_id, dict):
+        return bool(profile_or_id.get("auto_update_frozen"))
+    try:
+        prof = fb.get_player_profile(profile_or_id) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(prof.get("auto_update_frozen"))
+
+
 def _has_matchdata(player_id: str) -> bool:
     """True als deze speler minstens 1 match heeft in zijn/haar players-doc."""
     try:
@@ -546,7 +568,9 @@ def run_padelstat_for_players(
     priority_ids = {_norm_id(p) for p in (priority_ids or set())}
     samenvatting = {"opgehaald": 0, "cache": 0, "niet_gevonden": 0,
                      "fout": 0, "overgeslagen_limiet": 0,
-                     "officieel_klassement": 0}
+                     "officieel_klassement": 0,
+                     # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26
+                     "bevroren": 0}
     try:
         import padelstats_scraper as ps
     except Exception as e:  # noqa: BLE001
@@ -570,6 +594,15 @@ def run_padelstat_for_players(
         if not profiel or not profiel.get("display_name"):
             continue
         is_priority = key in priority_ids
+        # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: een bevroren
+        # speler wordt door de REGULIERE bulkverversing overgeslagen,
+        # TENZIJ expliciet aangevraagd (priority_ids - hetzelfde mechanisme
+        # dat run_single_player_refresh() al gebruikt om een gerichte
+        # ververs-actie nooit te laten blokkeren). Geen extra Firestore-read:
+        # `profiel` is hier al in bulk ingelezen.
+        if not is_priority and _is_frozen(profiel):
+            samenvatting["bevroren"] += 1
+            continue
         if not refresh and not is_priority:
             try:
                 cached = fb.get_padelstat_rating(key)
@@ -690,7 +723,9 @@ def run_klassement_for_players(
     Returns: {"opgehaald": n, "cache": n, "fout": n, "overgeslagen_limiet": n}.
     """
     priority_ids = {_norm_id(p) for p in (priority_ids or set())}
-    samenvatting = {"opgehaald": 0, "cache": 0, "fout": 0, "overgeslagen_limiet": 0}
+    # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26
+    samenvatting = {"opgehaald": 0, "cache": 0, "fout": 0, "overgeslagen_limiet": 0,
+                     "bevroren": 0}
     try:
         from scrape_klassement import (
             scrape_klassement,
@@ -706,6 +741,13 @@ def run_klassement_for_players(
     for pid in player_ids:
         key = _norm_id(pid)
         is_priority = key in priority_ids
+        # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: zie de uitgebreide
+        # toelichting in run_padelstat_for_players() hierboven - zelfde
+        # principe, hier 1 extra lichte read per kandidaat (geen
+        # bulk-profielenlijst beschikbaar in deze functie).
+        if not is_priority and _is_frozen(key):
+            samenvatting["bevroren"] += 1
+            continue
         if not refresh and not is_priority and _has_klassement(key):
             samenvatting["cache"] += 1
             continue

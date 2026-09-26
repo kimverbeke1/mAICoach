@@ -190,6 +190,39 @@ def _own_known_interclub_matches(player_id: str) -> list[dict]:
     return [m for m in (doc.get("matches", []) or []) if m.get("match_type") == "interclub"]
 
 
+def _mark_team_players_frozen_state(
+    ploeg_id: str, player_ids: list[str], still_upcoming: bool,
+) -> None:
+    """PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: zet (of verwijdert)
+    auto_update_frozen op elk speler-profiel van deze ploeg, gebaseerd op of
+    de ploeg nog een NIET-gespeelde fixture heeft in een gevolgde poule.
+
+    Dit is een LEVENDE, elke run herberekende status - geen eenmalige,
+    permanente markering. still_upcoming=True zet auto_update_frozen
+    expliciet terug op False (zelf-herstellend bij een gewijzigde
+    kalender), still_upcoming=False zet het op True (regulier/bulk
+    bijwerken van deze speler overslaan - zie enrich_opponents.py).
+
+    Fouten per speler worden gelogd maar blokkeren de rest van de run niet
+    - dit is een aanvullende optimalisatie, geen kritiek pad."""
+    for pid in player_ids:
+        try:
+            fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
+                {
+                    "auto_update_frozen": not still_upcoming,
+                    "auto_update_frozen_reason": (
+                        None if still_upcoming
+                        else "geen geplande ontmoetingen meer in de gevolgde poules"
+                    ),
+                    "auto_update_frozen_via_ploeg_id": str(ploeg_id),
+                    "auto_update_frozen_updated_at": _utc_now_iso(),
+                },
+                merge=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{pid}] Kon auto_update_frozen-status niet bijwerken: {e}")
+
+
 def discover_all_poule_teams() -> dict:
     """Doorloopt elk gevolgd eigen-profiel, herkent de eigen ploeg, en
     verzamelt ALLE ANDERE ploegen (over alle gevolgde poules heen).
@@ -296,6 +329,7 @@ def main() -> int:
         return 0
     logger.info(f"{len(teams)} andere ploeg(en) gevonden over alle gevolgde poules.")
     all_players: dict[str, str] = {}
+    frozen_count, unfrozen_count = 0, 0
     for i, (ploeg_id, info) in enumerate(teams.items(), start=1):
         logger.info(f"--- ({i}/{len(teams)}) {info['name']} ({info['poule_label']}) ---")
         try:
@@ -306,8 +340,31 @@ def main() -> int:
             found = {}
         for pid, name in found.items():
             all_players.setdefault(pid, name)
+        # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (op verzoek van
+        # Kim: "gewoon automatisch afzetten als match gespeeld is"): heeft
+        # deze ploeg nog een NIET-gespeelde fixture in het gevolgde
+        # poule-schema? Zo niet, dan mogen hun gekende spelers stoppen met
+        # regulier/bulk bijwerken - een bewuste "analyseer opnieuw"-klik
+        # blijft ze altijd gewoon verversen (zie enrich_opponents.py).
+        # Zelf-herstellend: verandert de kalender alsnog (bv. een
+        # uitgestelde wedstrijd), dan wordt dit bij de volgende run
+        # automatisch weer ontdooid.
+        if found:
+            team_fixtures = ss.get_team_fixtures(info["fixtures"], ploeg_id)
+            still_upcoming = any(not fx.get("played") for fx in team_fixtures)
+            _mark_team_players_frozen_state(ploeg_id, list(found.keys()), still_upcoming)
+            if still_upcoming:
+                unfrozen_count += len(found)
+            else:
+                frozen_count += len(found)
         if i < len(teams):
             time.sleep(delay)
+    if frozen_count or unfrozen_count:
+        logger.info(
+            f"Automatisch bijwerken: {frozen_count} speler(s) bevroren (geen geplande "
+            f"ontmoeting meer), {unfrozen_count} speler(s) actief (nog minstens 1 geplande "
+            "ontmoeting) - status is elke run opnieuw herberekend."
+        )
     logger.info(f"{len(all_players)} unieke speler(s) gevonden over {len(teams)} ploeg(en) samen.")
     new_ids, known_ids = [], []
     for pid in all_players:

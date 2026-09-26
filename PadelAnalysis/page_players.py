@@ -71,6 +71,15 @@ def page_players():
     # padelstats.be playing strength, duidelijk zichtbaar (st.metric), meteen
     # onder de naam - net als bij "👤 Mijn profiel".
     _render_player_ranking_summary(player_id)
+    # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: puur informatief (geen
+    # actieknop) - Kim's voorkeur om nooit iets stilzwijgend te verstoppen.
+    # Status wordt automatisch bijgewerkt door discover_poule_players.py; een
+    # nieuwe "Tegenstander analyseren"-klik ontdooit dit altijd vanzelf.
+    if profile.get("auto_update_frozen"):
+        st.caption(
+            "🔒 Automatisch bijwerken gestopt — geen geplande ontmoetingen meer gevonden in de "
+            "gevolgde poules. Een nieuwe analyse haalt gewoon weer verse gegevens op."
+        )
     with st.expander("⚠️ Speler verwijderen", expanded=False):
         st.warning(
             f"Speler '{_display_name(profile)}' definitief verwijderen?"
