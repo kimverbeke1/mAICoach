@@ -2,7 +2,6 @@
 """
 discover_poule_players.py — PADEL_ANALYSIS_POULE_PRESCAN_2026-09-19 (Fase D2,
 op verzoek van Kim, chat 2026-09-19).
-
 Kim's melding, samengevat: "Nu ik er aan denk is het misschien wel beter om
 in de achtergrond al meteen alle spelers van je poule op te halen op
 voorhand. bv. om middernacht. [...] rekening houden dat een ploeg plots
@@ -33,13 +32,11 @@ die ooit, via een andere weg (bv. cross-referentie bij het aanmaken van een
 profiel-stub, of een eerdere, andere analyse), toevallig ZELF ook een
 interclub_schedule opgeslagen kregen - voor een HELEMAAL ANDERE poule
 (Poule C, G) die niets met Kim's eigen team te maken heeft.
-
 Voor elk van die profielen probeerde discover_all_poule_teams() alsnog
 "de eigen ploeg" te herkennen (wat vrijwel altijd faalt, vandaar de lange
 lijst "Eigen ploeg niet herkenbaar" in de log) - en de handvol gevallen
 waarbij dat WEL toevallig lukte, voegde dan de VOLLEDIGE, voor Kim
 irrelevante poule (bv. Poule C) toe aan de discovery-resultaten.
-
 FIX: get_tracked_profiles() gebruikt nu een EXPLICIETE allowlist van
 player_id's om als "eigen team"-detectiebron te gebruiken, in plaats van
 "elk profiel met eender welk opgeslagen schema":
@@ -60,10 +57,8 @@ STAP 1: welke poules volgen we? (enkel de expliciet toegestane profielen)
 Per toegestaan profiel wordt (via schedule_scraper.identify_own_ploeg_id(),
 dezelfde functie die de UI gebruikt) de EIGEN ploeg herkend en uitgesloten
 — we willen enkel de ANDERE ploegen in de poule pre-scannen.
-
 PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26 (blijft bestaan):
 own_display_name wordt expliciet meegegeven aan identify_own_ploeg_id().
-
 PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27 (in schedule_scraper.py, niet
 dit bestand): loste een TWEEDE, onafhankelijke oorzaak op van dezelfde
 "Eigen ploeg niet herkenbaar"-melding - een woordvolgorde-verschil tussen
@@ -86,28 +81,32 @@ STAP 3: nieuw vs. gekend, en een batch-limiet voor VOLLEDIG nieuwe spelers
 Ongewijzigd - zie PRESCAN_NEW_PLAYERS_MAX hieronder.
 
 --------------------------------------------------------------------------
-BEVRIEZING VAN SPELERS ZONDER RESTERENDE WEDSTRIJDEN
+PADEL_ANALYSIS_FREEZE_VS_OWN_TEAM_FIX_2026-09-27 (op verzoek van Kim: "ik
+zie de fout. played mag op false als wij er niet moeten tegen spelen. dus
+enkel witte kaproenen en lobbeke zouden true moeten zijn omdat je dat moet
+bekijken vanuit onze ploeg. natuurlijk moet elke ploeg nog matchen spelen")
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (ongewijzigd): per
-opponent-ploeg wordt gecontroleerd of er nog een NIET-gespeelde fixture in
-het gevolgde schema staat; zo niet, dan worden hun spelers gemarkeerd om
-niet langer automatisch ververst te worden. Kim's melding op 2026-09-27
-("Ook rekening houden dat bij gespeelde matchen de data niet meer ververst
-moet worden") bevestigt dat deze regel nog steeds gewenst is - "0 bevroren"
-in de laatste log-run is vermoedelijk CORRECT gedrag (Poule Q-ploegen
-hadden op dat moment allemaal nog 2 van hun 5 wedstrijden te spelen, dus
-terecht nog als "actief" gemarkeerd), niet een teken dat de logica zelf
-stuk is. Zie de toelichting in het antwoord aan Kim voor hoe dit verder te
-verifiëren indien nodig.
+ROOT CAUSE (bevestigd): `still_upcoming` werd berekend via
+`ss.get_team_fixtures(info["fixtures"], ploeg_id)` - dat geeft ALLE
+fixtures van de TEGENSTANDER-ploeg in de volledige poule terug, ongeacht
+tegen wie. Voor LUDOVIEK Padel C leverde dat dus ook hun (voor ONS totaal
+irrelevante) wedstrijd tegen K.T.C. DE WITTE KAPROENEN op 10/10 op, en
+zolang DIE nog niet gespeeld was, bleef `still_upcoming=True` - ook al was
+de wedstrijd LUDOVIEK-tegen-ONS allang gespeeld en afgerond (bevestigd:
+26/09 Padel Factory B vs LUDOVIEK, played=True). Elke ploeg in een poule
+heeft bijna altijd nog wedstrijden te spelen tegen ANDEREN, dus deze check
+kon in de praktijk vrijwel nooit "bevroren" opleveren.
+De vraag die hier beantwoord moet worden is niet "heeft deze ploeg nog EEN
+wedstrijd te spelen in de poule" maar "heeft deze ploeg nog een wedstrijd
+te spelen TEGEN ONS" - want dat, en enkel dat, bepaalt of WIJ hun
+spelersdata nog moeten blijven verversen.
 
-Environment variables (optioneel, met veilige defaults):
-    - PRESCAN_TRACKED_PLAYER_IDS (komma-gescheiden player_id's, NIEUW)
-    - PRESCAN_NEW_PLAYERS_MAX (getal, standaard 15)
-    - PRESCAN_DELAY_BETWEEN_TEAMS (seconden, standaard 1.5)
-
-Gebruik (lokaal testen, PowerShell):
-    $env:FIREBASE_SERVICE_ACCOUNT_JSON = Get-Content -Raw firebase-key.json
-    python discover_poule_players.py
+FIX: `own_id` (al beschikbaar in discover_all_poule_teams(), waar de eigen
+ploeg net herkend en uitgesloten wordt) wordt nu MEE opgeslagen per team-
+entry, en still_upcoming filtert expliciet op fixtures waarin zowel
+`ploeg_id` (de tegenstander) ALS `own_id` (onszelf) voorkomen - dus
+letterlijk de onderlinge confrontatie(s) tussen ons en die ene
+tegenstander, niet hun wedstrijden tegen de rest van de poule.
 """
 from __future__ import annotations
 
@@ -181,7 +180,6 @@ def get_tracked_player_ids() -> list[str]:
     opgeslagen schema" (zie moduledocstring voor de volledige root-cause-
     analyse van waarom dat laatste irrelevante poules zoals Poule C
     binnenhaalde).
-
     Volgorde van voorrang:
       1. PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden) - expliciete
          lijst, voor wie bewust meerdere eigen spelers/teams wil volgen.
@@ -240,10 +238,14 @@ def _own_known_interclub_matches(player_id: str) -> list[dict]:
 def _mark_team_players_frozen_state(
     ploeg_id: str, player_ids: list[str], still_upcoming: bool,
 ) -> None:
-    """PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: zet (of verwijdert)
+    """PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 +
+    PADEL_ANALYSIS_FREEZE_VS_OWN_TEAM_FIX_2026-09-27: zet (of verwijdert)
     auto_update_frozen op elk speler-profiel van deze ploeg, gebaseerd op of
-    de ploeg nog een NIET-gespeelde fixture heeft in een gevolgde poule.
-    Levende, elke run herberekende status - geen eenmalige markering."""
+    de ONDERLINGE CONFRONTATIE met onszelf nog een niet-gespeelde fixture
+    heeft (zie moduledocstring voor de volledige root-cause-analyse van
+    waarom dit voorheen "elke fixture in de hele poule" was, wat vrijwel
+    nooit tot bevriezing leidde). Levende, elke run herberekende status -
+    geen eenmalige markering."""
     for pid in player_ids:
         try:
             fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
@@ -251,7 +253,7 @@ def _mark_team_players_frozen_state(
                     "auto_update_frozen": not still_upcoming,
                     "auto_update_frozen_reason": (
                         None if still_upcoming
-                        else "geen geplande ontmoetingen meer in de gevolgde poules"
+                        else "onderlinge confrontatie met onze ploeg al gespeeld, geen nieuwe gepland"
                     ),
                     "auto_update_frozen_via_ploeg_id": str(ploeg_id),
                     "auto_update_frozen_updated_at": _utc_now_iso(),
@@ -267,7 +269,15 @@ def discover_all_poule_teams() -> dict:
     herkent de eigen ploeg, en verzamelt ALLE ANDERE ploegen (over alle
     gevolgde poules heen).
 
-    Returns {ploeg_id: {"name":..., "poule_label":..., "fixtures": [...]}}."""
+    PADEL_ANALYSIS_FREEZE_VS_OWN_TEAM_FIX_2026-09-27: elke team-entry
+    bewaart nu ook `own_ploeg_id` - de eigen ploeg-id die bij DIT specifieke
+    gevolgde schema hoort - zodat de bevries-check in main() achteraf kan
+    filteren op "nog een wedstrijd tegen ONS", niet "nog een wedstrijd tegen
+    eender wie in de poule". Zonder dit veld zou die informatie na deze
+    functie onherroepelijk verloren zijn.
+
+    Returns {ploeg_id: {"name":..., "poule_label":..., "fixtures": [...],
+                        "own_ploeg_id": ...}}."""
     teams: dict = {}
     tracked = get_tracked_profiles()
     logger.info(f"{len(tracked)} toegestaan(e) eigen-speler-profiel(en) met opgeslagen poule-schema gevonden.")
@@ -307,6 +317,7 @@ def discover_all_poule_teams() -> dict:
                         "name": name,
                         "poule_label": fx.get("poule_label") or "?",
                         "fixtures": fixtures,
+                        "own_ploeg_id": str(own_id),
                     }
     return teams
 
@@ -325,6 +336,24 @@ def discover_players_for_team(ploeg_id: str, team_info: dict) -> dict:
     if bundle.get("note"):
         return {}
     return {p["user_id"]: p["name"] for p in (bundle.get("unique_players", []) or [])}
+
+
+def _still_upcoming_against_own_team(fixtures: list, ploeg_id: str, own_ploeg_id: str) -> bool:
+    """PADEL_ANALYSIS_FREEZE_VS_OWN_TEAM_FIX_2026-09-27: True als er nog
+    een NIET-gespeelde fixture bestaat waarin zowel `ploeg_id` (de
+    tegenstander) als `own_ploeg_id` (onszelf) voorkomen - dus specifiek
+    de onderlinge confrontatie(s) tussen ons en die ene tegenstander.
+
+    Bewust NIET ss.get_team_fixtures() hergebruikt: die geeft ALLE
+    fixtures van 1 ploeg terug (tegen om het even wie in de poule) - exact
+    de te brede vraag die het probleem veroorzaakte. Hier wordt op BEIDE
+    kanten tegelijk gefilterd."""
+    ploeg_id, own_ploeg_id = str(ploeg_id), str(own_ploeg_id)
+    for fx in fixtures or []:
+        sides = {str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id"))}
+        if sides == {ploeg_id, own_ploeg_id} and not fx.get("played"):
+            return True
+    return False
 
 
 def _is_fully_new_player(player_id: str) -> bool:
@@ -355,15 +384,12 @@ def _save_prescan_summary(
 def main() -> int:
     new_players_max = get_new_players_max()
     delay = get_delay_between_teams()
-
     teams = discover_all_poule_teams()
     if not teams:
         logger.info("Geen andere ploegen gevonden in de toegestane, gevolgde poule(s) — niets te doen.")
         _write_output("", 0)
         return 0
-
     logger.info(f"{len(teams)} andere ploeg(en) gevonden over de toegestane, gevolgde poule(s).")
-
     all_players: dict[str, str] = {}
     frozen_count, unfrozen_count = 0, 0
     for i, (ploeg_id, info) in enumerate(teams.items(), start=1):
@@ -376,32 +402,30 @@ def main() -> int:
             found = {}
         for pid, name in found.items():
             all_players.setdefault(pid, name)
-
         if found:
-            team_fixtures = ss.get_team_fixtures(info["fixtures"], ploeg_id)
-            still_upcoming = any(not fx.get("played") for fx in team_fixtures)
+            # PADEL_ANALYSIS_FREEZE_VS_OWN_TEAM_FIX_2026-09-27: filtert nu
+            # op de onderlinge confrontatie met own_ploeg_id, niet op elke
+            # fixture van de tegenstander in de hele poule.
+            still_upcoming = _still_upcoming_against_own_team(
+                info["fixtures"], ploeg_id, info["own_ploeg_id"],
+            )
             _mark_team_players_frozen_state(ploeg_id, list(found.keys()), still_upcoming)
             if still_upcoming:
                 unfrozen_count += len(found)
             else:
                 frozen_count += len(found)
-
         if i < len(teams):
             time.sleep(delay)
-
     if frozen_count or unfrozen_count:
         logger.info(
-            f"Automatisch bijwerken: {frozen_count} speler(s) bevroren (geen geplande "
-            f"ontmoeting meer), {unfrozen_count} speler(s) actief (nog minstens 1 geplande "
-            "ontmoeting) - status is elke run opnieuw herberekend."
+            f"Automatisch bijwerken: {frozen_count} speler(s) bevroren (onderlinge confrontatie "
+            f"met ons al gespeeld), {unfrozen_count} speler(s) actief (nog minstens 1 geplande "
+            "ontmoeting TEGEN ONS) - status is elke run opnieuw herberekend."
         )
-
     logger.info(f"{len(all_players)} unieke speler(s) gevonden over {len(teams)} ploeg(en) samen.")
-
     new_ids, known_ids = [], []
     for pid in all_players:
         (new_ids if _is_fully_new_player(pid) else known_ids).append(pid)
-
     capped_new = new_ids[:new_players_max]
     overflow = len(new_ids) - len(capped_new)
     logger.info(
@@ -409,9 +433,7 @@ def main() -> int:
         f"waarvan {len(capped_new)} deze run meegenomen (limiet {new_players_max})"
         + (f", {overflow} volgen bij een volgende run." if overflow else ".")
     )
-
     final_ids = capped_new + known_ids
-
     _save_prescan_summary(teams, all_players, new_ids, known_ids, capped_new)
     _write_output(",".join(final_ids), len(final_ids))
     return 0
