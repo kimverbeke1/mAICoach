@@ -146,6 +146,38 @@ onbesliste onderlinge wedstrijd, dan blijft still_upcoming=True (actief).
 Zijn ALLE onderlinge wedstrijden al gespeeld, dan wordt bevroren. Wordt er
 (zeldzaam) HELEMAAL geen onderlinge fixture teruggevonden, dan blijft de
 VEILIGE default still_upcoming=True (nooit onterecht bevriezen bij twijfel).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_FREEZE_NOT_APPLIED_TO_OUTPUT_FIX_2026-09-27 (op verzoek van
+Kim: "36 spelers i.p.v. 15 [...] de bevriezing wordt wel OPGESLAGEN, maar
+nooit TOEGEPAST op wat er naar ci_scrape_all.py doorgaat")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd - Kim's eigen analyse was raak): _mark_team_players_
+frozen_state() schreef auto_update_frozen correct weg naar player_profiles,
+maar GEEN enkele plek in dit bestand las dat veld terug om de uiteindelijke
+final_ids (die naar ci_scrape_all.py via PLAYER_IDS gaan) te filteren. Bij
+21 bevroren + 15 actief werden dus alsnog alle 36 doorgegeven.
+BEWUSTE KEUZE (op basis van Kim's eigen vraag "moet dat in ci_scrape_all.py
+of hier?"): bevestigd via een controle van het huidige ci_scrape_all.py -
+dat bestand checkt NERGENS op auto_update_frozen. De uitsluiting gebeurt
+daarom HIER, niet in ci_scrape_all.py, want dat laatste bestand is GEDEELDE
+infrastructuur die ook voor HANDMATIGE verversingen gebruikt wordt (bv.
+"Scrape deze speler nu" in de app, mode="full"). Een bewuste, expliciete
+handmatige actie moet auto_update_frozen kunnen NEGEREN - dat onderscheid
+zou verloren gaan als de check in ci_scrape_all.py zelf zou zitten.
+discover_poule_players.py berekent still_upcoming toch al PER TEAM in
+dezelfde run (main(), hieronder) - geen extra Firestore-lezing nodig, enkel
+het resultaat bijhouden en er NA het bepalen van new_ids/known_ids op
+filteren, vlak vóór final_ids wordt opgebouwd.
+FIX: main() houdt nu 2 sets bij tijdens de team-lus: active_player_ids
+(voorkwam in minstens 1 nog-actieve/still_upcoming team) en frozen_only_
+candidate_ids (voorkwam in minstens 1 bevroren team). Een speler die in
+BEIDE voorkomt (bv. lid van 2 verschillende tegenstander-teams, waarvan 1
+nog moet spelen) blijft ACTIEF behandeld - active_player_ids heeft
+voorrang, om nooit onterecht een speler uit te sluiten die nog wel ergens
+relevant is. Pas na het bepalen van new_ids/known_ids wordt final_ids
+gefilterd: elke speler die UITSLUITEND in bevroren teams voorkwam, wordt
+verwijderd, met een duidelijke logregel over hoeveel spelers hierdoor
+uitgesloten werden.
 Environment variables (optioneel, met veilige defaults):
     - PRESCAN_TRACKED_PLAYER_IDS (komma-gescheiden player_id's, NIEUW)
     - PRESCAN_NEW_PLAYERS_MAX (getal, standaard 15)
@@ -477,6 +509,14 @@ def main() -> int:
     logger.info(f"{len(teams)} andere ploeg(en) gevonden over de toegestane, gevolgde poule(s).")
     all_players: dict[str, str] = {}
     frozen_count, unfrozen_count = 0, 0
+    # PADEL_ANALYSIS_FREEZE_NOT_APPLIED_TO_OUTPUT_FIX_2026-09-27: bijgehouden
+    # tijdens dezelfde lus die still_upcoming toch al berekent - geen extra
+    # Firestore-lezing nodig. Een speler die in minstens 1 nog-actieve team
+    # voorkomt, blijft ALTIJD actief behandeld (active_player_ids heeft
+    # voorrang op frozen_only_candidate_ids), ook als hij/zij daarnaast ook
+    # in een bevroren team zit.
+    active_player_ids: set[str] = set()
+    frozen_only_candidate_ids: set[str] = set()
     for i, (ploeg_id, info) in enumerate(teams.items(), start=1):
         logger.info(f"--- ({i}/{len(teams)}) {info['name']} ({info['poule_label']}) ---")
         try:
@@ -498,10 +538,16 @@ def main() -> int:
             _mark_team_players_frozen_state(ploeg_id, list(found.keys()), still_upcoming)
             if still_upcoming:
                 unfrozen_count += len(found)
+                active_player_ids.update(found.keys())
             else:
                 frozen_count += len(found)
+                frozen_only_candidate_ids.update(found.keys())
         if i < len(teams):
             time.sleep(delay)
+    # PADEL_ANALYSIS_FREEZE_NOT_APPLIED_TO_OUTPUT_FIX_2026-09-27: enkel
+    # spelers die UITSLUITEND in bevroren team(s) voorkwamen, worden
+    # effectief uitgesloten - active_player_ids heeft voorrang.
+    frozen_only_ids = frozen_only_candidate_ids - active_player_ids
     if frozen_count or unfrozen_count:
         logger.info(
             f"Automatisch bijwerken: {frozen_count} speler(s) bevroren (geen geplande "
@@ -519,7 +565,14 @@ def main() -> int:
         f"waarvan {len(capped_new)} deze run meegenomen (limiet {new_players_max})"
         + (f", {overflow} volgen bij een volgende run." if overflow else ".")
     )
-    final_ids = capped_new + known_ids
+    final_ids = [pid for pid in (capped_new + known_ids) if pid not in frozen_only_ids]
+    excluded_frozen = len(capped_new) + len(known_ids) - len(final_ids)
+    if excluded_frozen:
+        logger.info(
+            f"{excluded_frozen} speler(s) uitgesloten van deze scrape-run omdat ze uitsluitend "
+            "in bevroren team(s) voorkomen (auto_update_frozen) - PADEL_ANALYSIS_FREEZE_NOT_"
+            "APPLIED_TO_OUTPUT_FIX_2026-09-27."
+        )
     _save_prescan_summary(teams, all_players, new_ids, known_ids, capped_new)
     _write_output(",".join(final_ids), len(final_ids))
     return 0
