@@ -96,10 +96,29 @@ Ongewijzigd - zie PRESCAN_NEW_PLAYERS_MAX hieronder.
 --------------------------------------------------------------------------
 BEVRIEZING VAN SPELERS ZONDER RESTERENDE WEDSTRIJDEN
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (ongewijzigd): per
-opponent-ploeg wordt gecontroleerd of er nog een NIET-gespeelde fixture in
-het gevolgde schema staat; zo niet, dan worden hun spelers gemarkeerd om
-niet langer automatisch ververst te worden.
+PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (ongewijzigd qua opzet).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_FREEZE_HEAD_TO_HEAD_FIX_2026-09-27 (op verzoek van Kim: "je
+telt terug spelers van ploegen waar wij zelf niet meer tegen spelen")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de log te analyseren: "0 bevroren, 26 actief",
+terwijl meerdere van de 5 gevonden tegenstanders al lang door Kim's EIGEN
+ploeg gespeeld waren): still_upcoming werd tot nu toe bepaald door TE
+CONTROLEREN OF DE TEGENSTANDER-PLOEG nog EENDER WELKE onbesliste fixture
+had in de VOLLEDIGE poule - dus ook een wedstrijd tegen een ANDERE ploeg,
+niet specifiek tegen Kim's eigen ploeg. Bij een poule met meerdere speel-
+rondes bleef een tegenstander daardoor "actief" (dus hun spelers bleven
+ververst worden) zolang zij nog IEMAND in de poule moesten ontmoeten - ook
+als de ENIGE relevante wedstrijd voor Kim (die tussen zijn eigen ploeg en
+hen) al lang gespeeld was.
+FIX: still_upcoming wordt nu bepaald aan de hand van de ONDERLINGE
+fixture(s) tussen Kim's EIGEN, herkende ploeg (own_ploeg_id, nu ook
+bewaard per gevonden tegenstander-team) en die specifieke tegenstander -
+niet de tegenstander hun volledige wedstrijdkalender. Is er nog minstens 1
+onbesliste onderlinge wedstrijd, dan blijft still_upcoming=True (actief).
+Zijn ALLE onderlinge wedstrijden al gespeeld, dan wordt bevroren. Wordt er
+(zeldzaam) HELEMAAL geen onderlinge fixture teruggevonden, dan blijft de
+VEILIGE default still_upcoming=True (nooit onterecht bevriezen bij twijfel).
 Environment variables (optioneel, met veilige defaults):
     - PRESCAN_TRACKED_PLAYER_IDS (komma-gescheiden player_id's, NIEUW)
     - PRESCAN_NEW_PLAYERS_MAX (getal, standaard 15)
@@ -115,6 +134,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 _HERE = Path(__file__).parent
 _ROOT = _HERE.parent
 for _p in [str(_HERE), str(_ROOT)]:
@@ -342,8 +362,33 @@ def discover_all_poule_teams() -> dict:
                         "name": name,
                         "poule_label": fx.get("poule_label") or "?",
                         "fixtures": fixtures,
+                        # PADEL_ANALYSIS_FREEZE_HEAD_TO_HEAD_FIX_2026-09-27:
+                        # bewaard zodat de bevriezingscheck in main() de
+                        # ONDERLINGE fixture(s) tussen Kim's eigen ploeg en
+                        # deze tegenstander kan opzoeken, i.p.v. de volledige
+                        # wedstrijdkalender van de tegenstander.
+                        "own_ploeg_id": str(own_id),
                     }
     return teams
+
+
+def _still_playing_each_other(fixtures: list[dict], own_ploeg_id: Optional[str], ploeg_id: str) -> bool:
+    """PADEL_ANALYSIS_FREEZE_HEAD_TO_HEAD_FIX_2026-09-27: True zolang er nog
+    minstens 1 NIET-gespeelde fixture is tussen own_ploeg_id en ploeg_id
+    specifiek - ongeacht of de tegenstander verder nog tegen ANDERE ploegen
+    moet spelen. Geeft (veilig, niet-bevriezend) True terug als own_ploeg_id
+    ontbreekt of als er helemaal geen onderlinge fixture gevonden wordt -
+    bevriezen gebeurt enkel bij een POSITIEVE bevestiging dat alle
+    onderlinge wedstrijden al gespeeld zijn."""
+    if not own_ploeg_id:
+        return True
+    head_to_head = [
+        fx for fx in fixtures
+        if {str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id"))} == {str(own_ploeg_id), str(ploeg_id)}
+    ]
+    if not head_to_head:
+        return True
+    return any(not fx.get("played") for fx in head_to_head)
 def discover_players_for_team(ploeg_id: str, team_info: dict) -> dict:
     """Voor 1 ploeg: hun spelers uit AL HUN gespeelde wedstrijden dit
     seizoen, via opponent_scout.scout_opponent() — requests-only."""
@@ -401,8 +446,13 @@ def main() -> int:
         for pid, name in found.items():
             all_players.setdefault(pid, name)
         if found:
-            team_fixtures = ss.get_team_fixtures(info["fixtures"], ploeg_id)
-            still_upcoming = any(not fx.get("played") for fx in team_fixtures)
+            # PADEL_ANALYSIS_FREEZE_HEAD_TO_HEAD_FIX_2026-09-27: enkel de
+            # ONDERLINGE fixture(s) tussen Kim's eigen ploeg en DEZE
+            # tegenstander bepalen still_upcoming - niet de volledige
+            # wedstrijdkalender van de tegenstander (zie moduledocstring).
+            still_upcoming = _still_playing_each_other(
+                info["fixtures"], info.get("own_ploeg_id"), ploeg_id,
+            )
             _mark_team_players_frozen_state(ploeg_id, list(found.keys()), still_upcoming)
             if still_upcoming:
                 unfrozen_count += len(found)
