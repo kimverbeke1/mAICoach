@@ -42,14 +42,12 @@ wordt gewoon overschreven. Elke keer een tegenstander via "🔍 Tegenstander
 analyseren" gescout werd, werd hun eventueel bekende club dus STILZWIJGEND
 gewist, ongeacht of die club ooit correct was ingevuld (bv. via een eerdere
 backfill of handmatige toevoeging).
-
 Daarnaast ontbrak een consistente "added_by"-marker: page_add_player.py
 (handmatige toevoeging) en opponent_scout.py (automatische ontdekking via
 scouting) zetten BEIDE geen marker, in tegenstelling tot
 enrich_opponents.ensure_profiles() (zet "auto_opponent_discovery"). Daardoor
 kon cleanup_ghost_profiles.py deze via-scouting-ontdekte spelers niet
 onderscheiden van bewust, handmatig toegevoegde spelers.
-
 Fix, in _ensure_profile_safe() hieronder:
   1. Vóór het schrijven wordt het BESTAANDE profiel opgehaald. Is er al een
      club gekend, dan wordt die club expliciet doorgegeven aan
@@ -69,7 +67,6 @@ ROOT CAUSE: scout_opponent() gebruikte tot nu toe een VAST `lookback`
 uitslagenblad slechts een deel van de opstelling opleverde, of gewoon
 effectief met een kleinere ploeg speelde, bevatte "unique_players" te
 weinig spelers voor een zinvolle ploeganalyse.
-
 FIX, twee onderdelen:
   1. scout_opponent() breidt nu AUTOMATISCH de lookback uit (tot
      max_lookback, standaard 4) zodra de roster na de eerste `lookback`
@@ -87,7 +84,6 @@ ofwel de tegenstander ofwel de ANDERE partij kan zijn. Door dat hier, op de
 ENE plek die is_opponent_home al kent, eenmalig ondubbelzinnig te berekenen
 ("opponent_won": won de GESCOUTE ploeg dit bord?), kan elke consument dit
 veld voortaan zonder verdere aannames gebruiken.
-
 Dit veld bleef in de praktijk ALTIJD None staan, want scrape_uitslagenblad()
 in scraper_v2.py zocht tot nu toe naar een niet-bestaande "W"/"V"-letter
 i.p.v. het echte, numerieke "Uitslag"-veld (0-1/1-0) - zie
@@ -112,17 +108,66 @@ ROOT CAUSE (2 aparte gaten):
      matchen/sets/spellen, en een expliciete "(winnaar)"-vermelding) werd
      nooit gelezen. page_lineup_lab.py moest de eindscore dus zelf afleiden
      door borden te tellen - foutgevoelig en onvolledig (geen sets/spellen).
-
 FIX: extract_opponent_lineup() bewaart nu ook "other_pair" per bord (de
 2 spelers die niet in opponent_pair zitten), zodat de UI de NAAM van de
 winnende zijde altijd kan tonen, ongeacht wie won. Daarnaast geeft deze
 functie nu ook de team-niveau samenvatting door (home_team/away_team/
 winner_team/team_score_matches/team_score_sets/team_score_games), die
 scrape_uitslagenblad() nu rechtstreeks van de pagina leest.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27 (op verzoek van Kim, na
+analyse van opponent_scout_ui.py + dit bestand: "de allereerste analyse is
+nog steeds traag")
+--------------------------------------------------------------------------
+BEVESTIGD (niet langer een vermoeden): scout_opponent() deed voorheen, voor
+ELKE fixture in prev_fixtures, een SEQUENTIËLE live HTTP-fetch (via
+extract_opponent_lineup() -> scraper_v2.scrape_uitslagenblad(), requests +
+BeautifulSoup, dus geen Playwright) MET een expliciete time.sleep(1.0) NA
+ELKE fetch. Bij lookback=1 (het standaardpad voor een gloednieuwe
+tegenstander) is dat weliswaar maar 1 fetch + 1 sleep, maar zodra de roster
+na die ene wedstrijd nog onder min_players (4) bleef, breidde
+_scout_with_lookback() de lookback STAP VOOR STAP uit — en elke uitbreiding
+riep get_opponent_previous_fixtures() opnieuw aan met een GROTERE lookback,
+wat een NIEUWE slice van fixtures teruggeeft die de al eerder gefetchte
+fixture(s) OPNIEUW bevat. Omdat er geen enkele vorm van hergebruik was,
+werden die fixtures dus ELKE keer opnieuw, sequentieel, met sleep(1.0)
+ertussen, herhaald — een tegenstander die 3 uitbreidingsstappen nodig had
+(kleine effectieve ploeg) deed daardoor 1+2+3+4 = 10 fetches in plaats van
+de 4 die eigenlijk nodig waren, puur door deze redundantie.
+FIX, twee onderdelen:
+  1. fetched_cache: elke fixture wordt voortaan MAX 1 keer gefetcht over de
+     volledige (eventueel uitgebreide) scouting-poging heen, sleutel is de
+     uitslagenblad-URL (of, bij ontstentenis daarvan, de datumtekst) van de
+     fixture. Een lookback-uitbreiding fetcht dus voortaan ENKEL de
+     NIEUWE, nog niet eerder opgehaalde oudere fixture(s).
+  2. Parallelle fetch: de (nog niet gecachete) fixtures van een
+     scouting-poging worden nu gelijktijdig opgehaald via
+     ThreadPoolExecutor (I/O-bound netwerkwerk, dus prima parallelliseerbaar
+     — elke thread gebruikt een EIGEN requests.Session(), want een Session
+     is niet gegarandeerd thread-safe voor gelijktijdig gebruik). De
+     bewuste "sequentieel + sleep(1.0)"-courtesy-conventie (zie hierboven)
+     gold voor het VOLLEDIGE-scraper-patroon i.h.a.; voor dit specifieke,
+     lichte (enkel requests, geen browser) uitslagenblad-verzoek koos Kim
+     expliciet voor snelheid via ThreadPoolExecutor i.p.v. verder te
+     patchen op een vermoeden. max_workers is bewust beperkt (standaard 4)
+     om niet meer gelijktijdige requests te doen dan het aantal fixtures
+     dat sowieso al opgehaald moet worden.
+LET OP — NIET in deze fix vervat: scrape_new_opponent_players() hieronder
+(de PER-SPELER matchhistoriek-scrape via het Playwright-afhankelijke
+scrape_player()) blijft bewust ONGEWIJZIGD sequentieel. Die functie is voor
+een gloednieuwe tegenstander (waar ALLE spelers nog onbekend zijn) een
+minstens even grote, mogelijk grotere tijdsfactor, maar parallelliseren
+daarvan raakt aan de expliciete "geen parallelle requests — minder
+opvallend"-designkeuze verderop in deze module EN aan scrape_player.py /
+fetch_period_playwright.py, die niet zijn nagekeken in deze ronde. Kim: dit
+apart bekijken zodra scrape_player.py (en fetch_period_playwright.py)
+beschikbaar zijn — zie mijn bericht.
 """
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -139,6 +184,10 @@ import schedule_scraper as ss  # noqa: E402
 # de automatische lookback-uitbreiding.
 MIN_PLAYERS_DEFAULT = 4
 MAX_LOOKBACK_DEFAULT = 4
+# PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: hoeveel uitslagenbladen
+# tegelijk opgehaald mogen worden (I/O-bound, dus ruim boven CPU-count kan,
+# maar bewust beperkt om niet nodeloos veel gelijktijdige requests te doen).
+SCOUT_FETCH_MAX_WORKERS_DEFAULT = 4
 
 
 def _normalize(text: str) -> str:
@@ -147,7 +196,6 @@ def _normalize(text: str) -> str:
 
 def _ensure_profile_safe(player_id: str, display_name: str, marker: str = "opponent_scout") -> None:
     """PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17.
-
     Veilige vervanging voor een kale `fb.save_player_profile(id, display_name=...)`-
     aanroep: behoudt een reeds bekende club (i.p.v. die impliciet naar None te
     overschrijven) en zet `added_by` enkel als dat veld nog niet bestaat, zodat
@@ -197,10 +245,25 @@ def get_opponent_previous_fixtures(
     """
     team_fixtures = ss.get_team_fixtures(all_fixtures, opponent_ploeg_id)
     before = ss._parse_date_text(before_date_text)
+    # PADEL_ANALYSIS_LAST_MATCH_BOUNDARY_FIX_2026-09-26 (HERHAALDE
+    # toepassing - op verzoek van Kim: "de ontmoeting van vandaag staat er
+    # niet bij"):
+    # ROOT CAUSE: `before` komt uit get_next_match() - de eerstvolgende, NOG
+    # NIET gespeelde wedstrijd volgens het POULE-SCHEMA. Is dat schema niet
+    # recent ververst nadat de tegenstander hun laatste wedstrijd al
+    # speelde, dan retourneert get_next_match() precies DIE (in werkelijk-
+    # heid al gespeelde) wedstrijd als "volgende" - `before` wordt dan
+    # gelijk aan de datum van die wedstrijd zelf. De vorige STRIKTE `<`
+    # sloot een wedstrijd OP exact die datum dan uit, ook al staat ze in de
+    # eigenlijke matchdata (een ANDERE bron dan het poule-schema) wel als
+    # gespeeld geregistreerd.
+    # FIX: `<=` i.p.v. `<` - strikt VEILIGER, geen verruiming: de lijst
+    # filtert al eerst op f["played"], dus een nog niet gespeelde wedstrijd
+    # kan hierdoor nooit binnensluipen.
     played_before = [
         f for f in team_fixtures
         if f["played"] and ss._parse_date_text(f["date_text"]) and (
-            before is None or ss._parse_date_text(f["date_text"]) < before
+            before is None or ss._parse_date_text(f["date_text"]) <= before
         )
     ]
     played_before.sort(key=lambda f: ss._parse_date_text(f["date_text"]))
@@ -211,13 +274,11 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     """
     Haalt het uitslagenblad van deze (vorige) fixture op en bepaalt welke
     spelers aan de kant van de tegenstander (opponent_ploeg_id) stonden.
-
     Aanname (niet live geverifieerd): de volgorde van gevonden spelerslinks
     per rij volgt de tabelkolomvolgorde (eerst thuis-koppel, dan
     bezoekend-koppel) — consistent met de rest van de site, en bevestigd
     tegen 2 echte, onafhankelijke bordrijen (zie
     PADEL_ANALYSIS_UITSLAG_FIELD_FIX_2026-09-25 in scraper_v2.py).
-
     LET OP voor consumenten van "boards": scrape_uitslagenblad() zet een
     "round_text"-veld per bord, maar dat regex-patroon herkent enkel
     tornooi-achtige ronde-labels ("poule"/"finale"/"1/4" e.d.) — GEEN
@@ -225,6 +286,11 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     bladen. Voor interclub is round_text hier dus zo goed als altijd None;
     de POSITIE van een bord in de "boards"-lijst (index) is de enige
     beschikbare, benaderende indicator van bordvolgorde.
+    PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: wordt nu mogelijk vanuit
+    meerdere threads tegelijk aangeroepen (zie scout_opponent() hieronder).
+    Elke aanroeper geeft daarom een EIGEN, niet-gedeelde requests.Session()
+    mee (zie _fetch_fixtures_parallel()) — deze functie zelf blijft
+    ongewijzigd, ze gebruikt de meegegeven session enkel lokaal.
     """
     import requests
     session = session or requests.Session()
@@ -246,21 +312,18 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     except Exception as e:
         out["error"] = f"Kon uitslagenblad niet ophalen: {e}"
         return out
-
     for veld in (
         "home_team", "away_team", "home_ploeg_id", "away_ploeg_id",
         "winner_team", "winner_ploeg_id",
         "team_score_matches", "team_score_sets", "team_score_games",
     ):
         out[veld] = data.get(veld)
-
     is_opponent_home = fixture.get("home_ploeg_id") == opponent_ploeg_id
     # Fallback: vergelijk namen als ploegId-koppeling niet zeker is
     if not is_opponent_home and not (fixture.get("away_ploeg_id") == opponent_ploeg_id):
         home_n = _normalize(data.get("home_team") or "")
         opp_n = _normalize(opponent_name)
         is_opponent_home = bool(opp_n) and opp_n in home_n
-
     seen_ids = set()
     for board_index, board in enumerate(data.get("matches", [])):
         players = board.get("players", [])
@@ -277,7 +340,6 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
         # gescoute kant van dit bord, tot nu toe altijd weggegooid. Nodig
         # om de naam van de winnende zijde te kunnen tonen ongeacht wie won.
         other_pair = players_with_rank[2:4] if is_opponent_home else players_with_rank[0:2]
-
         raw_won = board.get("won")
         # PADEL_ANALYSIS_OPPONENT_WON_FIELD_2026-09-25: board.get("won") is
         # dubbelzinnig - het geldt voor de partij die op het uitslagenblad
@@ -288,7 +350,6 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
         opponent_won = None
         if raw_won is not None:
             opponent_won = bool(raw_won) if is_opponent_home else (not bool(raw_won))
-
         out["boards"].append({
             "opponent_pair": opp_pair,
             "other_pair": other_pair,
@@ -306,6 +367,57 @@ def extract_opponent_lineup(fixture: dict, opponent_name: str, opponent_ploeg_id
     return out
 
 
+def _fixture_key(fixture: dict) -> str:
+    """PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: stabiele sleutel om
+    eenzelfde fixture te herkennen over meerdere lookback-uitbreidingen heen,
+    zodat die nooit dubbel gefetcht wordt. uitslagenblad_url is uniek per
+    wedstrijd; date_text is een redelijke fallback wanneer die URL zou
+    ontbreken (zie extract_opponent_lineup()'s eigen "Geen uitslagenblad-
+    link beschikbaar"-afhandeling — die fixture levert dan gewoonweg geen
+    spelers op, maar mag evenmin herhaaldelijk herprobeerd worden)."""
+    return fixture.get("uitslagenblad_url") or f"__no_url__{fixture.get('date_text')}"
+
+
+def _fetch_fixtures_parallel(
+    fixtures: list[dict],
+    opponent_name: str,
+    opponent_ploeg_id: str,
+    max_workers: int = SCOUT_FETCH_MAX_WORKERS_DEFAULT,
+) -> dict:
+    """PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: haalt de uitslagen-
+    bladen van `fixtures` GELIJKTIJDIG op (I/O-bound netwerkwerk — dit deed
+    voorheen scout_opponent() sequentieel met een expliciete time.sleep(1.0)
+    NA elke fetch, zie de moduledocstring hierboven voor de volledige
+    analyse). Geeft een dict {fixture_key: extract_opponent_lineup(...)}
+    terug. Elke thread gebruikt een EIGEN requests.Session() (een Session
+    delen tussen threads is niet gegarandeerd veilig)."""
+    import requests
+
+    results: dict[str, dict] = {}
+    if not fixtures:
+        return results
+    workers = max(1, min(max_workers, len(fixtures)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_key = {
+            executor.submit(
+                extract_opponent_lineup,
+                fx, opponent_name, opponent_ploeg_id,
+                requests.Session(),
+            ): _fixture_key(fx)
+            for fx in fixtures
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:  # noqa: BLE001
+                results[key] = {
+                    "fixture": None, "players": [], "boards": [],
+                    "error": f"Kon uitslagenblad niet ophalen: {e}",
+                }
+    return results
+
+
 def scout_opponent(
     all_fixtures: list[dict],
     opponent_name: str,
@@ -314,6 +426,7 @@ def scout_opponent(
     lookback: int = 1,
     min_players: int = MIN_PLAYERS_DEFAULT,
     max_lookback: int = MAX_LOOKBACK_DEFAULT,
+    max_workers: int = SCOUT_FETCH_MAX_WORKERS_DEFAULT,
 ) -> dict:
     """
     Volledige scouting-bundel voor een aankomende tegenstander:
@@ -328,12 +441,20 @@ def scout_opponent(
     gehaald, dan wordt gewoon de grootste roster teruggegeven die haalbaar
     was - GEEN blokkerende fout, enkel een kleinere roster dan ideaal.
 
+    PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27 (op verzoek van Kim, zie
+    moduledocstring voor de volledige bevestigde analyse): elke fixture
+    wordt nu MAX 1 keer gefetcht (fetched_cache, sleutel = _fixture_key()),
+    ongeacht hoeveel keer de lookback nadien nog uitbreidt — voorheen werd
+    bij ELKE uitbreidingsstap de VOLLEDIGE (grotere) set fixtures opnieuw
+    sequentieel herhaald. Nieuwe fixtures binnen eenzelfde stap worden
+    bovendien PARALLEL opgehaald via _fetch_fixtures_parallel() i.p.v.
+    sequentieel met time.sleep(1.0) ertussen.
+
     Elke entry in "unique_players" bevat "appearances" (in hoeveel van de
     doorzochte wedstrijden deze speler voorkwam) en "known_matches_total"
     (hun totaal gekende matchen in onze database, ongeacht team/club).
     """
-    import requests
-    session = requests.Session()
+    fetched_cache: dict[str, dict] = {}
 
     def _scout_with_lookback(current_lookback: int):
         prev_fixtures = get_opponent_previous_fixtures(
@@ -341,17 +462,22 @@ def scout_opponent(
         )
         if not prev_fixtures:
             return prev_fixtures, [], {}
-        results = []
+        # PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: enkel de fixtures
+        # die we nog NIET eerder (in een vorige, kleinere lookback-poging)
+        # gefetcht hebben, worden nu opgehaald — en dat gebeurt parallel.
+        to_fetch = [fx for fx in prev_fixtures if _fixture_key(fx) not in fetched_cache]
+        if to_fetch:
+            fetched_cache.update(
+                _fetch_fixtures_parallel(to_fetch, opponent_name, opponent_ploeg_id, max_workers=max_workers)
+            )
+        results = [fetched_cache[_fixture_key(fx)] for fx in prev_fixtures]
         appearances: dict[str, int] = {}
         names: dict[str, str] = {}
-        for fx in prev_fixtures:
-            extracted = extract_opponent_lineup(fx, opponent_name, opponent_ploeg_id, session=session)
-            results.append(extracted)
-            for p in extracted["players"]:
+        for extracted in results:
+            for p in extracted.get("players", []):
                 uid = p["user_id"]
                 names[uid] = p["name"]
                 appearances[uid] = appearances.get(uid, 0) + 1
-            time.sleep(1.0)  # zelfde beleefdheids-pauze als de rest van de scraper
         return prev_fixtures, results, {"appearances": appearances, "names": names}
 
     prev_fixtures, results, agg = _scout_with_lookback(lookback)
@@ -419,13 +545,26 @@ def scrape_new_opponent_players(
     """
     Scrapet sequentieel (met wachttijd) enkel de spelers uit `players` die nog
     NIET in onze database staan. players: [{"user_id":..., "name":...}, ...]
-
     lookback_periods: hoeveel periodes terug te scrapen (1 = enkel huidige —
     huidig gekozen default; later makkelijk te verhogen zonder verder iets
     aan te passen).
 
     Geen parallellisatie — bewust, om niet als één plotse vlaag van requests
     op te vallen (zie gesprek over discretie vs. snelheid).
+
+    PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: BEWUST NOG NIET
+    aangepast in deze ronde. Voor een gloednieuwe tegenstander zijn ALLE
+    spelers hier "onbekend", dus dit is (naast de nu opgeloste
+    scout_opponent()-bottleneck) een minstens even grote kandidaat voor de
+    "eerste analyse is traag"-klacht: elke speler doorloopt hier een volle,
+    Playwright-afhankelijke scrape_player()-aanroep, sequentieel, MET een
+    expliciete time.sleep(delay) (standaard 1.5s) erna. Dit NIET blind
+    parallelliseren omdat (a) scrape_player.py / fetch_period_playwright.py
+    niet zijn nagekeken in deze ronde — meerdere Playwright-instanties
+    tegelijk kunnen resource-/thread-safety-implicaties hebben die ik niet
+    wil gokken, en (b) de sequentiële aanpak hier expliciet als bewuste
+    discretiekeuze gedocumenteerd staat. Zie mijn bericht: dit apart
+    bekijken zodra die bestanden beschikbaar zijn.
 
     PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17: gebruikt nu
     _ensure_profile_safe() i.p.v. een kale fb.save_player_profile()-aanroep,
@@ -462,5 +601,4 @@ def scrape_new_opponent_players(
             failed.append({**p, "error": str(e)})
         if i < total:
             time.sleep(delay)
-
     return {"already_known": len(players) - total, "newly_scraped": done, "failed": failed}
