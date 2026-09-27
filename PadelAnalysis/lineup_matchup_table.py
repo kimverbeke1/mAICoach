@@ -2,10 +2,39 @@
 lineup_matchup_table.py - Opbouw en weergave van de volledige
 "Opstelling-scenario's"-tabel: alle geldige matchups (eigen koppelverdeling
 x tegenstander-opstelling), gegroepeerd, gesorteerd en met AI-doorvraag.
-
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
-volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD.
+volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD,
+behalve de fix hieronder.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27 (op verzoek van Kim:
+"die knop analyse opslaan staat nergens of is althans niet zichtbaar")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd - de knop was niet AFWEZIG, maar extreem diep
+begraven): "Deze analyse opslaan" stond helemaal aan het EINDE van
+_render_all_valid_matchups(), pas bereikbaar nadat ALLE volgende stappen na
+elkaar geslaagd waren: 1) tegenstander-scout gelukt, 2) minstens 2 eigen
+spelers geselecteerd, 3) tegenstander-roster zó geselecteerd/ingesteld dat
+de som van max-per-speler EXACT gelijk is aan 2x het aantal wedstrijden
+(anders wordt er stilzwijgend NIETS berekend - geen foutmelding, gewoon 0
+theoretische opstellingen), 4) expliciet op "Bereken alle geldige
+matchups" geklikt, 5) en dan nog voorbij de volledige matchup-tabel,
+gegroepeerde opstellingen, "Beste opstelling voor..."-tabel, platte tabel
+EN de AI-sectie scrollen. Voor een eerste analyse van een nieuwe
+tegenstander (zonder historische ontmoetingen) is stap 3 foutgevoelig en
+onopvallend - een kleine afronding/wijziging in de multiselect kan de som
+laten mismatchen, waardoor de hele verdere pijplijn (en dus de knop) nooit
+bereikt wordt, zonder duidelijke melding waarom.
+FIX: de "Analyse opslaan"-knop (en de bijhorende payload-opbouw) is
+VERPLAATST naar direct na de regel "X geldige matchup(s) gevonden" -
+dus zodra all_matchups niet leeg is, VOOR de zware rendering van
+gegroepeerde opstellingen/tabellen/AI-sectie. Functioneel volledig
+ongewijzigd (zelfde payload, zelfde fb.save_lineup_analysis()-aanroep,
+zelfde key) - enkel de POSITIE in de pagina is aangepast, zodat opslaan
+niet langer vereist dat je eerst door de volledige resultatensectie
+scrolt. Stap 3 hierboven (de som-mismatch) blijft een aandachtspunt maar
+is nu tenminste geen extra drempel meer BOVENOP een compleet verscholen
+knop.
 """
 import streamlit as st
 from dashboard_common import fb, taa
@@ -16,12 +45,9 @@ from lineup_rotation import (
     _generate_theoretical_opponent_boards_with_repeats,
     _historical_opponent_boards_list, _collect_unique_opponent_lineups,
 )
-
 _MATCHUP_DISPLAY_DEFAULT_N = 15
 _MAX_TOTAL_MATCHUPS = 800
 _THEORETICAL_MAX_VARIANTS = 300
-
-
 def _build_all_valid_matchups(
     unique_opponent_lineups: dict,
     available_ids: list, max_per_player: dict,
@@ -83,11 +109,9 @@ def _build_all_valid_matchups(
                 break
         if truncated and len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
             break
-
     def _sort_key(m):
         ebw = m.get("expected_boards_won")
         return ebw if ebw is not None else m.get("total_score", 0.0)
-
     all_matchups.sort(key=_sort_key, reverse=True)
     diagnostics = {
         "own_structures_total": len(own_structures),
@@ -96,17 +120,11 @@ def _build_all_valid_matchups(
         "own_valid": len(valid_own_options),
     }
     return all_matchups, truncated, total_seen, diagnostics
-
-
 def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
-
-
 _TABLE_CHAR_WIDTH_PX = 6.6
 _TABLE_COL_MIN_WIDTH = 90
 _TABLE_COL_MAX_WIDTH = 240
-
-
 def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
     max_len = 0
     for v in values:
@@ -115,18 +133,12 @@ def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, 
         max_len = max(max_len, len(str(v)))
     width = int(max_len * _TABLE_CHAR_WIDTH_PX) + 24
     return max(min_width, min(max_width, width))
-
-
 def _compliance_badge(fully_compliant: bool, rank_data_incomplete: bool = False) -> str:
     if rank_data_incomplete:
         return "onzeker"
     return "OK" if fully_compliant else "NIET"
-
-
 def _own_lineup_group_key(assignment: list) -> frozenset:
     return frozenset(frozenset(a["our_pair"]) for a in assignment)
-
-
 def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
     rows = []
     board_column_names: list = []
@@ -166,8 +178,6 @@ def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
             row["Vorige keer"] = ""
         rows.append(row)
     return rows, board_column_names
-
-
 def _matchup_table_column_config(table_rows: list, board_column_names: list) -> tuple:
     column_config = {
         "#": st.column_config.NumberColumn("#", width="small"),
@@ -192,8 +202,6 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
     column_order += ["Toelichting", "Vorige keer"]
     return column_config, column_order
-
-
 def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_global: dict) -> None:
     if not all_matchups:
         return
@@ -201,11 +209,9 @@ def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_glo
     for m in all_matchups:
         key = _own_lineup_group_key(m["assignment"])
         groups.setdefault(key, []).append(m)
-
     def _sort_val(m):
         ebw = m.get("expected_boards_won")
         return ebw if ebw is not None else m.get("total_score", 0.0)
-
     st.markdown('<div class="section-header">Onze opstellingen - klap open voor de tegenstander-opstellingen</div>', unsafe_allow_html=True)
     st.caption(
         "Elke groep hieronder is 1 unieke combinatie van ONZE koppels (ongeacht bordvolgorde of tegen wie), "
@@ -256,8 +262,6 @@ def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_glo
                 column_config=column_config, column_order=column_order,
             )
     st.divider()
-
-
 def _render_best_for_selected_player(
     all_matchups: list, sel_player_id: str, name_lookup_global: dict,
 ) -> None:
@@ -377,8 +381,43 @@ def _render_best_for_selected_player(
         f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}."
     )
     st.divider()
-
-
+def _render_save_analysis_button(
+    all_matchups: list, opp: dict, available_ids: list, name_lookup_global: dict,
+    total_boards, max_per_player: dict, sel_player_id,
+) -> None:
+    """PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27: uitgelicht in
+    een eigen functie zodat de knop VROEG in de resultatensectie kan
+    verschijnen (direct na "X geldige matchup(s) gevonden"), i.p.v. pas na
+    de volledige tabel/groepen/AI-sectie - zie de uitgebreide toelichting
+    bovenaan dit bestand. Payload/opslag-logica zelf: ONGEWIJZIGD."""
+    if st.button("Deze analyse opslaan (alle getoonde matchups)", key=f"save_all_matchups_{opp['ploeg_id']}"):
+        payload = {
+            "opponent_name": opp.get("name"), "opponent_ploeg_id": opp.get("ploeg_id"),
+            "own_player_ids": available_ids,
+            "own_player_labels": [name_lookup_global.get(pid, pid) for pid in available_ids],
+            "total_boards": int(total_boards), "max_per_player": max_per_player,
+            "scenarios": [
+                {
+                    "s_idx": rank, "fixture_label": (
+                        f"Matchup #{rank}" + (f" (zoals gespeeld op {', '.join(m['historical_labels'])})" if m["is_historical"] else "")
+                        + ("" if m.get("fully_compliant", True) else " [niet-reglementaire variant]")
+                    ),
+                    "boards_count": len(m["assignment"]),
+                    "options": [{
+                        "total_score": m["total_score"], "expected_boards_won": m.get("expected_boards_won"),
+                        "assignment": [
+                            {
+                                "our_pair_labels": [name_lookup_global.get(a["our_pair"][0], a["our_pair"][0]), name_lookup_global.get(a["our_pair"][1], a["our_pair"][1])],
+                                "synergy": a["synergy"], "edge": a["edge"], "win_probability": a.get("win_probability"),
+                                "opponent_names": [p.get("name", "?") for p in a["opponent_board"]["opponent_pair"]],
+                            } for a in m["assignment"]
+                        ],
+                    }],
+                } for rank, m in enumerate(all_matchups, start=1)
+            ],
+        }
+        doc_id = fb.save_lineup_analysis(sel_player_id, payload)
+        st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
 def _render_all_valid_matchups(
     bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
@@ -581,6 +620,15 @@ def _render_all_valid_matchups(
             "gekozen afdeling en het aantal beschikbare spelers."
         )
         return []
+    # PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27: de "Analyse
+    # opslaan"-knop staat nu HIER, meteen zodra all_matchups bevestigd
+    # niet-leeg is - VOOR de zware rendering hieronder (gegroepeerde
+    # opstellingen, "Beste voor..."-tabel, platte tabel, AI-sectie). Zie
+    # de uitgebreide toelichting bovenaan dit bestand.
+    _render_save_analysis_button(
+        all_matchups, opp, available_ids, name_lookup_global, total_boards, max_per_player, sel_player_id,
+    )
+    st.divider()
     _render_own_lineup_groups_with_opponents(all_matchups, name_lookup_global)
     _render_best_for_selected_player(all_matchups, sel_player_id, name_lookup_global)
     with st.expander("Platte tabel (alle matchups los naast elkaar, sorteerbaar per kolom)", expanded=False):
@@ -652,32 +700,4 @@ def _render_all_valid_matchups(
                         {"role": "assistant", "content": vervolg},
                     ]
                     st.rerun()
-    if st.button("Deze analyse opslaan (alle getoonde matchups)", key=f"save_all_matchups_{opp['ploeg_id']}"):
-        payload = {
-            "opponent_name": opp.get("name"), "opponent_ploeg_id": opp.get("ploeg_id"),
-            "own_player_ids": available_ids,
-            "own_player_labels": [name_lookup_global.get(pid, pid) for pid in available_ids],
-            "total_boards": int(total_boards), "max_per_player": max_per_player,
-            "scenarios": [
-                {
-                    "s_idx": rank, "fixture_label": (
-                        f"Matchup #{rank}" + (f" (zoals gespeeld op {', '.join(m['historical_labels'])})" if m["is_historical"] else "")
-                        + ("" if m.get("fully_compliant", True) else " [niet-reglementaire variant]")
-                    ),
-                    "boards_count": len(m["assignment"]),
-                    "options": [{
-                        "total_score": m["total_score"], "expected_boards_won": m.get("expected_boards_won"),
-                        "assignment": [
-                            {
-                                "our_pair_labels": [name_lookup_global.get(a["our_pair"][0], a["our_pair"][0]), name_lookup_global.get(a["our_pair"][1], a["our_pair"][1])],
-                                "synergy": a["synergy"], "edge": a["edge"], "win_probability": a.get("win_probability"),
-                                "opponent_names": [p.get("name", "?") for p in a["opponent_board"]["opponent_pair"]],
-                            } for a in m["assignment"]
-                        ],
-                    }],
-                } for rank, m in enumerate(all_matchups, start=1)
-            ],
-        }
-        doc_id = fb.save_lineup_analysis(sel_player_id, payload)
-        st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
     return all_matchups
