@@ -59,41 +59,38 @@ bevestigde regel voor de precieze cascade (kan per bond/reglement
 verschillen: punten onderling, sets onderling, games onderling, ...).
 Dit wordt EXPLICIET als "onbepaald - controleer handmatig" gerapporteerd
 in plaats van een gok te presenteren als feit.
+EERLIJKE, NOG OPEN KANTTEKENING (PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED_
+2026-09-27, op melding van Kim: "systeem denkt dat wij verloren hebben
+tegen TC eleven maar wij hebben gewonnen"): _encounter_result() hieronder
+leidt win/verlies af uit het RUWE "score"-tekstveld van het poule-schema
+(schedule_scraper.parse_poule_schedule()) - een veld dat, in tegenstelling
+tot het "Uitslag"-veld dat elders in de app (lineup_opponent_history.py,
+na een eerder vergelijkbare bug - PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-
+26) als autoritatieve bron gebruikt wordt, NOOIT apart geverifieerd is
+tegen echte win/verlies-uitkomsten. Zie diagnose_h2h_score.py voor een
+gericht diagnosescript om de exacte oorzaak (orientatie thuis/uit
+verwisseld, of een ander score-formaat dan verwacht) vast te stellen VOOR
+dit blind te "fixen" - een gok zou hier net zo goed een nieuwe, andere bug
+kunnen introduceren.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_H2H_SCORE_MULTI_SET_FORMAT_FIX_2026-09-27 (op melding van
-Kim: "systeem denkt dat wij verloren hebben tegen TC eleven maar wij
-hebben gewonnen" - bevestigd via diagnose_h2h_score.py met Kim's ECHTE
-data, geen aanname)
+PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27 (op verzoek van
+Kim: "Nu vind ik de uitleg een beetje te simpel bij elke scenario [...]
+Ik zoek dus eerder wat en/of statements maar dan duidelijk case by case
+opgelijst")
 --------------------------------------------------------------------------
-ROOT CAUSE (bevestigd, geen gok): het "score"-veld van schedule_scraper.
-parse_poule_schedule() bevat voor een AFGERONDE ontmoeting NIET enkel de
-bordentelling, maar 3 door " / " gescheiden getallenparen: bordentelling,
-setstotaal, en spellentotaal - bv. "1-3 / 3-7 / 41-59". De VORIGE regex
-(letterlijk: begin-anker, optionele spatie, 1+ cijfers, optionele spatie,
-een - of /, optionele spatie, 1+ cijfers, optionele spatie, EINDE-anker)
-matchte enkel het EERSTE (of enige) paar ALS er verder niets meer volgde. Zodra er, zoals in de echte data, nog 2 paren achter dat
-eerste paar stonden, faalde de VOLLEDIGE match (de `$` kon nooit bereikt
-worden na enkel het eerste paar) en gaf _encounter_result() domweg None
-terug voor VRIJWEL ELKE afgeronde ontmoeting in Kim's poule - bevestigd:
-alle 3 gespeelde ELEVEN-fixtures in Kim's diagnose gaven None, GEEN ENKELE
-gaf per ongeluk het omgekeerde resultaat. Dat "None" (onbeslist) liet
-_head_to_head_winner() vervolgens NOOIT een winnaar vinden voor de
-onderlinge confrontatie, waardoor de kwalificatie-tie-break-logica
-terugviel op "onbepaald" - wat in de UI feitelijk aanvoelde als "we zouden
-kunnen verliezen" i.p.v. de correcte, al bevestigde overwinning te tonen.
-FIX: de regex verliest de vaste `$`-eis aan het einde en pakt nu
-UITSLUITEND het EERSTE getallenpaar in de string (de bordentelling),
-ongeacht wat daarna nog volgt (set-/spellenscores, of niets). Getest tegen
-Kim's 3 echte score-strings ("1-3 / 3-7 / 41-59", "1-3 / 4-6 / 45-49",
-"3-1 / 6-2 / 39-26") EN tegen het oude, enkelvoudige formaat ("3-1",
-zonder set-/spellendetail) om te bevestigen dat beide formaten nu correct
-verwerkt worden.
-EERLIJKE, NOG OPEN KANTTEKENING: dit gaat ervan uit dat het EERSTE paar in
-de score-string altijd de bordentelling is (bevestigd voor Kim's 3
-voorbeelden - "1-3" als eerste paar bij een 4-bordenwedstrijd, gevolgd
-door sets dan spellen). Zou een ANDERE volgorde ooit voorkomen (bv. spellen
-eerst), dan zou deze aanname alsnog fout gaan - er is geen apart, expliciet
-"dit-is-de-bordentelling"-label in de brondata om dat 100% te garanderen.
+ROOT CAUSE: de vorige "wat_nodig"-tekst voor de STRIKT-BOVEN-ONS-branch
+("moet minstens X punt(en) minder halen dan hun maximum (Y) - bv.
+minstens 1 resterende wedstrijd niet winnen") klopte TOEVALLIG bij PRECIES
+1 resterende wedstrijd voor die concurrent, maar is WISKUNDIG ONVOLLEDIG/
+verwarrend zodra een concurrent 2+ resterende wedstrijden heeft: "minstens
+3 punten minder halen" kan bijvoorbeeld NOOIT met slechts 1 wedstrijd niet
+winnen (dat scheelt maximaal 2 punten), maar de tekst suggereerde dat wel.
+FIX: _describe_points_shed_requirement() hieronder berekent nu een EXACTE,
+voor ELK aantal resterende wedstrijden correcte puntengrens ("mogen in
+totaal hoogstens X punten halen over hun Y resterende wedstrijden, i.p.v.
+hun rekenkundig maximum Z") - een AND/OF-vrije, maar wel altijd wiskundig
+kloppende absolute grens, in plaats van een enkel "bv."-voorbeeld dat bij
+meerdere resterende wedstrijden misleidend kan zijn.
 """
 from __future__ import annotations
 import itertools
@@ -229,20 +226,18 @@ def parse_poule_ranking(html: str) -> dict:
     return result
 def _encounter_result(score_text: Optional[str]) -> Optional[str]:
     """Leidt "win"/"draw"/"loss" (voor de THUISPLOEG) af uit de bordscore
-    van 1 ontmoeting.
-    PADEL_ANALYSIS_H2H_SCORE_MULTI_SET_FORMAT_FIX_2026-09-27: het "score"-
-    veld bevat voor een afgeronde ontmoeting 3 door " / " gescheiden
-    getallenparen (bordentelling, settotaal, spellentotaal), bv.
-    "1-3 / 3-7 / 41-59" - GEEN enkel paar zoals eerder aangenomen. Deze
-    functie pakt nu UITSLUITEND het EERSTE paar (de bordentelling),
-    ongeacht wat daarna nog volgt. Zie moduledocstring voor de volledige,
-    met Kim's echte data bevestigde root-cause-analyse.
-    Geeft None terug als zelfs het eerste paar niet leesbaar is (dan wordt
-    deze ontmoeting overgeslagen i.p.v. een verzonnen resultaat te
-    gebruiken)."""
+    van 1 ontmoeting (bv. "4-0", "3-1", "2-2", "1-3", "0-4").
+    Geeft None terug als de score niet leesbaar is (dan wordt deze
+    ontmoeting overgeslagen i.p.v. een verzonnen resultaat te gebruiken).
+    LET OP (PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED_2026-09-27): dit
+    interpreteert het "score"-veld van schedule_scraper.parse_poule_
+    schedule() als "aantal gewonnen borden thuis - aantal gewonnen borden
+    uit". Dat veld is NOOIT apart geverifieerd tegen echte uitslagen (zie
+    moduledocstring) - gebruik diagnose_h2h_score.py om dit te bevestigen
+    voor een specifieke, betwiste ontmoeting voor je hierop een fix baseert."""
     if not score_text:
         return None
-    m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)", str(score_text).strip())
+    m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)\s*$", str(score_text).strip())
     if not m:
         return None
     home, away = int(m.group(1)), int(m.group(2))
@@ -282,9 +277,10 @@ def _head_to_head_winner(fixtures: list, ploeg_id_a: str, ploeg_id_b: str) -> Op
 def _describe_points_shed_requirement(n_free_remaining: int, points_to_shed: int) -> str:
     """PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27: vertaalt
     "moet X punten minder halen dan hun maximum" naar een EXACTE, voor élk
-    aantal resterende wedstrijden correcte puntengrens - i.p.v. een tekst
-    die enkel bij PRECIES 1 resterende wedstrijd klopte en bij 2+
-    misleidend/onvolledig was."""
+    aantal resterende wedstrijden correcte puntengrens - i.p.v. de vorige
+    tekst ("bv. minstens 1 resterende wedstrijd niet winnen") die enkel
+    bij PRECIES 1 resterende wedstrijd klopte en bij 2+ misleidend/
+    onvolledig was. Zie moduledocstring voor de volledige toelichting."""
     if n_free_remaining <= 0:
         return (
             "hun puntentotaal ligt al vast (geen resterende wedstrijden meer in onze data) - "
@@ -324,6 +320,7 @@ def compute_qualification_scenarios(
                          "wat_nodig": "<uitleg>"},
                         ...
                     ],
+                    "multi_way_tie_warning": bool,
                 },
                 ...
             ],
@@ -349,6 +346,7 @@ def compute_qualification_scenarios(
         )
         own_final = points_now[own_id] + own_added
         threats = []
+        multi_way_tie_ids = set()
         for competitor_id, competitor_points in points_now.items():
             if competitor_id == own_id:
                 continue
@@ -372,6 +370,10 @@ def compute_qualification_scenarios(
                     n_free_remaining += 1
             competitor_ceiling = competitor_points + fixed_bonus + WIN_POINTS * n_free_remaining
             if competitor_ceiling > own_final:
+                # PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27:
+                # exacte, voor elk aantal resterende wedstrijden correcte
+                # puntengrens i.p.v. het vorige, enkel-bij-1-wedstrijd-
+                # kloppende "bv." voorbeeld.
                 threats.append({
                     "ploeg_id": competitor_id, "ploeg_naam": names.get(competitor_id, competitor_id),
                     "hun_max_punten": competitor_ceiling,
@@ -443,8 +445,17 @@ def compute_qualification_scenarios(
                     })
         if len(threats) == 0 or len(threats) == 1:
             status = "gegarandeerd"
+        elif n_own_remaining == 0 and own_final <= min(
+            (points_now[c] for c in points_now if c != own_id), default=0,
+        ) - 1:
+            status = "onmogelijk"
         else:
             status = "afhankelijk"
+        # Expliciete "onmogelijk"-detectie: zelfs met own_final vast (geen
+        # resterende matchen meer), zijn er al >= QUALIFYING_PLACES
+        # concurrenten met een HUIDIG (niet-hypothetisch) puntenaantal dat
+        # own_final overtreft - dan is het gegarandeerd voorbij, ongeacht
+        # wat de concurrenten nog doen.
         if n_own_remaining == 0:
             already_ahead = sum(
                 1 for c, p in points_now.items() if c != own_id and p > own_final
