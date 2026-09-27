@@ -37,17 +37,44 @@ waarbij dat WEL toevallig lukte, voegde dan de VOLLEDIGE, voor Kim
 irrelevante poule (bv. Poule C) toe aan de discovery-resultaten.
 FIX: get_tracked_profiles() gebruikt nu een EXPLICIETE allowlist van
 player_id's om als "eigen team"-detectiebron te gebruiken, in plaats van
-"elk profiel met eender welk opgeslagen schema":
-  - PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden): expliciete lijst,
-    voor het geval Kim bewust meerdere eigen spelers/teams wil volgen.
-  - Zonder die env var: valt terug op ENKEL de app-brede "home_player_id"
-    (fb.get_app_settings()) - Kim's eigen, hoofdzakelijk gevolgde profiel.
+"elk profiel met eender welk opgeslagen schema" (zie get_tracked_player_
+ids() voor hoe die allowlist wordt samengesteld).
 Dit is een BEWUSTE gedragswijziging t.o.v. de vorige, te brede aanpak
 ("alle profielen met een schema") - de vorige aanpak leek in de praktijk
 vooral RUIS toe te voegen (tegenstander-profielen met een toevallig
-opgeslagen, irrelevant schema), niet legitieme extra eigen teams. Wil Kim
-toch meerdere eigen teams tegelijk volgen, dan kan dat gewoon via
-PRESCAN_TRACKED_PLAYER_IDS zonder dit bestand opnieuw te moeten aanpassen.
+opgeslagen, irrelevant schema), niet legitieme extra eigen teams.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_AUTO_TRACK_VIA_SAVED_ANALYSES_2026-09-27 (op verzoek van
+Kim: "ik zou willen dat de code dat automatisch detecteert omdat ik al
+analyses gedaan heb voor de ploeg van anneleen [...] een gestarte analyse
+van een ploeg mag dat triggeren")
+--------------------------------------------------------------------------
+Tot nu toe moest een 2e (of verdere) eigen team handmatig via de
+PRESCAN_TRACKED_PLAYER_IDS-env-var ingesteld worden - en enkel lokaal in
+een PowerShell-sessie, NOOIT in de nachtelijke workflow zelf (die env var
+werd daar nergens doorgegeven). Kim wil dit automatisch: als hij al een
+opstelling-analyse voor een speler heeft OPGESLAGEN (via de "Analyse
+opslaan"-knop in Opstelling-scenario's - zie fb.save_lineup_analysis() /
+SAVED_LINEUP_ANALYSES_COLLECTION in firebase_service.py), dan bewijst dat
+al dat deze speler een "eigen team" is die Kim bewust volgt - dat mag dan
+volstaan om hem/haar automatisch aan de tracked-lijst toe te voegen, zonder
+een env var te moeten instellen of dit bestand opnieuw aan te passen.
+FIX: get_tracked_player_ids() combineert nu 3 bronnen (unie, geen
+uitsluiting):
+  1. de app-brede "home_player_id" (fb.get_app_settings()) - Kim zelf,
+     altijd inbegrepen zoals voorheen.
+  2. AUTOMATISCH: elke unieke owner_player_id uit fb.list_lineup_
+     analyses() - elke speler voor wie ooit een opstelling-analyse werd
+     opgeslagen, wordt voortaan vanzelf mee gevolgd. Dit is precies het
+     "gestarte analyse triggert tracking"-criterium dat Kim vroeg.
+  3. PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden) blijft bestaan als
+     AANVULLENDE, handmatige uitzondering (bv. een speler volgen waarvoor
+     nog nooit een analyse werd opgeslagen) - niet langer de ENIGE manier.
+EERLIJKE BEPERKING: dit criterium detecteert enkel OPGESLAGEN analyses
+(expliciet via de "Analyse opslaan"-knop), niet elke keer dat een speler
+enkel bij "Toon analyse voor" geselecteerd werd zonder op te slaan - er is
+geen ander persistent spoor van dat laatste in de app. Is dat onvoldoende,
+dan blijft PRESCAN_TRACKED_PLAYER_IDS de aangewezen aanvulling.
 --------------------------------------------------------------------------
 STAP 1: welke poules volgen we? (enkel de expliciet toegestane profielen)
 --------------------------------------------------------------------------
@@ -177,34 +204,49 @@ def get_new_players_max() -> int:
 def get_delay_between_teams() -> float:
     return _get_float_env("PRESCAN_DELAY_BETWEEN_TEAMS", DEFAULT_DELAY_BETWEEN_TEAMS)
 def get_tracked_player_ids() -> list[str]:
-    """PADEL_ANALYSIS_TRACKED_PROFILES_SCOPE_FIX_2026-09-27: bepaalt WELKE
-    player_id's als 'eigen team'-detectiebron gebruikt worden - een
-    EXPLICIETE, kleine lijst i.p.v. "elk profiel met eender welk
-    opgeslagen schema".
-    Volgorde van voorrang:
-      1. PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden) - expliciete
-         lijst, voor wie bewust meerdere eigen spelers/teams wil volgen.
-      2. Anders: enkel de app-brede "home_player_id"
-         (fb.get_app_settings()) - de veilige, minimale default."""
-    raw = os.environ.get("PRESCAN_TRACKED_PLAYER_IDS", "").strip()
-    if raw:
-        ids = [p.strip() for p in raw.split(",") if p.strip()]
-        if ids:
-            logger.info(f"PRESCAN_TRACKED_PLAYER_IDS expliciet gezet: {ids}")
-            return ids
+    """PADEL_ANALYSIS_TRACKED_PROFILES_SCOPE_FIX_2026-09-27 +
+    PADEL_ANALYSIS_AUTO_TRACK_VIA_SAVED_ANALYSES_2026-09-27: bepaalt WELKE
+    player_id's als 'eigen team'-detectiebron gebruikt worden - zie de
+    uitgebreide toelichting bovenaan dit bestand. Combineert 3 bronnen
+    (unie, geen enkele sluit de andere uit):
+      1. home_player_id (fb.get_app_settings()) - Kim zelf, altijd.
+      2. AUTOMATISCH: elke unieke owner_player_id uit fb.list_lineup_
+         analyses() - wie ooit een analyse liet opslaan, wordt vanzelf
+         mee gevolgd (het "gestarte analyse triggert tracking"-criterium).
+      3. PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden) - optionele,
+         AANVULLENDE handmatige uitzondering bovenop de eerste 2 bronnen."""
+    ids: set[str] = set()
     try:
         settings = fb.get_app_settings() or {}
+        home_id = settings.get("home_player_id")
+        if home_id:
+            ids.add(str(home_id))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Kon app-instellingen niet lezen: {e}")
-        return []
-    home_id = settings.get("home_player_id")
-    if not home_id:
+    try:
+        analyses = fb.list_lineup_analyses()
+        auto_ids = {str(a.get("owner_player_id")) for a in analyses if a.get("owner_player_id")}
+        if auto_ids - ids:
+            logger.info(
+                f"Automatisch mee gevolgd via opgeslagen opstelling-analyses: "
+                f"{sorted(auto_ids - ids)}"
+            )
+        ids |= auto_ids
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Kon opgeslagen analyses niet lezen voor auto-tracking: {e}")
+    raw = os.environ.get("PRESCAN_TRACKED_PLAYER_IDS", "").strip()
+    if raw:
+        extra_ids = {p.strip() for p in raw.split(",") if p.strip()}
+        if extra_ids - ids:
+            logger.info(f"PRESCAN_TRACKED_PLAYER_IDS voegt extra toe: {sorted(extra_ids - ids)}")
+        ids |= extra_ids
+    if not ids:
         logger.warning(
-            "Geen PRESCAN_TRACKED_PLAYER_IDS gezet EN geen home_player_id gevonden in de "
-            "app-instellingen - niets om te volgen."
+            "Geen home_player_id, geen opgeslagen analyses, en geen PRESCAN_TRACKED_PLAYER_IDS "
+            "- niets om te volgen."
         )
         return []
-    return [str(home_id)]
+    return sorted(ids)
 def get_tracked_profiles() -> list[dict]:
     """Haalt de player_profiles-documenten op voor exact de toegestane
     player_id's (zie get_tracked_player_ids()) - enkel diegene met een
