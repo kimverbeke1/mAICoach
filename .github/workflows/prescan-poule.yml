@@ -7,7 +7,7 @@
 #
 # Doel: ALLE ploegen in de poule (niet enkel de eerstvolgende tegenstander)
 # proactief laten voorzien van matchdata + playing strength + klassement,
-# ZODAT wanneer Kim naar "🌐 Andere ploegen" gaat (page_lineup_lab.py,
+# ZODAT wanneer Kim naar "Andere ploegen" gaat (page_lineup_lab.py,
 # poule_teams_ui.py) of naar zijn eigen "Volgende match" analyse, de data
 # meestal al klaarstaat i.p.v. pas dan opgehaald te moeten worden.
 #
@@ -76,12 +76,40 @@
 # Handmatig forceren blijft gewoon mogelijk via workflow_dispatch
 # hieronder, met dezelfde inputs als voorheen.
 #
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27 (op verzoek van Kim, na
+# een concrete workflow-timeout: "duurde te lang [...] bekijk of logica
+# klopt. Bekijk ook als dat scrapen sneller kan en bekijk om eventueel
+# minder spelers te scrapen ne meer in stukken te kappen")
+# --------------------------------------------------------------------------
+# ROOT CAUSE (bevestigd door de workflow-log te analyseren, zie
+# ci_scrape_all.py/scrape_player.py voor de volledige toelichting):
+# scrape_player.py scrapet voor een SPLINTERNIEUWE speler (nog geen
+# bestaand document) ALLE 16 beschikbare periodes (tot 2017 terug),
+# ONGEACHT mode="missing" - dat kostte ~2,5 minuut per nieuwe speler. Bij
+# tot 15 nieuwe spelers in 1 run (zie new_players_max hieronder) liep de
+# job daardoor ver over de 25-minuten-limiet.
+#
+# FIX (in ci_scrape_all.py/scrape_player.py, dit bestand geeft enkel de
+# nieuwe env var door): MAX_NEW_PLAYER_PERIODS beperkt hoeveel periodes
+# een SPLINTERNIEUWE speler in deze prescan initieel krijgt (3 = enkel de
+# 3 meest recente periodes, i.p.v. alle 16). Reeds bekende spelers (het
+# overgrote deel van elke run na de eerste paar nachten) zijn hierdoor NIET
+# beïnvloed - die krijgen via mode="missing" toch al een veel kleinere
+# periodes-lijst. De volledige historiek van een nieuwe speler kan later,
+# bij een gerichte team-analyse in de app zelf, alsnog aangevuld worden -
+# dat pad gebruikt deze cap niet.
+#
+# Instelbaar via workflow_dispatch (max_new_player_periods hieronder),
+# consistent met hoe padelstat_max/klassement_max al werken - handig om
+# bij een handmatige test tijdelijk te verruimen/verkleinen zonder dit
+# bestand te moeten aanpassen.
+#
 # Vereist repo secret (zelfde als de andere workflows):
 #   FIREBASE_SERVICE_ACCOUNT_JSON
 #
 # Handmatig testen: Actions -> Poule pre-scan -> Run workflow.
 name: Poule pre-scan
-
 on:
   schedule:
     # PADEL_ANALYSIS_PRESCAN_DAILY_SCHEDULE_2026-09-26: dagelijks om 00:37
@@ -93,6 +121,10 @@ on:
         description: "Max. aantal VOLLEDIG NIEUWE spelers deze run (rest volgt een volgende run)"
         required: false
         default: "15"
+      max_new_player_periods:
+        description: "Max. aantal periodes te scrapen voor een SPLINTERNIEUWE speler (voorkomt timeout - zie PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27)"
+        required: false
+        default: "3"
       padelstat_max:
         description: "Max. aantal spelers waarvoor playing strength deze run ververst wordt"
         required: false
@@ -101,11 +133,9 @@ on:
         description: "Max. aantal spelers waarvoor klassement deze run opgehaald wordt"
         required: false
         default: "8"
-
 concurrency:
   group: prescan-poule
   cancel-in-progress: false
-
 jobs:
   discover:
     runs-on: ubuntu-latest
@@ -134,7 +164,6 @@ jobs:
           PRESCAN_NEW_PLAYERS_MAX: ${{ github.event.inputs.new_players_max || '15' }}
         run: |
           python discover_poule_players.py
-
   prescan_scrape:
     needs: discover
     runs-on: ubuntu-latest
@@ -160,6 +189,11 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           PLAYER_IDS: ${{ needs.discover.outputs.player_ids }}
           MODE: missing
+          # PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27: zie de
+          # uitgebreide toelichting bovenaan dit bestand en in
+          # ci_scrape_all.py - dit is de daadwerkelijke fix voor de
+          # timeout die deze job eerder trof.
+          MAX_NEW_PLAYER_PERIODS: ${{ github.event.inputs.max_new_player_periods || '3' }}
           ENABLE_ENRICH: "true"
           ENABLE_PADELSTAT: "true"
           PADELSTAT_MAX: ${{ github.event.inputs.padelstat_max || '25' }}
