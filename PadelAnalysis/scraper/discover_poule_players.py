@@ -5,124 +5,103 @@ op verzoek van Kim, chat 2026-09-19).
 
 Kim's melding, samengevat: "Nu ik er aan denk is het misschien wel beter om
 in de achtergrond al meteen alle spelers van je poule op te halen op
-voorhand. bv. om middernacht. Dat kan gemakkelijk na match 1. [...] rekening
-houden dat een ploeg plots extra spelers kan gebruikt hebben. [...] zo veel
-mogelijk op voorhand gescrapt is en dan zeker ook goed op letten dat je
-wanneer nodig enkel de missing data of data die kan gewijzigd is refreshen."
-
-Locatie: PadelAnalysis/scraper/discover_poule_players.py (naast
-ci_scrape_all.py, refresh_padelstat_only.py, enrich_opponents.py — zelfde
-path-setup patroon).
+voorhand. bv. om middernacht. [...] rekening houden dat een ploeg plots
+extra spelers kan gebruikt hebben. [...] zo veel mogelijk op voorhand
+gescrapt is en dan zeker ook goed op letten dat je wanneer nodig enkel de
+missing data of data die kan gewijzigd is refreshen."
 
 --------------------------------------------------------------------------
 DOEL EN ONTWERPKEUZE: hergebruik, geen nieuwe scrape-logica
 --------------------------------------------------------------------------
 Dit script doet ZELF geen matchdata-, padelstat- of klassement-scrape — het
-bepaalt ENKEL, requests-only (GEEN Playwright nodig, dus snel en licht),
-WELKE spelers er over de VOLLEDIGE poule (niet enkel de eerstvolgende
-tegenstander) besproken moeten worden, en geeft die lijst door aan de
-BESTAANDE, al goed geteste pijplijn (ci_scrape_all.py — matchdata +
-padelstat + klassement, met zijn eigen staleness-/cache-skip-logica).
-
-Waarom dit NIET via enrich_opponents.discover_opponent_players() kan: die
-functie scant UITSLUITEND de matches van de meegegeven player_ids zelf
-(dus onze EIGEN spelers se interclub-tegenstanders/partners) — ploegen die
-we dit seizoen nog nooit gespeeld hebben (bv. de 3de/4de ronde-tegenstander
-in de poule) komen daar NOOIT in voor. Voor een ECHTE volledige poule-
-pre-scrape is dus een ANDERE discovery-bron nodig: het reeds opgeslagen
-poule-schema (interclub_schedule, zie page_lineup_lab.py/schedule_scraper.py)
-geeft ALLE ploegen in de poule, en opponent_scout.scout_opponent() kan van
-ELKE ploeg (niet enkel de eerstvolgende tegenstander) de spelers uit hun
-reeds gespeelde wedstrijden dit seizoen afleiden — via scraper_v2, dus
-UITSLUITEND requests + BeautifulSoup, geen browser nodig.
+bepaalt ENKEL, requests-only, WELKE spelers er over de VOLLEDIGE poule
+besproken moeten worden, en geeft die lijst door aan ci_scrape_all.py.
 
 --------------------------------------------------------------------------
-STAP 1: welke poules volgen we? (alle eigen, gevolgde spelers)
+PADEL_ANALYSIS_TRACKED_PROFILES_SCOPE_FIX_2026-09-27 (op verzoek van Kim:
+"Bij de poule pre-scan log zie ik ploegen van poule C. Geen idee waarom die
+in de lijst komt. Is normaal niet nodig.")
 --------------------------------------------------------------------------
-Elk player_profiles-document met een opgeslagen `interclub_schedule` (dat
-schema wordt gevuld zodra iemand ooit "Volgende match" laadt, zie
-page_lineup_lab.py/schedule_scraper.py) representeert een poule die Kim
-actief volgt. Dit script doorloopt ALLE zulke profielen (niet enkel de
-huidige "home_player_id"), zodat het ook werkt als Kim meerdere spelers/
-teams tegelijk volgt.
+ROOT CAUSE (bevestigd door de nachtelijke log te analyseren): get_tracked_
+profiles() behandelde TOT NU TOE elk player_profiles-document met een
+opgeslagen `interclub_schedule` als "een van Kim's eigen teams om de eigen-
+ploeg-detectie op los te laten" - dus 42 profielen in de laatste run. Een
+groot deel daarvan (Caroline Clement, Depuydt Evelyn, Geeraerts Gertie,
+Lauwers René, Serruys Tracey, e.a. - namen die NERGENS in Kim's eigen
+Poule Q-omgeving voorkomen) zijn in werkelijkheid TEGENSTANDER-profielen
+die ooit, via een andere weg (bv. cross-referentie bij het aanmaken van een
+profiel-stub, of een eerdere, andere analyse), toevallig ZELF ook een
+interclub_schedule opgeslagen kregen - voor een HELEMAAL ANDERE poule
+(Poule C, G) die niets met Kim's eigen team te maken heeft.
 
-Per gevolgd profiel wordt (via schedule_scraper.identify_own_ploeg_id(),
+Voor elk van die profielen probeerde discover_all_poule_teams() alsnog
+"de eigen ploeg" te herkennen (wat vrijwel altijd faalt, vandaar de lange
+lijst "Eigen ploeg niet herkenbaar" in de log) - en de handvol gevallen
+waarbij dat WEL toevallig lukte, voegde dan de VOLLEDIGE, voor Kim
+irrelevante poule (bv. Poule C) toe aan de discovery-resultaten.
+
+FIX: get_tracked_profiles() gebruikt nu een EXPLICIETE allowlist van
+player_id's om als "eigen team"-detectiebron te gebruiken, in plaats van
+"elk profiel met eender welk opgeslagen schema":
+  - PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden): expliciete lijst,
+    voor het geval Kim bewust meerdere eigen spelers/teams wil volgen.
+  - Zonder die env var: valt terug op ENKEL de app-brede "home_player_id"
+    (fb.get_app_settings()) - Kim's eigen, hoofdzakelijk gevolgde profiel.
+Dit is een BEWUSTE gedragswijziging t.o.v. de vorige, te brede aanpak
+("alle profielen met een schema") - de vorige aanpak leek in de praktijk
+vooral RUIS toe te voegen (tegenstander-profielen met een toevallig
+opgeslagen, irrelevant schema), niet legitieme extra eigen teams. Wil Kim
+toch meerdere eigen teams tegelijk volgen, dan kan dat gewoon via
+PRESCAN_TRACKED_PLAYER_IDS zonder dit bestand opnieuw te moeten aanpassen.
+
+--------------------------------------------------------------------------
+STAP 1: welke poules volgen we? (enkel de expliciet toegestane profielen)
+--------------------------------------------------------------------------
+Per toegestaan profiel wordt (via schedule_scraper.identify_own_ploeg_id(),
 dezelfde functie die de UI gebruikt) de EIGEN ploeg herkend en uitgesloten
 — we willen enkel de ANDERE ploegen in de poule pre-scannen.
 
-PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26 (op verzoek van
-Kim: "waarom zou dat nu plots wel moeten werken als het daarnet niet
-werkte [...] los nu eindelijk eens dat probleem op")
---------------------------------------------------------------------------
-ROOT CAUSE (bevestigd door de nachtelijke discover-log opnieuw te
-analyseren nadat de own_display_name-fix al in schedule_scraper.py EN
-page_lineup_lab.py stond, maar de discover-log toch nog steeds "Eigen
-ploeg niet herkenbaar" bleef melden voor zo goed als elk gevolgd profiel):
-identify_own_ploeg_id() werd HIER, in discover_all_poule_teams(), nog
-steeds aangeroepen ZONDER de own_display_name-parameter:
+PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26 (blijft bestaan):
+own_display_name wordt expliciet meegegeven aan identify_own_ploeg_id().
 
-    own_id, _own_id2, _resolved = ss.identify_own_ploeg_id(fixtures, own_matches)
-
-_known_names_for_date() (schedule_scraper.py) kan own_side daardoor
-STRUCTUREEL nooit meer dan de partnernaam bevatten, nooit de naam van de
-speler zelf (zie de uitgebreide root-cause-analyse in schedule_scraper.py
-en page_lineup_lab.py._resolve_own_ploeg_id()) — exact dezelfde bug als
-eerder gevonden voor de interactieve UI, maar hier NOOIT gefixt, want dit
-is een DERDE, apart aanroeppunt van dezelfde functie.
-
-FIX: own_display_name (= profile.get("display_name") of, bij ontbreken,
-het label dat al gebruikt wordt in de logregels) wordt hier nu expliciet
-meegegeven aan identify_own_ploeg_id(), exact zoals in page_lineup_lab.py.
+PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27 (in schedule_scraper.py, niet
+dit bestand): loste een TWEEDE, onafhankelijke oorzaak op van dezelfde
+"Eigen ploeg niet herkenbaar"-melding - een woordvolgorde-verschil tussen
+het profiel se display_name ("Kim Verbeke") en hoe de site namen toont
+("Verbeke Kim"). Zie schedule_scraper.py voor de volledige analyse. Beide
+fixes samen (dit bestand + schedule_scraper.py) waren nodig: de scope-fix
+hier voorkomt dat IRRELEVANTE profielen uberhaupt geprobeerd worden, de
+naam-fix in schedule_scraper.py zorgt dat Kim's EIGEN, wel-relevante
+profiel ook effectief herkend wordt.
 
 --------------------------------------------------------------------------
 STAP 2: per andere ploeg, hun spelers ophalen uit reeds gespeelde matchen
 --------------------------------------------------------------------------
-Voor elke andere ploeg in de poule: hoeveel van hun wedstrijden zijn al
-gespeeld (played=True in het opgeslagen schema)? Is dat er minstens 1, dan
-haalt opponent_scout.scout_opponent() de spelers op UIT AL HUN gespeelde
-wedstrijden dit seizoen (lookback = aantal gespeelde wedstrijden, dus NIET
-beperkt tot de laatste 1 zoals bij de eerstvolgende tegenstander) — dit is
-exact hoe Kim's vraag "een ploeg kan plots extra spelers gebruikt hebben"
-gedekt wordt: een speler die pas in wedstrijd 3 opdook, wordt hier ook
-gevonden, ook al kenden we hem/haar nog niet van wedstrijd 1.
+Zie eerdere versie - ongewijzigd: opponent_scout.scout_opponent() haalt de
+spelers op uit AL HUN gespeelde wedstrijden dit seizoen.
 
 --------------------------------------------------------------------------
 STAP 3: nieuw vs. gekend, en een batch-limiet voor VOLLEDIG nieuwe spelers
 --------------------------------------------------------------------------
-Een reeds gekende speler (heeft al een 'players'-document met matchdata)
-is GOEDKOOP om opnieuw te bekijken: ci_scrape_all.py se mode="missing"
-slaat hem/haar bijna altijd snel over ("up_to_date", geen Playwright-
-sessie nodig) en enrich_opponents.py se padelstat/klassement-staleness-
-check doet hetzelfde. Een VOLLEDIG NIEUWE speler (nog nooit gezien) kost
-wél een echte Playwright-sessie voor matchdata, plus padelstat, plus
-klassement — dat is de dominante tijdskost, en bij een grote poule (bv.
-8 ploegen x 4-5 spelers) kan dat de 30-minuten-limiet van GitHub Actions
-overschrijden bij de EERSTE run.
-
-Fix: nieuwe spelers worden gecapt op PRESCAN_NEW_PLAYERS_MAX (env,
-standaard 15) per run — wie er deze keer niet bij is, wordt bij de
-VOLGENDE (nachtelijke) run GEWOON OPNIEUW gevonden door dezelfde discovery
-hierboven (want die speler heeft dan nog steeds geen 'players'-document),
-en komt dan opnieuw in aanmerking. Geen aparte queue/bookkeeping nodig —
-zelfhelend over meerdere nachten, exact hetzelfde patroon als
-refresh_padelstat_only.py se PADELSTAT_MAX-batching. Nieuwe spelers worden
-VOOR de reeds gekende spelers in de resulterende PLAYER_IDS-lijst gezet,
-zodat ze binnen ci_scrape_all.py se padelstat/klassement-budget (dat de
-volgorde van de meegegeven lijst als prioriteit gebruikt zodra iedereen
-al matchdata heeft, zie _prioritize() in enrich_opponents.py) voorrang
-krijgen op reeds bekende, gewoon-te-verversen spelers.
+Ongewijzigd - zie PRESCAN_NEW_PLAYERS_MAX hieronder.
 
 --------------------------------------------------------------------------
-UITVOER
+BEVRIEZING VAN SPELERS ZONDER RESTERENDE WEDSTRIJDEN
 --------------------------------------------------------------------------
-Schrijft de resulterende, kant-en-klare PLAYER_IDS-string (komma-lijst)
-naar $GITHUB_OUTPUT (voor de volgende workflow-stap/job) EN naar een klein
-Firestore-samenvattingsdocument (app_state/poule_prescan_state) — dat
-laatste is de basis voor een latere "laatst pre-scand op..."-weergave in
-de UI (Fase D3), maar wordt in DIT script al voorzien zodat D3 daar direct
-op kan verder bouwen zonder dit script opnieuw te moeten aanpassen.
+PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (ongewijzigd): per
+opponent-ploeg wordt gecontroleerd of er nog een NIET-gespeelde fixture in
+het gevolgde schema staat; zo niet, dan worden hun spelers gemarkeerd om
+niet langer automatisch ververst te worden. Kim's melding op 2026-09-27
+("Ook rekening houden dat bij gespeelde matchen de data niet meer ververst
+moet worden") bevestigt dat deze regel nog steeds gewenst is - "0 bevroren"
+in de laatste log-run is vermoedelijk CORRECT gedrag (Poule Q-ploegen
+hadden op dat moment allemaal nog 2 van hun 5 wedstrijden te spelen, dus
+terecht nog als "actief" gemarkeerd), niet een teken dat de logica zelf
+stuk is. Zie de toelichting in het antwoord aan Kim voor hoe dit verder te
+verifiëren indien nodig.
 
 Environment variables (optioneel, met veilige defaults):
+    - PRESCAN_TRACKED_PLAYER_IDS (komma-gescheiden player_id's, NIEUW)
     - PRESCAN_NEW_PLAYERS_MAX (getal, standaard 15)
     - PRESCAN_DELAY_BETWEEN_TEAMS (seconden, standaard 1.5)
 
@@ -195,15 +174,59 @@ def get_delay_between_teams() -> float:
     return _get_float_env("PRESCAN_DELAY_BETWEEN_TEAMS", DEFAULT_DELAY_BETWEEN_TEAMS)
 
 
-def get_tracked_profiles() -> list[dict]:
-    """Alle player_profiles die een opgeslagen poule-schema hebben — dit
-    zijn de spelers/teams die Kim actief volgt via 'Volgende match'."""
+def get_tracked_player_ids() -> list[str]:
+    """PADEL_ANALYSIS_TRACKED_PROFILES_SCOPE_FIX_2026-09-27: bepaalt WELKE
+    player_id's als 'eigen team'-detectiebron gebruikt worden - een
+    EXPLICIETE, kleine lijst i.p.v. "elk profiel met eender welk
+    opgeslagen schema" (zie moduledocstring voor de volledige root-cause-
+    analyse van waarom dat laatste irrelevante poules zoals Poule C
+    binnenhaalde).
+
+    Volgorde van voorrang:
+      1. PRESCAN_TRACKED_PLAYER_IDS (env, komma-gescheiden) - expliciete
+         lijst, voor wie bewust meerdere eigen spelers/teams wil volgen.
+      2. Anders: enkel de app-brede "home_player_id"
+         (fb.get_app_settings()) - de veilige, minimale default."""
+    raw = os.environ.get("PRESCAN_TRACKED_PLAYER_IDS", "").strip()
+    if raw:
+        ids = [p.strip() for p in raw.split(",") if p.strip()]
+        if ids:
+            logger.info(f"PRESCAN_TRACKED_PLAYER_IDS expliciet gezet: {ids}")
+            return ids
     try:
-        profiles = fb.search_player_profiles("", limit=10_000) or []
+        settings = fb.get_app_settings() or {}
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Kon profielen niet lezen: {e}")
+        logger.error(f"Kon app-instellingen niet lezen: {e}")
         return []
-    return [p for p in profiles if p.get("interclub_schedule")]
+    home_id = settings.get("home_player_id")
+    if not home_id:
+        logger.warning(
+            "Geen PRESCAN_TRACKED_PLAYER_IDS gezet EN geen home_player_id gevonden in de "
+            "app-instellingen - niets om te volgen."
+        )
+        return []
+    return [str(home_id)]
+
+
+def get_tracked_profiles() -> list[dict]:
+    """Haalt de player_profiles-documenten op voor exact de toegestane
+    player_id's (zie get_tracked_player_ids()) - enkel diegene met een
+    opgeslagen interclub_schedule zijn bruikbaar als discoverybron."""
+    ids = get_tracked_player_ids()
+    profiles = []
+    for pid in ids:
+        try:
+            profile = fb.get_player_profile(pid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{pid}] Kon profiel niet lezen: {e}")
+            continue
+        if profile and profile.get("interclub_schedule"):
+            profiles.append(profile)
+        elif profile:
+            logger.info(f"[{profile.get('display_name') or pid}] Nog geen opgeslagen poule-schema - overgeslagen.")
+        else:
+            logger.warning(f"[{pid}] Geen player_profiles-document gevonden.")
+    return profiles
 
 
 def _own_known_interclub_matches(player_id: str) -> list[dict]:
@@ -220,15 +243,7 @@ def _mark_team_players_frozen_state(
     """PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26: zet (of verwijdert)
     auto_update_frozen op elk speler-profiel van deze ploeg, gebaseerd op of
     de ploeg nog een NIET-gespeelde fixture heeft in een gevolgde poule.
-
-    Dit is een LEVENDE, elke run herberekende status - geen eenmalige,
-    permanente markering. still_upcoming=True zet auto_update_frozen
-    expliciet terug op False (zelf-herstellend bij een gewijzigde
-    kalender), still_upcoming=False zet het op True (regulier/bulk
-    bijwerken van deze speler overslaan - zie enrich_opponents.py).
-
-    Fouten per speler worden gelogd maar blokkeren de rest van de run niet
-    - dit is een aanvullende optimalisatie, geen kritiek pad."""
+    Levende, elke run herberekende status - geen eenmalige markering."""
     for pid in player_ids:
         try:
             fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(pid)).set(
@@ -248,16 +263,14 @@ def _mark_team_players_frozen_state(
 
 
 def discover_all_poule_teams() -> dict:
-    """Doorloopt elk gevolgd eigen-profiel, herkent de eigen ploeg, en
-    verzamelt ALLE ANDERE ploegen (over alle gevolgde poules heen).
+    """Doorloopt elk TOEGESTAAN profiel (zie get_tracked_profiles()),
+    herkent de eigen ploeg, en verzamelt ALLE ANDERE ploegen (over alle
+    gevolgde poules heen).
 
-    Returns {ploeg_id: {"name":..., "poule_label":..., "fixtures": [...]}}.
-    Bij meerdere gevolgde profielen in DEZELFDE poule wordt de eerste
-    gevonden fixtures-lijst gebruikt (ze zijn identiek, gewoon uit een
-    ander profiel opgeslagen)."""
+    Returns {ploeg_id: {"name":..., "poule_label":..., "fixtures": [...]}}."""
     teams: dict = {}
     tracked = get_tracked_profiles()
-    logger.info(f"{len(tracked)} gevolgd(e) eigen-speler-profiel(en) met opgeslagen poule-schema gevonden.")
+    logger.info(f"{len(tracked)} toegestaan(e) eigen-speler-profiel(en) met opgeslagen poule-schema gevonden.")
     for profile in tracked:
         pid = profile.get("player_id")
         label = profile.get("display_name") or pid
@@ -266,11 +279,11 @@ def discover_all_poule_teams() -> dict:
             continue
         own_matches = _own_known_interclub_matches(pid)
         try:
-            # PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26: zie
-            # de uitgebreide toelichting in de moduledocstring hierboven -
-            # own_display_name werd hier voorheen NIET meegegeven, waardoor
-            # de own_display_name-fix in schedule_scraper.py hier in de
-            # praktijk NUL effect had, ook al stond die fix er wel al in.
+            # PADEL_ANALYSIS_DISCOVER_OWN_NAME_MISSING_FIX_2026-09-26 +
+            # PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27 (schedule_
+            # scraper.py): own_display_name wordt hier doorgegeven, en
+            # wordt sinds de woordvolgorde-fix ook effectief herkend als
+            # de site een andere naamvolgorde toont dan het profiel.
             own_id, _own_id2, _resolved = ss.identify_own_ploeg_id(
                 fixtures, own_matches, own_display_name=label,
             )
@@ -300,19 +313,12 @@ def discover_all_poule_teams() -> dict:
 
 def discover_players_for_team(ploeg_id: str, team_info: dict) -> dict:
     """Voor 1 ploeg: hun spelers uit AL HUN gespeelde wedstrijden dit
-    seizoen (niet enkel de meest recente), via opponent_scout.scout_
-    opponent() — requests-only, geen Playwright nodig. Returns
-    {user_id: name}."""
+    seizoen, via opponent_scout.scout_opponent() — requests-only."""
     fixtures = team_info["fixtures"]
     team_fixtures = ss.get_team_fixtures(fixtures, ploeg_id)
     n_played = sum(1 for fx in team_fixtures if fx.get("played"))
     if n_played == 0:
         return {}
-    # before_date_text="" -> geen datumgrens (zie opponent_scout.
-    # get_opponent_previous_fixtures: before=None betekent "alle gespeelde
-    # fixtures komen in aanmerking"). lookback=n_played -> ALLE gespeelde
-    # wedstrijden van deze ploeg dit seizoen, zodat een speler die pas in
-    # een latere wedstrijd opdook ook gevonden wordt.
     bundle = osc.scout_opponent(
         fixtures, team_info["name"], ploeg_id, before_date_text="", lookback=n_played,
     )
@@ -322,9 +328,6 @@ def discover_players_for_team(ploeg_id: str, team_info: dict) -> dict:
 
 
 def _is_fully_new_player(player_id: str) -> bool:
-    """True als deze speler nog GEEN matchdata heeft (dus een echte,
-    volledige Playwright-scrape nodig zou hebben) — gebruikt om de
-    PRESCAN_NEW_PLAYERS_MAX-cap toe te passen."""
     try:
         doc = fb.get_player(player_id) or {}
     except Exception:  # noqa: BLE001
@@ -335,8 +338,6 @@ def _is_fully_new_player(player_id: str) -> bool:
 def _save_prescan_summary(
     teams: dict, all_players: dict, new_ids: list, known_ids: list, capped_new: list,
 ) -> None:
-    """Bewaart een klein samenvattingsdocument — basis voor een latere
-    'laatst pre-scand op...'-weergave in de UI (Fase D3)."""
     try:
         fb.db.collection(PRESCAN_STATE_COLLECTION).document(PRESCAN_STATE_DOC).set({
             "last_run_at": _utc_now_iso(),
@@ -357,11 +358,11 @@ def main() -> int:
 
     teams = discover_all_poule_teams()
     if not teams:
-        logger.info("Geen andere ploegen gevonden in gevolgde poules — niets te doen.")
+        logger.info("Geen andere ploegen gevonden in de toegestane, gevolgde poule(s) — niets te doen.")
         _write_output("", 0)
         return 0
 
-    logger.info(f"{len(teams)} andere ploeg(en) gevonden over alle gevolgde poules.")
+    logger.info(f"{len(teams)} andere ploeg(en) gevonden over de toegestane, gevolgde poule(s).")
 
     all_players: dict[str, str] = {}
     frozen_count, unfrozen_count = 0, 0
@@ -376,15 +377,6 @@ def main() -> int:
         for pid, name in found.items():
             all_players.setdefault(pid, name)
 
-        # PADEL_ANALYSIS_AUTO_FREEZE_OPPONENTS_2026-09-26 (op verzoek van
-        # Kim: "gewoon automatisch afzetten als match gespeeld is"): heeft
-        # deze ploeg nog een NIET-gespeelde fixture in het gevolgde
-        # poule-schema? Zo niet, dan mogen hun gekende spelers stoppen met
-        # regulier/bulk bijwerken - een bewuste "analyseer opnieuw"-klik
-        # blijft ze altijd gewoon verversen (zie enrich_opponents.py).
-        # Zelf-herstellend: verandert de kalender alsnog (bv. een
-        # uitgestelde wedstrijd), dan wordt dit bij de volgende run
-        # automatisch weer ontdooid.
         if found:
             team_fixtures = ss.get_team_fixtures(info["fixtures"], ploeg_id)
             still_upcoming = any(not fx.get("played") for fx in team_fixtures)
@@ -418,9 +410,6 @@ def main() -> int:
         + (f", {overflow} volgen bij een volgende run." if overflow else ".")
     )
 
-    # Nieuwe spelers EERST in de lijst: geeft hen voorrang binnen het
-    # padelstat/klassement-run-budget zodra iedereen al matchdata heeft
-    # (zie enrich_opponents._prioritize()).
     final_ids = capped_new + known_ids
 
     _save_prescan_summary(teams, all_players, new_ids, known_ids, capped_new)

@@ -12,63 +12,53 @@ PADEL_ANALYSIS_POULE_SCOPE_FIX_2026-09-15
 BUG (opgelost): parse_poule_schedule() gaf 287 fixtures terug voor een poule
 die er 15 telt. Oorzaak: de functie liep over ALLE <table>-elementen van de
 pagina. De clubdashboard-poule-tabel bevat echter veel meer dan de gevraagde
-poule:
-  <div class="tab-pane active" id="tab673692">      <- voorronde
-      <div class="poule">
-          <div class="poule-header" id="371305">    <- de gevraagde poule
-          <div class="poule-body"> <table> ...      <- 15 echte fixtures
-  <div class="tab-pane" id="tab21010">              <- Eindronde A TOT P
-      <table class="game-table"> ...                <- bracket-wedstrijden
-  <div class="tab-pane" id="tab21011"> ...          <- nog 7 eindrondes
-
+poule (voorronde + eindronde-brackets van andere poules).
 Fix: parse_poule_schedule() scopet op de <div class="poule"> met de gevraagde
 poule-header-id en negeert table.game-table.
 
 PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15
 -------------------------------------------
-De eindronde-brackets worden NIET weggegooid: zodra de voorronde uitgespeeld
-is, staat de volgende match daar. Ze worden apart geparsed door
-parse_eindronde_bracket(), omdat hun structuur wezenlijk verschilt:
-
-  voorronde                        eindronde
-  ------------------------------   ---------------------------------------
-  spelgroepId 673692               spelgroepId 21010..21017
-  datum in een eigen <td>          datum in <span class="date"> in de
-                                   winnaarscel (rowspan=2)
-  nog te spelen = lege score       nog te spelen = LEGE <td>, geen ploeglink
-  platte tabel                     bracket per ronde (1/16 -> finale)
-
-Ploegen dragen in de bracket hun herkomst als seed-label: "8211 PADEL '74 C
-(AA1) (T)" = winnaar van Poule AA, plaats 1, thuisploeg (T). Daarmee is de
-koppeling voorronde -> eindronde hard te maken.
-
-De eindronde-tabs dekken alfabetische poulereeksen ("Eindronde Q TOT AF").
-find_eindronde_for_poule() kiest op basis daarvan de juiste tab: Poule AA
-valt in Q..AF, dus spelgroepId 21011.
+De eindronde-brackets worden apart geparsed door parse_eindronde_bracket().
 
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SILENT_EXCEPTION_CI_DIAGNOSIS_2026-09-27 (op verzoek van Kim:
-"bekijk de prescan poule of de logica nu werkt" - de nachtelijke workflow
-bleef "Eigen ploeg niet herkenbaar" melden voor OOK Kim's eigen profiel,
-ondanks dat de own_display_name-fix bevestigd correct staat in zowel dit
-bestand als discover_poule_players.py/page_lineup_lab.py)
+"bekijk de prescan poule of de logica nu werkt")
 --------------------------------------------------------------------------
-ROOT CAUSE (van de aanhoudende CI-mislukking, niet van de own-ploeg-logica
-zelf - die is al gefixt): _fixture_player_sides() ving elke fout van
-scrape_uitslagenblad() af met een kale `except Exception: return set(),
-set()` - zonder ooit te loggen WAT er misging. Op Kim's eigen machine
-(diagnose_identify_own_ploeg.py, eerder deze sessie) werkte de fetch
-probleemloos; in de GitHub Actions-omgeving (ander netwerk/IP-bereik, vaak
-strenger behandeld door bot-detectie dan een residentieel IP) kan diezelfde
-aanroep om een heel andere reden falen - maar die reden was tot nu toe
-volledig onzichtbaar in de workflow-log, wat elke verdere diagnose tot
-gissen herleidde.
+_fixture_player_sides() ving elke fout van scrape_uitslagenblad() af met een
+kale `except Exception: return set(), set()` zonder te loggen WAT er
+misging. FIX: logt nu expliciet het foutype en de boodschap.
 
-FIX: de except-clausule logt nu expliciet het foutype en de boodschap
-(logger.warning), zodat de EERSTVOLGENDE workflow-run in de log toont WAT
-er precies misgaat (timeout, 403, connectiefout, ...) i.p.v. het stil te
-verzwijgen. Dit lost de onderliggende oorzaak niet vanzelf op, maar maakt
-haar voor het eerst meetbaar in plaats van giswerk.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27 (op verzoek van Kim: "bij de
+poule pre-scan log zie ik [...] bij mijn eigen naam [...] Eigen ploeg niet
+herkenbaar [...] overgeslagen")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd met echte data uit een eerdere diagnose-run): de
+site (uitslagenblad, via scrape_uitslagenblad()) toont spelersnamen in het
+formaat "Achternaam Voornaam" (bevestigd: het uitslagenblad van Kim's eigen
+wedstrijd gaf letterlijk "verbekekim" terug als genormaliseerde naam - dus
+"Verbeke Kim"). Het player_profiles-document se `display_name`-veld staat
+echter meestal in het format "Voornaam Achternaam" (Kim's eigen profiel:
+"Kim Verbeke"). De oude `_norm()` doet enkel lowercase + niet-alfanumeriek
+verwijderen - GEEN herschikking van woorden - dus "kimverbeke" (uit het
+profiel) en "verbekekim" (van de site) zijn NOCH exact gelijk, NOCH een
+substring van elkaar. Dat liet own_display_name (PADEL_ANALYSIS_OWN_NAME_
+MISSING_FIX_2026-09-26) voor Kim's EIGEN naam specifiek altijd falen, en
+vermoedelijk ook voor elk ander tracked profiel waarvan display_name in
+een andere woordvolgorde staat dan de site gebruikt - wat de opvallend
+lange lijst "Eigen ploeg niet herkenbaar" in de nachtelijke prescan-log
+grotendeels verklaart (niet enkel Kim zelf).
+
+FIX: nieuwe functie _norm_person_name() - identiek aan _norm(), maar
+splitst EERST op woorden, sorteert die woorden alfabetisch, en voegt ze
+dan pas samen. "Kim Verbeke" -> tokens ["kim","verbeke"] (al gesorteerd)
+-> "kimverbeke". "Verbeke Kim" -> tokens ["verbeke","kim"] -> gesorteerd
+["kim","verbeke"] -> "kimverbeke". IDENTIEK, dus nu een exacte match,
+ongeacht de woordvolgorde. Gebruikt UITSLUITEND in de functies die
+PERSOONSNAMEN vergelijken (_known_names_for_date(), _fixture_player_
+sides()) - de gewone _norm() blijft ongewijzigd voor overige doeleinden
+(bv. team-naam-vergelijkingen elders), dus dit heeft geen invloed op
+andere delen van de codebase.
 """
 from __future__ import annotations
 
@@ -86,17 +76,11 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.tennisenpadelvlaanderen.be"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"
 
-# Tabellen met deze class horen bij een eindronde-bracket, niet bij het
-# poule-schema van de voorronde.
 _BRACKET_TABLE_CLASSES = {"game-table"}
-
-# "Eindronde Q TOT AF Schweppes Padel Voorjaar" -> ("Q", "AF")
 _EINDRONDE_RANGE_RE = re.compile(
     r"eindronde\s+([A-Z]{1,3})\s+tot\s+([A-Z]{1,3})\b", re.IGNORECASE
 )
-# onclick="changeParam(21011, 'endRoundGroups');"
 _CHANGEPARAM_RE = re.compile(r"changeParam\(\s*(\d+)", re.IGNORECASE)
-# "8211 PADEL '74 C (AA1) (T)" -> seed AA1, side T
 _SEED_RE = re.compile(r"\(([A-Z]{1,3}\d{1,2})\)")
 _SIDE_RE = re.compile(r"\(([TU])\)\s*$")
 _DATE_IN_TEXT_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}(?:\s+\d{1,2}:\d{2})?\b")
@@ -114,11 +98,28 @@ def _clean(text: Optional[str]) -> str:
 
 
 def _norm(text: Optional[str]) -> str:
+    """Algemene tekst-normalisatie (lowercase + niet-alfanumeriek weg) -
+    gebruikt voor team-namen en andere vergelijkingen waar woordvolgorde
+    er niet toe doet omdat er sowieso maar 1 volgorde bestaat. NIET
+    gebruiken voor persoonsnamen - zie _norm_person_name()."""
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+def _norm_person_name(text: Optional[str]) -> str:
+    """PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27: woordvolgorde-
+    ONAFHANKELIJKE normalisatie voor PERSOONSNAMEN. Splitst op woorden,
+    verwijdert niet-alfanumeriek per woord, sorteert de woorden
+    alfabetisch en voegt ze dan samen - "Kim Verbeke" en "Verbeke Kim"
+    geven zo altijd hetzelfde resultaat, ongeacht welke bron (profiel
+    vs. site) welke volgorde gebruikt. Zie de uitgebreide root-cause-
+    analyse in de moduledocstring hierboven."""
+    if not text:
+        return ""
+    tokens = re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
+    return "".join(sorted(tokens))
+
+
 def poule_id_from_url(url: Optional[str]) -> Optional[str]:
-    """Haal de pouleId uit een poule-tabel-URL (indien aanwezig)."""
     if not url:
         return None
     for key in ("pouleId", "pouleid", "poolTableId", "pooltableid"):
@@ -143,11 +144,7 @@ def fetch_poule_schedule_html(
     return response.text
 
 
-# ---------------------------------------------------------------------------
-# Poule-letters: A..Z, AA..AZ, BA..  (spreadsheet-kolomvolgorde)
-# ---------------------------------------------------------------------------
 def poule_letter_index(letters: Optional[str]) -> Optional[int]:
-    """'A' -> 1, 'Z' -> 26, 'AA' -> 27, 'AF' -> 32. None bij onzin."""
     text = re.sub(r"[^A-Z]", "", (letters or "").upper())
     if not text:
         return None
@@ -158,14 +155,10 @@ def poule_letter_index(letters: Optional[str]) -> Optional[int]:
 
 
 def poule_letters_from_label(label: Optional[str]) -> Optional[str]:
-    """'Poule AA' -> 'AA'."""
     match = re.search(r"poule\s+([A-Z]{1,3})\b", label or "", re.IGNORECASE)
     return match.group(1).upper() if match else None
 
 
-# ---------------------------------------------------------------------------
-# Scoping: bepaal welke tabellen bij de gevraagde poule horen
-# ---------------------------------------------------------------------------
 def _is_bracket_table(table) -> bool:
     return bool(set(table.get("class") or []) & _BRACKET_TABLE_CLASSES)
 
@@ -206,8 +199,6 @@ def _select_tables(soup, poule_id: Optional[str]) -> list[tuple]:
                     out.append((table, label))
         if out:
             return out
-    # Fallback voor afwijkende paginastructuren: oud gedrag, maar nooit de
-    # eindronde-brackets.
     return [
         (table, _find_preceding_label(table))
         for table in soup.find_all("table")
@@ -216,11 +207,6 @@ def _select_tables(soup, poule_id: Optional[str]) -> list[tuple]:
 
 
 def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict]:
-    """Parse de fixtures van de VOORRONDE-poule.
-
-    poule_id: beperkt het resultaat tot die ene poule. Sterk aangeraden -- de
-    pagina bevat ook alle andere poules en de eindronde-brackets.
-    """
     soup = BeautifulSoup(html, "html.parser")
     fixtures = []
     for table, poule_label in _select_tables(soup, poule_id):
@@ -273,15 +259,7 @@ def parse_poule_schedule(html: str, poule_id: Optional[str] = None) -> list[dict
     return fixtures
 
 
-# ---------------------------------------------------------------------------
-# Eindronde: tabs herkennen
-# ---------------------------------------------------------------------------
 def parse_eindronde_tabs(html: str) -> list[dict]:
-    """Lees de eindronde-tabs uit de navigatie.
-
-    Geeft per tab: spelgroep_id, naam, en de alfabetische poulereeks die ze
-    dekt (from_letters/to_letters + numerieke index voor vergelijking).
-    """
     soup = BeautifulSoup(html, "html.parser")
     tabs: list[dict] = []
     seen: set[str] = set()
@@ -311,10 +289,6 @@ def parse_eindronde_tabs(html: str) -> list[dict]:
 
 
 def find_eindronde_for_poule(tabs: list[dict], poule_label: Optional[str]) -> Optional[dict]:
-    """Kies de eindronde-tab die de gegeven poule dekt.
-
-    'Poule AA' (index 27) valt binnen 'Eindronde Q TOT AF' (17..32).
-    """
     letters = poule_letters_from_label(poule_label)
     index = poule_letter_index(letters)
     if index is None:
@@ -326,11 +300,7 @@ def find_eindronde_for_poule(tabs: list[dict], poule_label: Optional[str]) -> Op
     return None
 
 
-# ---------------------------------------------------------------------------
-# Eindronde: bracket parsen
-# ---------------------------------------------------------------------------
 def _round_labels(pane) -> dict:
-    """{'final210111': '1/16 Finale', ...} uit de wizard-navigatie."""
     labels = {}
     for anchor in pane.find_all("a", class_="label"):
         href = (anchor.get("href") or "").lstrip("#")
@@ -341,7 +311,6 @@ def _round_labels(pane) -> dict:
 
 
 def _team_from_cell(cell) -> dict:
-    """Lees ploegnaam, ploeg_id, seed-label en thuis/uit uit een bracketcel."""
     if cell is None:
         return {"name": None, "ploeg_id": None, "seed": None, "side": None}
     link = next(
@@ -369,24 +338,7 @@ def _scores_from_row(row) -> list[str]:
     ]
 
 
-def parse_eindronde_bracket(
-    html: str,
-    spelgroep_id: Optional[str] = None,
-) -> list[dict]:
-    """Parse de eindronde-brackets.
-
-    spelgroep_id: beperk tot die ene eindronde-tab (aanrader). Zonder id
-    worden alle eindronde-tabs geparsed.
-
-    Elke wedstrijd krijgt:
-      ronde          '1/16 Finale' ... 'Finale'
-      team1/team2    {name, ploeg_id, seed, side}
-      winner         {name, ploeg_id}
-      date_text      uit <span class="date">
-      played         True zodra er een uitslag/winnaar-status is
-      pending        True als een van beide plekken nog niet ingevuld is
-                     (die wedstrijd komt er dus nog aan)
-    """
+def parse_eindronde_bracket(html: str, spelgroep_id: Optional[str] = None) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     matches: list[dict] = []
     panes = soup.find_all("div", class_="tab-pane")
@@ -468,7 +420,6 @@ def parse_eindronde_bracket(
 
 
 def eindronde_for_team(matches: list[dict], ploeg_id: str) -> list[dict]:
-    """Alle eindronde-wedstrijden van een ploeg, chronologisch."""
     own = [
         m for m in matches or []
         if m.get("home_ploeg_id") == ploeg_id or m.get("away_ploeg_id") == ploeg_id
@@ -508,35 +459,15 @@ def _known_names_for_date(
     date_key: tuple,
     own_display_name: Optional[str] = None,
 ) -> tuple[set[str], set[str]]:
-    """PADEL_ANALYSIS_OWN_NAME_MISSING_FIX_2026-09-26 (gevonden via
-    diagnose_identify_own_ploeg.py, dat voor speler 1790766/Kim Verbeke voor
-    ALLE 6 technisch perfect leesbare kandidaat-fixtures toch geen eigen
-    ploeg kon identificeren, en zelf al de juiste plek aanwees: "controleer
-    of 'player_name'/'display_name' effectief in de matchrecords voorkomen").
-
-    ROOT CAUSE (bevestigd): een matchrecord in doc["matches"] beschrijft
-    ALTIJD de matchen van de speler wiens EIGEN document het is - de speler
-    zelf komt in dat record dus nooit als naam voor, enkel de partner
-    ("partner_name") en de tegenstanders ("opp1_name"/"opp2_name"). De
-    sleutels "player_name" en "display_name" bestaan NOOIT op matchniveau
-    (dat zijn profielvelden, geen matchvelden) - de oude for-lus hierboven
-    kon dus voor own_side STRUCTUREEL NOOIT meer dan de partnernaam
-    verzamelen, nooit de naam van de speler zelf.
-
-    Bij een bord met 2 spelers per kant kon de "eigen kant"-overlapscore
-    daardoor nooit hoger dan 1 uitkomen op naam, ongeacht hoe duidelijk de
-    data was - en bij een gelijkspel (home_score == away_score) slaat
-    identify_own_ploeg_id() de kandidaat gewoon over.
-
-    FIX: `own_display_name` (de weergavenaam van de speler zelf, bv. uit
-    diens player_profiles-document) wordt hier expliciet en ALTIJD aan
-    own_side toegevoegd - los van wat er toevallig wel/niet in het
-    matchrecord staat. De oude player_name/display_name-poging blijft
-    als onschadelijke fallback staan (voor het geval een toekomstige
-    datastructuur dit ooit wel op matchniveau zou meegeven)."""
+    """PADEL_ANALYSIS_OWN_NAME_MISSING_FIX_2026-09-26 + PADEL_ANALYSIS_
+    NAME_WORD_ORDER_FIX_2026-09-27: own_display_name wordt hier expliciet
+    aan own_side toegevoegd - GENORMALISEERD via _norm_person_name() zodat
+    een woordvolgorde-verschil met de site (bv. profiel "Kim Verbeke" vs.
+    site "Verbeke Kim") niet langer een gemiste match veroorzaakt. Zie de
+    moduledocstring voor de volledige, met echte data bevestigde analyse."""
     own_side = set()
     opponent_side = set()
-    eigen_naam = _norm(own_display_name)
+    eigen_naam = _norm_person_name(own_display_name)
     if eigen_naam:
         own_side.add(eigen_naam)
     for match in own_known_matches:
@@ -545,11 +476,11 @@ def _known_names_for_date(
         if _parse_date_text(match.get("match_date") or "") != date_key:
             continue
         for key in ("player_name", "display_name", "partner_name"):
-            value = _norm(match.get(key))
+            value = _norm_person_name(match.get(key))
             if value:
                 own_side.add(value)
         for key in ("opp1_name", "opp2_name"):
-            value = _norm(match.get(key))
+            value = _norm_person_name(match.get(key))
             if value:
                 opponent_side.add(value)
     return own_side, opponent_side
@@ -558,27 +489,13 @@ def _known_names_for_date(
 def _fixture_player_sides(fixture: dict) -> tuple[set[str], set[str]]:
     """Lees het uitslagenblad en geef de spelersnamen per kant terug.
 
-    PADEL_ANALYSIS_SILENT_EXCEPTION_CI_DIAGNOSIS_2026-09-27 (op verzoek van
-    Kim: "bekijk de prescan poule of de logica nu werkt" - de nachtelijke
-    workflow bleef, ook voor Kim's eigen profiel, "Eigen ploeg niet
-    herkenbaar" melden, ondanks dat de own_display_name-fix bevestigd
-    correct in de code staat).
+    PADEL_ANALYSIS_SILENT_EXCEPTION_CI_DIAGNOSIS_2026-09-27: logt nu
+    expliciet het foutype en de boodschap bij een fout, i.p.v. dit stil
+    te verzwijgen.
 
-    ROOT CAUSE (van de aanhoudende CI-mislukking): deze functie ving elke
-    fout van scrape_uitslagenblad() af met een kale `except Exception:
-    return set(), set()` - zonder ooit te loggen WAT er misging. Op Kim's
-    eigen machine werkte de fetch probleemloos (bevestigd via
-    diagnose_identify_own_ploeg.py); in de GitHub Actions-omgeving (ander
-    netwerk/IP-bereik) kan diezelfde aanroep om een heel andere reden falen
-    - maar die reden bleef tot nu toe volledig onzichtbaar in de
-    workflow-log.
-
-    FIX: logt nu expliciet het foutype en de boodschap zodra de fetch/parse
-    faalt, zodat de eerstvolgende workflow-run toont WAT er precies misgaat
-    (timeout, HTTP-statuscode, connectiefout, ...) in plaats van dit stil
-    te verzwijgen. Het gedrag bij een fout (lege sets teruggeven, kandidaat
-    overslaan) blijft ONGEWIJZIGD - enkel de zichtbaarheid verandert.
-    """
+    PADEL_ANALYSIS_NAME_WORD_ORDER_FIX_2026-09-27: gebruikt
+    _norm_person_name() (woordvolgorde-onafhankelijk) i.p.v. _norm() voor
+    de spelersnamen - zie moduledocstring."""
     url = fixture.get("uitslagenblad_url")
     if not url:
         return set(), set()
@@ -598,11 +515,11 @@ def _fixture_player_sides(fixture: dict) -> tuple[set[str], set[str]]:
         if len(players) < 4:
             continue
         for player in players[:2]:
-            name = _norm(player.get("name"))
+            name = _norm_person_name(player.get("name"))
             if name:
                 home_players.add(name)
         for player in players[2:4]:
-            name = _norm(player.get("name"))
+            name = _norm_person_name(player.get("name"))
             if name:
                 away_players.add(name)
     return home_players, away_players
@@ -623,24 +540,10 @@ def identify_own_ploeg_id(
     own_known_matches: list[dict],
     own_display_name: Optional[str] = None,
 ):
-    """
-    Bepaal automatisch de eigen ploeg via de meest recente gespeelde fixture
-    waarvan de datum voorkomt in de matchhistoriek van de geselecteerde speler.
-
-    De functie retourneert bewust de opgeloste eigen ploeg-id in beide eerste
-    posities. Dit houdt compatibiliteit met de bestaande dashboard-flow, die
-    vroeger zelf nog probeerde te kiezen tussen home en away.
-
-    PADEL_ANALYSIS_OWN_NAME_MISSING_FIX_2026-09-26: `own_display_name` is
-    nieuw en STERK aangeraden (zie _known_names_for_date() hierboven voor de
-    volledige root-cause-analyse) - zonder deze parameter herkent de
-    "eigen kant"-vergelijking enkel de partnernaam, nooit de speler zelf,
-    wat identificatie bij een gelijk/bijna-gelijk aantal treffers laat
-    mislukken. Optioneel gehouden (default None) zodat bestaande
-    aanroepers - bv. via poule_playwright.py of andere call sites die dit
-    bestand nog niet met de nieuwe parameter aanroepen - niet crashen; ze
-    krijgen dan wel nog steeds het oude, zwakkere gedrag.
-    """
+    """Bepaal automatisch de eigen ploeg via de meest recente gespeelde
+    fixture waarvan de datum voorkomt in de matchhistoriek van de
+    geselecteerde speler. Zie module-docstring (PADEL_ANALYSIS_NAME_WORD_
+    ORDER_FIX_2026-09-27) voor de belangrijkste onderliggende fix."""
     own_dates = {
         parsed
         for match in own_known_matches
@@ -688,13 +591,6 @@ def get_next_match(
     eindronde_matches: Optional[list[dict]] = None,
     ploeg_id: Optional[str] = None,
 ) -> Optional[dict]:
-    """Eerstvolgende nog niet gespeelde wedstrijd.
-
-    Zoekt eerst in de voorronde. Is die uitgespeeld, dan valt de functie terug
-    op de eindronde: eerst een wedstrijd waarin de ploeg al geplaatst is, en
-    anders de eerstvolgende nog niet ingevulde bracketplek (pending), zodat de
-    app toch kan tonen dat er nog een ronde volgt.
-    """
     for fixture in team_fixtures or []:
         if not fixture.get("played"):
             return fixture
@@ -707,14 +603,9 @@ def get_next_match(
         }
         own_id = next(iter(ids), None)
     relevant = eindronde_for_team(eindronde_matches, own_id) if own_id else []
-    # 1) Staat de ploeg al ingeschreven voor een nog niet gespeelde bracketplek?
     for match in relevant:
         if not match.get("played"):
             return match
-    # 2) Anders: heeft ze haar laatste bracketwedstrijd GEWONNEN? Dan volgt er
-    #    nog een ronde, maar die plek draagt haar naam nog niet. We tonen de
-    #    eerstvolgende openstaande plek, zodat de app niet onterecht meldt dat
-    #    het seizoen voorbij is. Bij verlies stopt het wel echt.
     if relevant:
         last = relevant[-1]
         if own_id and last.get("winner_ploeg_id") and last["winner_ploeg_id"] != own_id:
