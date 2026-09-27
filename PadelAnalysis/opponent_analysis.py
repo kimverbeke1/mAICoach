@@ -640,7 +640,31 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
     team_ai_advisor.ask_followup(), zodat het taalmodel een samenhangend
     gesprek kan voeren i.p.v. elke vraag als geheel nieuw te behandelen.
     De volledige geschiedenis wordt ook zichtbaar getoond (st.chat_message),
-    niet enkel het laatste antwoord."""
+    niet enkel het laatste antwoord.
+
+    PADEL_ANALYSIS_AI_STREAMING_2026-09-27 (op verzoek van Kim: "analyse
+    duurt lang [...] Geen streaming. [...] pas dit aan zodat je wel live
+    het antwoord van AI ziet verschijnen")
+    ----------------------------------------------------------------------
+    ROOT CAUSE: zowel "Genereer inzichten" als "Vraag AI" wachtten, binnen
+    een st.spinner(), op de VOLLEDIGE, blokkerende _chat_completion()-
+    aanroep in team_ai_advisor.py - de gebruiker zag dus letterlijk niets
+    (enkel een draaiend spinnertje) tot het hele antwoord in 1 keer
+    binnenkwam, wat bij een lang antwoord een minuut kon duren.
+
+    FIX: beide knoppen gebruiken nu st.write_stream() op de nieuwe
+    generate_insights_stream()/ask_followup_stream()-generators (team_ai_
+    advisor.py) - de tekst verschijnt token per token zodra die binnenkomt,
+    exact zoals een gewone AI-chatinterface. st.write_stream() geeft zelf
+    de VOLLEDIG SAMENGEVOEGDE tekst terug zodra de stream afgerond is; die
+    samengevoegde tekst wordt (ongewijzigd t.o.v. voorheen) opgeslagen in
+    de chatgeschiedenis, dus het opslag-/weergavegedrag NA afloop is
+    functioneel identiek aan de vorige versie - enkel het WACHTEN ervoor is
+    nu zichtbaar i.p.v. blind.
+    Faalt de stream halverwege (bv. een netwerkonderbreking), dan vangt de
+    try/except dat op net als voorheen en wordt een foutmelding als
+    volwaardig antwoord opgeslagen - geen kapotte, halfvolledige
+    geschiedenis-entry."""
     st.markdown("#### 🤖 AI-inzichten over de tegenploeg")
     if taa is None:
         st.caption("AI-module niet beschikbaar (team_ai_advisor kon niet geladen worden).")
@@ -653,11 +677,13 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
     with col_start:
         start_label = "💡 Genereer inzichten" if not history else "💡 Genereer inzichten (nieuw gesprek)"
         if st.button(start_label, key=f"{key_prefix}_insights_v12_{ploeg_id}", type="primary"):
-            with st.spinner("AI analyseert de tegenploeg..."):
+            with st.container(border=True):
+                st.markdown("**🤖 AI**")
                 try:
-                    antwoord = taa.generate_insights(report)
+                    antwoord = st.write_stream(taa.generate_insights_stream(report))
                 except Exception as exc:
                     antwoord = f"⚠️ Mislukt: {exc}"
+                    st.markdown(antwoord)
             # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: dit automatische
             # inzicht wordt het EERSTE bericht van een verse geschiedenis,
             # zodat een vervolgvraag daarop kan voortbouwen.
@@ -669,7 +695,9 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
             st.rerun()
     # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: toon het VOLLEDIGE gesprek,
     # niet enkel het laatste antwoord - zo is meteen duidelijk waarop een
-    # doorvraag verder bouwt.
+    # doorvraag verder bouwt. Dit blijft STATISCHE weergave (st.markdown())
+    # van reeds AFGERONDE berichten - enkel het nieuwste antwoord (hierboven/
+    # hieronder) streamt live tijdens het genereren zelf.
     if history:
         st.caption("Gesprek tot nu toe:")
         for msg in history:
@@ -687,17 +715,22 @@ def render_ai_section(report: dict, ploeg_id: str, key_prefix: str = "team_analy
         if not question.strip():
             st.warning("Typ eerst een vraag.")
         else:
-            with st.spinner("AI denkt na..."):
+            gestelde_vraag = question.strip()
+            with st.container(border=True):
+                st.markdown("**🤖 AI**")
                 try:
-                    antwoord = taa.ask_followup(question.strip(), report, history)
+                    antwoord = st.write_stream(
+                        taa.ask_followup_stream(gestelde_vraag, report, history)
+                    )
                 except Exception as exc:
                     antwoord = f"⚠️ AI-vraag mislukt: {exc}"
+                    st.markdown(antwoord)
             # PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: BEIDE berichten
             # (de vraag zelf, en het antwoord) worden toegevoegd aan de
             # geschiedenis, zodat de VOLGENDE doorvraag hier weer op kan
             # voortbouwen - anders zou de geschiedenis nooit groeien.
             st.session_state[history_key] = history + [
-                {"role": "user", "content": question.strip()},
+                {"role": "user", "content": gestelde_vraag},
                 {"role": "assistant", "content": antwoord},
             ]
             st.rerun()

@@ -175,6 +175,16 @@ _BASE_RULES = (
 )
 
 
+def _build_messages(system_prompt: str, user_message: str, history: Optional[list[dict]] = None) -> list[dict]:
+    """Losgetrokken uit _chat_completion() zodat zowel de niet-streamende
+    als de streamende variant hieronder exact dezelfde messages-opbouw
+    gebruiken - geen duplicatie, geen risico dat ze uit elkaar groeien."""
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history or [])
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+
 def _chat_completion(system_prompt: str, user_message: str, history: Optional[list[dict]] = None) -> str:
     """PADEL_ANALYSIS_AI_FOLLOWUP_CHAT_2026-09-18: generieke kernfunctie die
     ALTIJD de opgebouwde `history` (eerdere user/assistant-berichten van
@@ -184,19 +194,57 @@ def _chat_completion(system_prompt: str, user_message: str, history: Optional[li
     history: lijst van {"role": "user"|"assistant", "content": str}-dicts,
     in chronologische volgorde (oudste eerst). Wordt NIET aangepast door
     deze functie - de aanroeper is verantwoordelijk voor het bijhouden en
-    uitbreiden van de geschiedenis (typisch in st.session_state)."""
+    uitbreiden van de geschiedenis (typisch in st.session_state).
+
+    PADEL_ANALYSIS_AI_STREAMING_2026-09-27: blijft ONGEWIJZIGD bestaan als
+    niet-streamende variant (bv. voor eventuele toekomstige aanroepers
+    zonder UI, of achtergrondtaken waar streaming geen zin heeft). De UI
+    (opponent_analysis.py: render_ai_section()) gebruikt sinds deze versie
+    _chat_completion_stream() hieronder, niet deze functie."""
     client = _client()
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history or [])
-    messages.append({"role": "user", "content": user_message})
+    messages = _build_messages(system_prompt, user_message, history)
     response = client.chat.completions.create(model=MODEL, messages=messages)
     return response.choices[0].message.content.strip()
 
 
-def generate_insights(report: dict) -> str:
-    """Genereert automatisch scoutinginzichten over de tegenploeg. Dit is
-    altijd het STARTPUNT van een gesprek (geen voorgeschiedenis mogelijk/
-    zinvol), dus zonder history-parameter."""
+def _chat_completion_stream(system_prompt: str, user_message: str, history: Optional[list[dict]] = None):
+    """PADEL_ANALYSIS_AI_STREAMING_2026-09-27 (op verzoek van Kim: "analyse
+    duurt lang [...] Geen streaming. [...] de gebruiker ziet niets tot het
+    volledige antwoord binnen is - bij een lang antwoord voelt 8 seconden
+    aan als een minuut, omdat er geen enkel teken van leven op het scherm
+    verschijnt" -> "pas dit aan zodat je wel live het antwoord van AI ziet
+    verschijnen").
+
+    ROOT CAUSE: _chat_completion() deed een ENKELE, blokkerende
+    client.chat.completions.create()-aanroep zonder stream=True - de
+    volledige respons moest eerst compleet binnen zijn voor de gebruiker
+    ook maar 1 teken te zien kreeg.
+
+    FIX: deze functie roept dezelfde OpenAI-call aan met stream=True en is
+    zelf een GENERATOR die telkens het NIEUWE tekstfragment (delta) yield't
+    zodra dat binnenkomt - exact het contract dat Streamlit's
+    st.write_stream() verwacht (zie render_ai_section() in
+    opponent_analysis.py, dat deze generator rechtstreeks doorgeeft aan
+    st.write_stream() en zelf het samengevoegde resultaat opvangt om in de
+    chatgeschiedenis te bewaren).
+
+    Bewust GEEN aparte return-waarde met het volledige antwoord: de
+    aanroeper voegt de yield'de fragmenten zelf samen (st.write_stream()
+    doet dat al automatisch en geeft de samengevoegde string terug), zodat
+    deze functie een pure, herbruikbare generator blijft.
+    """
+    client = _client()
+    messages = _build_messages(system_prompt, user_message, history)
+    stream = client.chat.completions.create(model=MODEL, messages=messages, stream=True)
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield delta
+
+
+def _generate_insights_prompt(report: dict) -> tuple[str, str]:
+    """Losgetrokken uit generate_insights() zodat de streamende en de
+    niet-streamende variant exact dezelfde prompt gebruiken."""
     context = _report_to_context(report)
     system_prompt = (
         "Je bent een padel-scoutingassistent. Geef een kort, scanbaar overzicht "
@@ -206,7 +254,42 @@ def generate_insights(report: dict) -> str:
         "poule nog weinig data bevat, baseer je inschatting dan op de historiek "
         "en zeg dat er expliciet bij. " + _BASE_RULES
     )
-    return _chat_completion(system_prompt, f"Data over de tegenploeg:\n{context}")
+    return system_prompt, f"Data over de tegenploeg:\n{context}"
+
+
+def generate_insights(report: dict) -> str:
+    """Genereert automatisch scoutinginzichten over de tegenploeg. Dit is
+    altijd het STARTPUNT van een gesprek (geen voorgeschiedenis mogelijk/
+    zinvol), dus zonder history-parameter.
+
+    PADEL_ANALYSIS_AI_STREAMING_2026-09-27: blijft bestaan (niet-streamend)
+    voor eventuele aanroepers buiten de UI. De UI gebruikt sinds deze versie
+    generate_insights_stream() hieronder."""
+    system_prompt, user_message = _generate_insights_prompt(report)
+    return _chat_completion(system_prompt, user_message)
+
+
+def generate_insights_stream(report: dict):
+    """PADEL_ANALYSIS_AI_STREAMING_2026-09-27: streamende tegenhanger van
+    generate_insights(), voor gebruik met st.write_stream() in
+    render_ai_section()."""
+    system_prompt, user_message = _generate_insights_prompt(report)
+    yield from _chat_completion_stream(system_prompt, user_message)
+
+
+def _ask_about_team_prompt(question: str, report: dict) -> tuple[str, str]:
+    """Losgetrokken uit ask_about_team() zodat de streamende en de
+    niet-streamende variant exact dezelfde prompt gebruiken."""
+    context = _report_to_context(report)
+    system_prompt = (
+        "Je bent een padel-scoutingassistent. Antwoord kort en concreet. "
+        "Als dit een VERVOLGVRAAG is op een eerder antwoord in dit gesprek, "
+        "bouw dan expliciet verder op wat je eerder al zei - herhaal niet "
+        "onnodig dezelfde uitleg, maar verwijs ernaar of vul ze aan. "
+        + _BASE_RULES
+    )
+    user_message = f"Data over de tegenploeg:\n{context}\n\nVraag: {question}"
+    return system_prompt, user_message
 
 
 def ask_about_team(question: str, report: dict, history: Optional[list[dict]] = None) -> str:
@@ -218,16 +301,12 @@ def ask_about_team(question: str, report: dict, history: Optional[list[dict]] = 
     op het eerdere gesprek (echt doorvragen mogelijk) i.p.v. elke vraag als
     volledig nieuw, contextloos gesprek te behandelen. Achterwaarts
     compatibel: bestaande aanroepen zonder `history` werken exact als
-    voorheen."""
-    context = _report_to_context(report)
-    system_prompt = (
-        "Je bent een padel-scoutingassistent. Antwoord kort en concreet. "
-        "Als dit een VERVOLGVRAAG is op een eerder antwoord in dit gesprek, "
-        "bouw dan expliciet verder op wat je eerder al zei - herhaal niet "
-        "onnodig dezelfde uitleg, maar verwijs ernaar of vul ze aan. "
-        + _BASE_RULES
-    )
-    user_message = f"Data over de tegenploeg:\n{context}\n\nVraag: {question}"
+    voorheen.
+
+    PADEL_ANALYSIS_AI_STREAMING_2026-09-27: blijft bestaan (niet-streamend)
+    voor eventuele aanroepers buiten de UI. De UI gebruikt sinds deze versie
+    ask_followup_stream() hieronder."""
+    system_prompt, user_message = _ask_about_team_prompt(question, report)
     return _chat_completion(system_prompt, user_message, history=history)
 
 
@@ -237,6 +316,14 @@ def ask_followup(question: str, report: dict, history: list[dict]) -> str:
     leesbaarheid in de aanroepende UI-code (maakt op de aanroep-plek
     meteen duidelijk dat dit een doorvraag is, geen eerste vraag)."""
     return ask_about_team(question, report, history=history)
+
+
+def ask_followup_stream(question: str, report: dict, history: list[dict]):
+    """PADEL_ANALYSIS_AI_STREAMING_2026-09-27: streamende tegenhanger van
+    ask_followup(), voor gebruik met st.write_stream() in
+    render_ai_section()."""
+    system_prompt, user_message = _ask_about_team_prompt(question, report)
+    yield from _chat_completion_stream(system_prompt, user_message, history=history)
 
 
 def suggest_lineup(report: dict, own_team_context: Optional[str] = None) -> str:
@@ -300,6 +387,38 @@ def _lineup_options_to_context(options: list[dict], name_lookup: dict) -> str:
     return "\n".join(lines)
 
 
+def _analyze_lineup_options_prompt(
+    report: dict, options: list[dict], name_lookup: dict,
+) -> Optional[tuple[str, str]]:
+    """Losgetrokken uit analyze_lineup_options() zodat de streamende en de
+    niet-streamende variant exact dezelfde prompt gebruiken. Geeft None
+    terug als er niets te analyseren valt (zie de aanroepers)."""
+    if not options:
+        return None
+    team_context = _report_to_context(report)
+    options_context = _lineup_options_to_context(options, name_lookup)
+    system_prompt = (
+        "Je bent een padel-coach. Je krijgt een aantal AL BEREKENDE "
+        "opstelling-opties voor onze eigen ploeg tegen een specifieke "
+        "tegenstander (elke optie = een volledige verdeling van onze spelers "
+        "in dubbels, met wie tegen welk tegenstanderskoppel uitkomt). Geef PER "
+        "OPTIE een kort, concreet commentaar: wat zijn de sterke punten "
+        "(gunstige matchups, goede synergie) en de risico's (moeilijke "
+        "matchups, weinig gezamenlijke ervaring)? Sluit af met een korte "
+        "aanbeveling welke optie je zou kiezen en waarom. Spreek over 'dubbel "
+        "1', 'dubbel 2', enzovoort - nooit over 'board'. Verzin GEEN spelers, "
+        "cijfers of resultaten die niet letterlijk gegeven zijn - de "
+        "synergie-scores en matchup-edges in de data zijn al berekend, jij "
+        "duidt ze enkel. Als dit een VERVOLGVRAAG is op een eerder antwoord in "
+        "dit gesprek, bouw daar dan expliciet op voort. " + _BASE_RULES
+    )
+    user_message = (
+        f"Data over de tegenploeg:\n{team_context}\n\n"
+        f"Berekende opstelling-opties:\n{options_context}"
+    )
+    return system_prompt, user_message
+
+
 def analyze_lineup_options(
     report: dict,
     options: list[dict],
@@ -326,28 +445,32 @@ def analyze_lineup_options(
                  ID's in de opties leesbaar te maken.
     history:     optioneel, eerdere {"role":..,"content":..}-berichten van
                  hetzelfde gesprek (voor doorvragen na het eerste antwoord).
+
+    PADEL_ANALYSIS_AI_STREAMING_2026-09-27: blijft bestaan (niet-streamend)
+    voor eventuele aanroepers buiten de UI. De UI gebruikt sinds deze versie
+    analyze_lineup_options_stream() hieronder.
     """
-    if not options:
+    prompt = _analyze_lineup_options_prompt(report, options, name_lookup)
+    if prompt is None:
         return "Geen berekende opstelling-opties beschikbaar om te analyseren."
-    team_context = _report_to_context(report)
-    options_context = _lineup_options_to_context(options, name_lookup)
-    system_prompt = (
-        "Je bent een padel-coach. Je krijgt een aantal AL BEREKENDE "
-        "opstelling-opties voor onze eigen ploeg tegen een specifieke "
-        "tegenstander (elke optie = een volledige verdeling van onze spelers "
-        "in dubbels, met wie tegen welk tegenstanderskoppel uitkomt). Geef PER "
-        "OPTIE een kort, concreet commentaar: wat zijn de sterke punten "
-        "(gunstige matchups, goede synergie) en de risico's (moeilijke "
-        "matchups, weinig gezamenlijke ervaring)? Sluit af met een korte "
-        "aanbeveling welke optie je zou kiezen en waarom. Spreek over 'dubbel "
-        "1', 'dubbel 2', enzovoort - nooit over 'board'. Verzin GEEN spelers, "
-        "cijfers of resultaten die niet letterlijk gegeven zijn - de "
-        "synergie-scores en matchup-edges in de data zijn al berekend, jij "
-        "duidt ze enkel. Als dit een VERVOLGVRAAG is op een eerder antwoord in "
-        "dit gesprek, bouw daar dan expliciet op voort. " + _BASE_RULES
-    )
-    user_message = (
-        f"Data over de tegenploeg:\n{team_context}\n\n"
-        f"Berekende opstelling-opties:\n{options_context}"
-    )
+    system_prompt, user_message = prompt
     return _chat_completion(system_prompt, user_message, history=history)
+
+
+def analyze_lineup_options_stream(
+    report: dict, options: list[dict], name_lookup: dict, history: Optional[list[dict]] = None,
+):
+    """PADEL_ANALYSIS_AI_STREAMING_2026-09-27: streamende tegenhanger van
+    analyze_lineup_options(), voor gebruik met st.write_stream() in
+    page_lineup_lab.py.
+
+    Bewust ook een generator wanneer er niets te analyseren valt (yield
+    van 1 fragment) i.p.v. een gewone string terug te geven - zo kan de
+    aanroeper ALTIJD st.write_stream() gebruiken, ongeacht of er opties
+    zijn, zonder een apart geval te moeten afhandelen."""
+    prompt = _analyze_lineup_options_prompt(report, options, name_lookup)
+    if prompt is None:
+        yield "Geen berekende opstelling-opties beschikbaar om te analyseren."
+        return
+    system_prompt, user_message = prompt
+    yield from _chat_completion_stream(system_prompt, user_message, history=history)
