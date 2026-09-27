@@ -1,0 +1,683 @@
+"""
+lineup_matchup_table.py - Opbouw en weergave van de volledige
+"Opstelling-scenario's"-tabel: alle geldige matchups (eigen koppelverdeling
+x tegenstander-opstelling), gegroepeerd, gesorteerd en met AI-doorvraag.
+
+Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
+Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
+volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD.
+"""
+import streamlit as st
+from dashboard_common import fb, taa
+from lineup_scout import _opponent_official_ranks, _opponent_padelstat_ratings
+from lineup_rotation import (
+    _enumerate_rotation_aware_pairings, _enumerate_own_variant_combinations,
+    _compute_matchup, _default_opponent_max_per_player,
+    _generate_theoretical_opponent_boards_with_repeats,
+    _historical_opponent_boards_list, _collect_unique_opponent_lineups,
+)
+
+_MATCHUP_DISPLAY_DEFAULT_N = 15
+_MAX_TOTAL_MATCHUPS = 800
+_THEORETICAL_MAX_VARIANTS = 300
+
+
+def _build_all_valid_matchups(
+    unique_opponent_lineups: dict,
+    available_ids: list, max_per_player: dict,
+    synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
+    tournament_rules_dict, include_non_compliant_variants: bool = False,
+) -> tuple:
+    own_structures, own_truncated = _enumerate_rotation_aware_pairings(available_ids, max_per_player)
+    valid_own_options = []
+    own_excluded_by_rules = 0
+    own_variants_generated = 0
+    for structure in own_structures:
+        combinations = _enumerate_own_variant_combinations(
+            structure, official_ranks_strict, player_ratings, rules=tournament_rules_dict,
+            include_non_compliant=include_non_compliant_variants,
+        )
+        for combo in combinations:
+            own_variants_generated += 1
+            all_points_valid = all(r["valid"] for r in combo["rotations"])
+            if tournament_rules_dict is not None and not all_points_valid:
+                own_excluded_by_rules += 1
+                continue
+            valid_own_options.append((
+                combo["ordered_pairs"], combo["rotations"], combo["fully_compliant"],
+                combo.get("rank_data_incomplete", False),
+            ))
+    seen_matchup_keys = set()
+    all_matchups = []
+    total_seen = 0
+    truncated = own_truncated
+    for own_ordered_pairs, own_rotations_info, fully_compliant, rank_data_incomplete in valid_own_options:
+        if truncated and len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
+            break
+        our_pairs_key = tuple(frozenset(p) for p in own_ordered_pairs)
+        for their_key, info in unique_opponent_lineups.items():
+            boards = info["boards"]
+            if len(boards) != len(own_ordered_pairs):
+                continue
+            total_seen += 1
+            mkey = (our_pairs_key, their_key, fully_compliant)
+            if mkey in seen_matchup_keys:
+                continue
+            seen_matchup_keys.add(mkey)
+            computed = _compute_matchup(
+                own_ordered_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings,
+            )
+            all_matchups.append({
+                "assignment": computed["assignment"],
+                "expected_boards_won": computed["expected_boards_won"],
+                "total_score": computed["total_score"],
+                "rank_data_incomplete": rank_data_incomplete,
+                "own_rotations": own_rotations_info,
+                "fully_compliant": fully_compliant,
+                "is_historical": info["is_historical"],
+                "historical_labels": list(info["historical_labels"]),
+                "historical_count": info.get("historical_count", 0),
+            })
+            if len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
+                truncated = True
+                break
+        if truncated and len(all_matchups) >= _MAX_TOTAL_MATCHUPS:
+            break
+
+    def _sort_key(m):
+        ebw = m.get("expected_boards_won")
+        return ebw if ebw is not None else m.get("total_score", 0.0)
+
+    all_matchups.sort(key=_sort_key, reverse=True)
+    diagnostics = {
+        "own_structures_total": len(own_structures),
+        "own_variants_generated": own_variants_generated,
+        "own_excluded_by_rules": own_excluded_by_rules,
+        "own_valid": len(valid_own_options),
+    }
+    return all_matchups, truncated, total_seen, diagnostics
+
+
+def _format_opponent_lineup_label(boards: list) -> str:
+    return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
+
+
+_TABLE_CHAR_WIDTH_PX = 6.6
+_TABLE_COL_MIN_WIDTH = 90
+_TABLE_COL_MAX_WIDTH = 240
+
+
+def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
+    max_len = 0
+    for v in values:
+        if v is None:
+            continue
+        max_len = max(max_len, len(str(v)))
+    width = int(max_len * _TABLE_CHAR_WIDTH_PX) + 24
+    return max(min_width, min(max_width, width))
+
+
+def _compliance_badge(fully_compliant: bool, rank_data_incomplete: bool = False) -> str:
+    if rank_data_incomplete:
+        return "onzeker"
+    return "OK" if fully_compliant else "NIET"
+
+
+def _own_lineup_group_key(assignment: list) -> frozenset:
+    return frozenset(frozenset(a["our_pair"]) for a in assignment)
+
+
+def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
+    rows = []
+    board_column_names: list = []
+    for rank, m in enumerate(matchups, start=1):
+        assignment = m["assignment"]
+        n_boards = len(assignment)
+        n_rotations = -(-n_boards // 2)
+        row = {"#": rank, "Verwacht": m.get("expected_boards_won")}
+        for r in range(n_rotations):
+            for board_in_rotation in range(2):
+                board_idx = r * 2 + board_in_rotation
+                if board_idx >= n_boards:
+                    continue
+                a = assignment[board_idx]
+                col_base = f"Rotatie{r+1} M{board_in_rotation+1}"
+                if col_base not in board_column_names:
+                    board_column_names.append(col_base)
+                p1, p2 = a["our_pair"]
+                our_full_1 = name_lookup_global.get(p1, p1)
+                our_full_2 = name_lookup_global.get(p2, p2)
+                opp_pair = a["opponent_board"]["opponent_pair"]
+                their_full = [p.get("name", "?") for p in opp_pair]
+                wp = a.get("win_probability")
+                row[f"{col_base} - Ons duo"] = f"{our_full_1}+{our_full_2}"
+                row[f"{col_base} - Tegenstander"] = "+".join(their_full)
+                row[f"{col_base} %"] = round(wp * 100, 0) if wp is not None else None
+        swap_notes = [
+            rot.get("swap_label", "") for rot in (m.get("own_rotations") or [])
+            if rot.get("swap_label")
+        ]
+        row["Toelichting"] = " | ".join(swap_notes) if swap_notes else ""
+        n_keer = m.get("historical_count", 0)
+        if m["is_historical"]:
+            freq = f"{n_keer}x" if n_keer > 1 else "1x"
+            row["Vorige keer"] = f"{freq} ({', '.join(m['historical_labels'])})"
+        else:
+            row["Vorige keer"] = ""
+        rows.append(row)
+    return rows, board_column_names
+
+
+def _matchup_table_column_config(table_rows: list, board_column_names: list) -> tuple:
+    column_config = {
+        "#": st.column_config.NumberColumn("#", width="small"),
+        "Verwacht": st.column_config.NumberColumn("Verwacht", format="%.2f", width="small"),
+    }
+    for col_base in board_column_names:
+        ons_col = f"{col_base} - Ons duo"
+        tegen_col = f"{col_base} - Tegenstander"
+        pct_col = f"{col_base} %"
+        column_config[ons_col] = st.column_config.TextColumn(
+            ons_col, width=_estimate_column_width([row.get(ons_col) for row in table_rows]),
+        )
+        column_config[tegen_col] = st.column_config.TextColumn(
+            tegen_col, width=_estimate_column_width([row.get(tegen_col) for row in table_rows]),
+        )
+        column_config[pct_col] = st.column_config.NumberColumn(pct_col, format="%.0f%%", width="small")
+    column_config["Toelichting"] = st.column_config.TextColumn(
+        "Toelichting", width=_estimate_column_width([row.get("Toelichting") for row in table_rows], min_width=160, max_width=320),
+    )
+    column_order = ["#", "Verwacht"]
+    for col_base in board_column_names:
+        column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
+    column_order += ["Toelichting", "Vorige keer"]
+    return column_config, column_order
+
+
+def _render_own_lineup_groups_with_opponents(all_matchups: list, name_lookup_global: dict) -> None:
+    if not all_matchups:
+        return
+    groups: dict = {}
+    for m in all_matchups:
+        key = _own_lineup_group_key(m["assignment"])
+        groups.setdefault(key, []).append(m)
+
+    def _sort_val(m):
+        ebw = m.get("expected_boards_won")
+        return ebw if ebw is not None else m.get("total_score", 0.0)
+
+    st.markdown('<div class="section-header">Onze opstellingen - klap open voor de tegenstander-opstellingen</div>', unsafe_allow_html=True)
+    st.caption(
+        "Elke groep hieronder is 1 unieke combinatie van ONZE koppels (ongeacht bordvolgorde of tegen wie), "
+        "met het best-case/worst-case-resultaat al zichtbaar in de titel. Klap een groep open om ALLE "
+        "doorgerekende tegenstander-opstellingen tegen DIE opstelling te zien, gesorteerd van beste naar "
+        "slechtste verwachte winkans voor ons."
+    )
+    st.caption(
+        "Reglementair: OK = geverifieerd conform art. 6.6. NIET = een bewust omgedraaide, niet-toegelaten "
+        "variant. onzeker = minstens 1 speler heeft nog geen bekend officieel klassement - de volgorde kon "
+        "NIET betrouwbaar geverifieerd worden."
+    )
+    group_entries = []
+    for key, rows_for_group in groups.items():
+        rows_sorted = sorted(rows_for_group, key=_sort_val, reverse=True)
+        best, worst = rows_sorted[0], rows_sorted[-1]
+        volgorde = [a["our_pair"] for a in best["assignment"]]
+        korte_delen, lange_regels = [], []
+        for idx, (p1, p2) in enumerate(volgorde):
+            rot = idx // 2 + 1
+            m_in_rot = idx % 2 + 1
+            naam1 = name_lookup_global.get(p1, p1)
+            naam2 = name_lookup_global.get(p2, p2)
+            korte_delen.append(f"R{rot}M{m_in_rot} {naam1}/{naam2}")
+            lange_regels.append(f"- **Rotatie {rot} - Match {m_in_rot}**: {naam1} / {naam2}")
+        group_entries.append((" \u00b7 ".join(korte_delen), lange_regels, rows_sorted, best, worst))
+    group_entries.sort(key=lambda g: _sort_val(g[3]), reverse=True)
+    for pair_labels, lange_regels, rows_sorted, best, worst in group_entries:
+        best_ebw, worst_ebw = best.get("expected_boards_won"), worst.get("expected_boards_won")
+        best_txt = f"{best_ebw:.2f}" if best_ebw is not None else f"score {best.get('total_score', 0):.3f}"
+        worst_txt = f"{worst_ebw:.2f}" if worst_ebw is not None else f"score {worst.get('total_score', 0):.3f}"
+        best_badge = _compliance_badge(best.get("fully_compliant", True), best.get("rank_data_incomplete", False))
+        worst_badge = _compliance_badge(worst.get("fully_compliant", True), worst.get("rank_data_incomplete", False))
+        header = (
+            f"Best {best_txt} {best_badge} \u00b7 Worst {worst_txt} {worst_badge}  -  {pair_labels}"
+        )
+        with st.expander(header, expanded=False):
+            st.markdown("**Onze opstelling in deze groep:**")
+            st.markdown("\n".join(lange_regels))
+            st.caption(
+                f"Best case {best_txt} en worst case {worst_txt} verwachte gewonnen matchen, over "
+                f"{len(rows_sorted)} doorgerekende tegenstander-opstelling(en)."
+            )
+            table_rows, board_column_names = _matchups_to_table_rows(rows_sorted, name_lookup_global)
+            column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
+            st.dataframe(
+                table_rows, use_container_width=True, hide_index=True,
+                column_config=column_config, column_order=column_order,
+            )
+    st.divider()
+
+
+def _render_best_for_selected_player(
+    all_matchups: list, sel_player_id: str, name_lookup_global: dict,
+) -> None:
+    """Welke ploegopstelling is het beste VOOR EEN SPECIFIEKE speler?"""
+    if not all_matchups or not sel_player_id:
+        return
+    sel_id = str(sel_player_id)
+    sel_naam = name_lookup_global.get(sel_id, sel_id)
+    groepen: dict = {}
+    for m in all_matchups:
+        eigen_kansen = []
+        eigen_posities = []
+        for idx, a in enumerate(m["assignment"]):
+            p1, p2 = (str(x) for x in a["our_pair"])
+            if sel_id not in (p1, p2):
+                continue
+            wp = a.get("win_probability")
+            if wp is not None:
+                eigen_kansen.append(wp)
+            partner = p2 if p1 == sel_id else p1
+            rot = idx // 2 + 1
+            m_in_rot = idx % 2 + 1
+            eigen_posities.append((rot, m_in_rot, partner))
+        if not eigen_kansen:
+            continue
+        key = _own_lineup_group_key(m["assignment"])
+        slot = groepen.setdefault(key, {
+            "kansen": [], "posities": eigen_posities,
+            "assignment": m["assignment"], "n_opstellingen": 0,
+            "team_ebw": [],
+        })
+        slot["kansen"].append(sum(eigen_kansen) / len(eigen_kansen))
+        team_ebw = m.get("expected_boards_won")
+        if team_ebw is not None:
+            slot["team_ebw"].append(team_ebw)
+        slot["n_opstellingen"] += 1
+    if not groepen:
+        st.info(
+            f"{sel_naam} komt in geen enkele doorgerekende opstelling voor - selecteer "
+            "deze speler hierboven bij 'Beschikbare eigen spelers' om deze tabel te vullen."
+        )
+        return
+    rijen = []
+    for slot in groepen.values():
+        kansen = slot["kansen"]
+        gemiddeld = sum(kansen) / len(kansen)
+        posities = slot["posities"]
+        pos_txt = " + ".join(
+            f"R{rot}M{m_in_rot} met {name_lookup_global.get(partner, partner)}"
+            for rot, m_in_rot, partner in posities
+        )
+        opstelling_txt = " \u00b7 ".join(
+            f"R{idx // 2 + 1}M{idx % 2 + 1} "
+            f"{name_lookup_global.get(str(a['our_pair'][0]), a['our_pair'][0])}/"
+            f"{name_lookup_global.get(str(a['our_pair'][1]), a['our_pair'][1])}"
+            for idx, a in enumerate(slot["assignment"])
+        )
+        team_ebw_list = slot["team_ebw"]
+        team_gemiddeld = (sum(team_ebw_list) / len(team_ebw_list)) if team_ebw_list else None
+        rijen.append({
+            "Gemiddelde winkans": round(gemiddeld * 100, 1),
+            "Slechtste geval": round(min(kansen) * 100, 1),
+            "Beste geval": round(max(kansen) * 100, 1),
+            "Team gemiddeld": round(team_gemiddeld, 2) if team_gemiddeld is not None else None,
+            f"Positie van {sel_naam}": pos_txt,
+            "Volledige ploegopstelling": opstelling_txt,
+            "Tegenstander-scenario's": slot["n_opstellingen"],
+        })
+    rijen.sort(key=lambda r: r["Gemiddelde winkans"], reverse=True)
+    st.markdown(
+        f'<div class="section-header">Beste opstelling voor {sel_naam}</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Alle doorgerekende ploegopstellingen waarin **{sel_naam}** meespeelt, gerangschikt op "
+        "de GEMIDDELDE persoonlijke winkans over ALLE tegenstander-opstellingen - dus robuust "
+        "tegen een verrassing van de tegenstander. 'Slechtste geval' toont hoe diep die kans kan "
+        "zakken als de tegenstander de voor ons ongunstigste opstelling kiest."
+    )
+    st.caption(
+        "'Team gemiddeld' is het verwacht aantal gewonnen matchen voor de HELE ploeg (niet enkel "
+        f"{sel_naam}) bij dezelfde opstelling - zo zie je meteen of een opstelling die goed is voor "
+        f"{sel_naam} persoonlijk, ook goed is voor het team, of net een compromis vereist."
+    )
+    try:
+        import pandas as _pd
+        df = _pd.DataFrame(rijen)
+        styled = df.style.background_gradient(
+            subset=["Gemiddelde winkans"], cmap="RdYlGn", vmin=0, vmax=100,
+        ).format({
+            "Gemiddelde winkans": "{:.1f}%",
+            "Slechtste geval": "{:.1f}%",
+            "Beste geval": "{:.1f}%",
+            "Team gemiddeld": lambda v: f"{v:.2f}" if v is not None else "-",
+        })
+        st.dataframe(
+            styled, use_container_width=True, hide_index=True,
+            column_config={
+                "Gemiddelde winkans": st.column_config.NumberColumn("Gem. winkans", width="small"),
+                "Slechtste geval": st.column_config.NumberColumn("Worst", width="small"),
+                "Beste geval": st.column_config.NumberColumn("Best", width="small"),
+                "Team gemiddeld": st.column_config.NumberColumn("Team gem.", width="small"),
+                "Tegenstander-scenario's": st.column_config.NumberColumn("Scen.", width="small"),
+                "Volledige ploegopstelling": st.column_config.TextColumn(
+                    "Volledige ploegopstelling", width="large",
+                ),
+            },
+        )
+    except Exception:
+        st.dataframe(rijen, use_container_width=True, hide_index=True)
+    beste = rijen[0]
+    team_val = beste.get("Team gemiddeld")
+    team_txt = f", team gemiddeld **{team_val:.2f}**" if team_val is not None else ""
+    st.success(
+        f"Beste voor {sel_naam}: **{beste['Volledige ploegopstelling']}** "
+        f"- gemiddeld **{beste['Gemiddelde winkans']:.1f}%** winkans "
+        f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}."
+    )
+    st.divider()
+
+
+def _render_all_valid_matchups(
+    bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
+    player_ratings, official_ranks_strict, opponent_ratings, report,
+    name_lookup_global, sel_player_id, tournament_rules_dict=None, rules_label=None,
+):
+    st.divider()
+    st.markdown('<div class="section-header">Opstelling-scenario\'s</div>', unsafe_allow_html=True)
+    st.caption(
+        "ALLE reglementair geldige, rotatie-veilige combinaties van onze opstelling tegen hun "
+        "opstelling, in EEN tabel - klik op een kolomkop om te sorteren. De opstelling die de "
+        "tegenstander vorige keer effectief speelde is gemarkeerd in de kolom 'Vorige keer'."
+    )
+    include_non_compliant = st.checkbox(
+        "Toon ook bewust omgedraaide, NIET-reglementaire varianten (bv. een zwakker duo bewust "
+        "'opofferen' op de zwaarste match, om het sterkere duo een gunstiger match te geven)",
+        value=False, key=f"include_non_compliant_{opp['ploeg_id']}",
+        help="Bij een EXACT gelijk officieel klassement zijn beide volgordes sowieso al reglementair "
+             "toegelaten (art. 6.6 laat de ploeg dan zelf kiezen) en worden altijd getoond. Deze "
+             "checkbox voegt daarnaast varianten toe die het officiele klassement bewust NEGEREN "
+             "(dus een overtreding zouden zijn) - duidelijk gelabeld, puur om het best-case/"
+             "worst-case-bereik van een koppelkeuze te kunnen inschatten.",
+    )
+    if include_non_compliant:
+        st.caption(
+            "Rijen gemarkeerd met 'NIET' in de kolom 'Reglementair' zijn GEEN toegelaten "
+            "opstelling volgens het reglement - gebruik ze enkel om een risico-inschatting te maken, "
+            "nooit als effectieve wedstrijdopstelling."
+        )
+    historical_boards_with_labels = _historical_opponent_boards_list(bundle)
+    st.markdown("##### Tegenstander-roster voor theoretische scenario's")
+    st.caption(
+        "Kies WIE van de tegenstander waarschijnlijk beschikbaar is. We berekenen dan ALLE mogelijke "
+        "opstellingen die zij daaruit kunnen vormen (officiele regel: hun sterkste duo - som van "
+        "klassementen, met padelstat als tie-breaker bij gelijkspel - op Match 1, per rotatie) en "
+        "voegen die toe aan de tabel hieronder."
+    )
+    unique_players = bundle.get("unique_players", []) or []
+    theoretical_boards: list = []
+    if not unique_players:
+        st.info("Nog geen tegenstander-spelers gekend om theoretische opstellingen voor te berekenen.")
+    else:
+        opp_labels = [p.get("name", "?") for p in unique_players]
+        opp_label_to_id = {p.get("name", "?"): str(p.get("user_id")) for p in unique_players}
+        default_opp_labels = opp_labels
+        st.caption(
+            f"Standaard staan alle {len(opp_labels)} bekende tegenstander-spelers geselecteerd, zodat ALLE "
+            "mogelijke opstellingen automatisch worden meegenomen. Verklein de lijst enkel als je zeker weet "
+            "dat bepaalde spelers niet zullen meespelen."
+        )
+        chosen_opp_labels = st.multiselect(
+            "Beschikbare tegenstander-spelers", opp_labels, default=default_opp_labels,
+            key=f"theoretical_opp_players_{opp['ploeg_id']}",
+        )
+        chosen_opp_ids = [opp_label_to_id[lbl] for lbl in chosen_opp_labels]
+        needed = 2 * total_boards
+        if len(chosen_opp_ids) < 2:
+            st.info(
+                "Selecteer minstens 2 tegenstander-spelers om theoretische scenario's toe te voegen. "
+                "De historische opstelling(en) blijven sowieso al in de tabel staan."
+            )
+        else:
+            chosen_opp_players = [p for p in unique_players if str(p.get("user_id")) in chosen_opp_ids]
+            opponent_official_ranks = _opponent_official_ranks(chosen_opp_ids)
+            missing_opp_official = [pid for pid in chosen_opp_ids if pid not in opponent_official_ranks]
+            if missing_opp_official:
+                opp_names = [p.get("name", str(p.get("user_id"))) for p in chosen_opp_players if str(p.get("user_id")) in missing_opp_official]
+                st.caption(
+                    f"Geen officieel klassement gekend voor: {', '.join(opp_names)} - behandeld als "
+                    "'onbekende sterkte' bij het genereren van theoretische opstellingen."
+                )
+            opponent_padelstat_ratings = _opponent_padelstat_ratings(bundle)
+            default_opp_max = _default_opponent_max_per_player(chosen_opp_ids, needed)
+            roster_sig_key = f"opp_roster_sig_{opp['ploeg_id']}"
+            roster_signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
+            if st.session_state.get(roster_sig_key) != roster_signature:
+                prefix = f"opp_max_{opp['ploeg_id']}_"
+                for stale_key in [k for k in list(st.session_state) if str(k).startswith(prefix)]:
+                    st.session_state.pop(stale_key, None)
+                st.session_state[roster_sig_key] = roster_signature
+            st.caption(
+                f"Max. aantal wedstrijden per tegenstander-speler (standaard gelijk verdeeld over {needed} "
+                "benodigde plaatsen - een speler mag, net als bij ons, meerdere matchen spelen met "
+                "verschillende partners, maar nooit 2 GELIJKTIJDIGE matchen binnen dezelfde rotatie). "
+                "Dit herberekent automatisch zodra je de selectie hierboven of het aantal wedstrijden wijzigt:"
+            )
+            opp_cols = st.columns(min(len(chosen_opp_ids), 6) or 1)
+            opponent_max_per_player = {}
+            for i, pid in enumerate(chosen_opp_ids):
+                with opp_cols[i % len(opp_cols)]:
+                    opponent_max_per_player[pid] = st.number_input(
+                        next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid),
+                        min_value=0, max_value=int(total_boards),
+                        value=default_opp_max.get(pid, 0), step=1,
+                        key=f"opp_max_{opp['ploeg_id']}_{pid}",
+                    )
+            opp_total_slots = sum(opponent_max_per_player.values())
+            if opp_total_slots != needed:
+                st.error(
+                    f"Som van tegenstander-plaatsen ({opp_total_slots}) moet gelijk zijn aan 2x wedstrijden "
+                    f"({needed}). Pas de aantallen hierboven aan."
+                )
+            else:
+                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
+                meta_key = f"theoretical_boards_meta_{opp['ploeg_id']}"
+                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
+                signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
+                if st.session_state.get(sig_key) != signature:
+                    lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
+                        chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
+                        opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
+                    )
+                    st.session_state[compute_key] = lineups
+                    st.session_state[meta_key] = meta
+                    st.session_state[sig_key] = signature
+                theoretical_boards = st.session_state.get(compute_key) or []
+                meta = st.session_state.get(meta_key) or {"total_theoretical": 0, "truncated": False}
+                st.caption(f"**{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
+                if meta["truncated"]:
+                    st.warning(f"Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
+    unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
+    if not unique_opponent_lineups:
+        st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
+        return []
+    settings_signature = (
+        tuple(sorted(available_ids)),
+        tuple(sorted(max_per_player.items())),
+        int(total_boards),
+        tuple(sorted(tournament_rules_dict.items())) if tournament_rules_dict else None,
+        bool(include_non_compliant),
+        frozenset(unique_opponent_lineups.keys()),
+    )
+    ratings_signature = (
+        tuple(sorted(player_ratings.items())),
+        tuple(sorted(official_ranks_strict.items())),
+        tuple(sorted(opponent_ratings.items())),
+    )
+    signature = (settings_signature, ratings_signature)
+    result_key = f"scenario_result_{opp['ploeg_id']}"
+    sig_key = f"scenario_result_sig_{opp['ploeg_id']}"
+    clicked = st.button(
+        "Bereken alle geldige matchups", type="primary", key=f"compute_scenarios_{opp['ploeg_id']}",
+        help="Berekent pas NA deze klik - wijzig gerust eerst alle instellingen hierboven zonder dat de "
+             "pagina telkens opnieuw moet rekenen.",
+    )
+    if clicked:
+        with st.spinner(f"Alle geldige matchups doorrekenen ({len(unique_opponent_lineups)} tegenstander-opstelling(en))..."):
+            st.session_state[result_key] = _build_all_valid_matchups(
+                unique_opponent_lineups, available_ids, max_per_player, synergy_fn,
+                player_ratings, official_ranks_strict, opponent_ratings, tournament_rules_dict,
+                include_non_compliant_variants=include_non_compliant,
+            )
+            st.session_state[sig_key] = signature
+    stored = st.session_state.get(result_key)
+    if stored is None:
+        st.info("Stel hierboven alles in en klik op **'Bereken alle geldige matchups'** om de tabel te vullen.")
+        return []
+    stored_signature = st.session_state.get(sig_key)
+    if stored_signature != signature:
+        stored_settings = stored_signature[0] if stored_signature else None
+        if stored_settings != settings_signature:
+            st.warning(
+                "De instellingen zijn gewijzigd sinds de laatste berekening - de tabel hieronder toont nog "
+                "het VORIGE resultaat. Klik opnieuw op 'Bereken alle geldige matchups' om bij te werken."
+            )
+        else:
+            st.warning(
+                "De padelstat- en/of klassementwaarden zijn intussen ververst op de achtergrond sinds je "
+                "laatste berekening - de tabel hieronder klopt dus mogelijk niet meer met de actuele data. "
+                "Klik opnieuw op 'Bereken alle geldige matchups' om de analyse bij te werken."
+            )
+    all_matchups, truncated, total_seen, build_diag = stored
+    st.divider()
+    n_hist = len(historical_boards_with_labels)
+    n_theo = len(theoretical_boards)
+    with st.expander("Diagnostiek: hoeveel combinaties werden er precies doorgerekend?", expanded=False):
+        st.write(f"- Rotatie-veilige eigen koppelverdelingen (totaal enumereerd): **{build_diag['own_structures_total']}**")
+        st.write(f"- Daaruit gegenereerde volgorde-varianten (incl. eventuele swap-varianten): **{build_diag['own_variants_generated']}**")
+        st.write(f"- Daarvan uitgesloten door de reglementaire puntengrens: **{build_diag['own_excluded_by_rules']}**")
+        st.write(f"- Reglementair geldige eigen combinaties (puntengrens OK): **{build_diag['own_valid']}**")
+        st.write(f"- Historische tegenstander-opstellingen (al gespeeld dit seizoen): **{n_hist}**")
+        st.write(f"- Theoretische tegenstander-opstellingen (uit de gekozen roster hierboven): **{n_theo}**")
+        st.write(f"- Unieke tegenstander-opstellingen na samenvoegen (dubbels verwijderd): **{len(unique_opponent_lineups)}**")
+        st.write(f"- Totaal doorgerekende matchup-kandidaten (voor ontdubbeling): **{total_seen}**")
+        st.write(f"- Uiteindelijk getoonde, geldige matchups: **{len(all_matchups)}**")
+        if n_theo == 0 and unique_players:
+            st.warning(
+                "Er werden 0 theoretische tegenstander-opstellingen meegenomen - controleer of hierboven "
+                "voldoende tegenstander-spelers geselecteerd staan."
+            )
+    if truncated:
+        st.warning(
+            f"Er zijn meer dan {_MAX_TOTAL_MATCHUPS} geldige matchups gevonden - enkel de eerste "
+            f"{_MAX_TOTAL_MATCHUPS} zijn meegenomen. Verklein de spelersselectie voor een volledige dekking."
+        )
+    st.caption(f"**{len(all_matchups)}** geldige matchup(s) gevonden, gesorteerd van hoogste naar laagste verwachte winstkans.")
+    if not all_matchups:
+        st.info(
+            "Geen enkele matchup voldoet aan de reglementaire puntengrens per rotatie, of er is geen "
+            "combinatie mogelijk zonder een speler dubbel in dezelfde rotatie te plaatsen. Controleer de "
+            "gekozen afdeling en het aantal beschikbare spelers."
+        )
+        return []
+    _render_own_lineup_groups_with_opponents(all_matchups, name_lookup_global)
+    _render_best_for_selected_player(all_matchups, sel_player_id, name_lookup_global)
+    with st.expander("Platte tabel (alle matchups los naast elkaar, sorteerbaar per kolom)", expanded=False):
+        show_all_key = f"all_matchups_showall_{opp['ploeg_id']}"
+        show_all = st.checkbox(
+            f"Toon alle {len(all_matchups)} matchups (i.p.v. de beste {_MATCHUP_DISPLAY_DEFAULT_N})",
+            key=show_all_key,
+        ) if len(all_matchups) > _MATCHUP_DISPLAY_DEFAULT_N else False
+        display_matchups = all_matchups if show_all else all_matchups[:_MATCHUP_DISPLAY_DEFAULT_N]
+        table_rows, board_column_names = _matchups_to_table_rows(display_matchups, name_lookup_global)
+        column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
+        st.dataframe(
+            table_rows, use_container_width=True, hide_index=True,
+            column_config=column_config, column_order=column_order,
+        )
+        st.caption(
+            "Elk speler-duo staat in zijn eigen kolom ('Ons duo' / 'Tegenstander'), naast een aparte "
+            "winkans-kolom per match. 'Rotatie1 M1' = Match 1 van rotatie 1 (sterkste duo volgens officieel "
+            "klassement, art. 6.6), 'Rotatie1 M2' = Match 2, enz. De kolom 'Toelichting' toont de exacte "
+            "officiele puntensom per duo die deze volgorde bepaalt (nooit de padelstat-score)."
+        )
+        if not show_all and len(all_matchups) > len(display_matchups):
+            st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} matchups getoond - vink hierboven aan om alles te zien.")
+    st.divider()
+    ai_history_key = f"all_matchups_chat_history_v2_{opp['ploeg_id']}"
+    if ai_history_key not in st.session_state:
+        st.session_state[ai_history_key] = []
+    ai_history = st.session_state[ai_history_key]
+    if taa is not None and report is not None:
+        col_ai_start, col_ai_clear = st.columns([3, 1])
+        with col_ai_start:
+            ai_start_label = "AI-inzicht over de beste matchups" if not ai_history else "AI-inzicht opnieuw genereren (nieuw gesprek)"
+            if st.button(ai_start_label, key=f"all_matchups_ai_{opp['ploeg_id']}"):
+                with st.spinner("AI analyseert..."):
+                    try:
+                        antwoord = taa.analyze_lineup_options(report, display_matchups[:5], name_lookup_global)
+                    except Exception as exc:
+                        antwoord = f"Mislukt: {exc}"
+                st.session_state[ai_history_key] = [{"role": "assistant", "content": antwoord}]
+                st.rerun()
+        with col_ai_clear:
+            if ai_history and st.button("Nieuw gesprek", key=f"all_matchups_ai_clear_{opp['ploeg_id']}"):
+                st.session_state[ai_history_key] = []
+                st.rerun()
+        if ai_history:
+            st.caption("Gesprek tot nu toe:")
+            for msg in ai_history:
+                role_label = "Jij" if msg["role"] == "user" else "AI"
+                with st.container(border=True):
+                    st.markdown(f"**{role_label}**")
+                    st.markdown(msg["content"])
+            followup_question = st.text_area(
+                "Doorvraag", key=f"all_matchups_ai_followup_{opp['ploeg_id']}", height=70,
+                label_visibility="collapsed", placeholder="Bv. En wat als Nico niet kan spelen?",
+            )
+            if st.button("Vraag door", key=f"all_matchups_ai_followup_btn_{opp['ploeg_id']}"):
+                if not followup_question.strip():
+                    st.warning("Typ eerst een vraag.")
+                else:
+                    with st.spinner("AI denkt na..."):
+                        try:
+                            vervolg = taa.analyze_lineup_options(
+                                report, display_matchups[:5], name_lookup_global, history=ai_history,
+                            )
+                        except Exception as exc:
+                            vervolg = f"Mislukt: {exc}"
+                    st.session_state[ai_history_key] = ai_history + [
+                        {"role": "user", "content": followup_question.strip()},
+                        {"role": "assistant", "content": vervolg},
+                    ]
+                    st.rerun()
+    if st.button("Deze analyse opslaan (alle getoonde matchups)", key=f"save_all_matchups_{opp['ploeg_id']}"):
+        payload = {
+            "opponent_name": opp.get("name"), "opponent_ploeg_id": opp.get("ploeg_id"),
+            "own_player_ids": available_ids,
+            "own_player_labels": [name_lookup_global.get(pid, pid) for pid in available_ids],
+            "total_boards": int(total_boards), "max_per_player": max_per_player,
+            "scenarios": [
+                {
+                    "s_idx": rank, "fixture_label": (
+                        f"Matchup #{rank}" + (f" (zoals gespeeld op {', '.join(m['historical_labels'])})" if m["is_historical"] else "")
+                        + ("" if m.get("fully_compliant", True) else " [niet-reglementaire variant]")
+                    ),
+                    "boards_count": len(m["assignment"]),
+                    "options": [{
+                        "total_score": m["total_score"], "expected_boards_won": m.get("expected_boards_won"),
+                        "assignment": [
+                            {
+                                "our_pair_labels": [name_lookup_global.get(a["our_pair"][0], a["our_pair"][0]), name_lookup_global.get(a["our_pair"][1], a["our_pair"][1])],
+                                "synergy": a["synergy"], "edge": a["edge"], "win_probability": a.get("win_probability"),
+                                "opponent_names": [p.get("name", "?") for p in a["opponent_board"]["opponent_pair"]],
+                            } for a in m["assignment"]
+                        ],
+                    }],
+                } for rank, m in enumerate(all_matchups, start=1)
+            ],
+        }
+        doc_id = fb.save_lineup_analysis(sel_player_id, payload)
+        st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
+    return all_matchups
