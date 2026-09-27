@@ -41,67 +41,49 @@ Lijkt me niet nodig. Je mag die rangschikking altijd zien")
 ROOT CAUSE: de Rangschikking-tab toonde de rangschikkingslink enkel als
 `scout_result` niet None was - d.w.z. enkel als de VOLLEDIGE tegenstander-
 scout (opponent-analyse, incl. Playwright-ophaling van de tegenstander se
-matchdata) gelukt was. De rangschikking zelf heeft daar functioneel niets
-mee te maken: het is een PUBLIEKE TVL-pagina (bevestigd via een door Kim
-aangeleverde kopie van de pagina-HTML: `isSignedIn(): false`, geen enkel
-login-scherm, de tabel laadt gewoon) die uitsluitend `spelgroepId` +
-`pouleId` als input nodig heeft. Als de tegenstander-scout faalt (bv. nog
-geen playwright-data voor de tegenstander, een tijdelijke netwerkfout, of
-de tegenstander-roster kon nog niet ontdekt worden), blokkeerde dat dus
-ONTERECHT ook de rangschikking, zelfs als spelgroepId/pouleId al bekend
-waren uit een eerdere, wel geslaagde render deze sessie.
-FIX (binnen dit bestand): zodra `reeks_url`/`spelgroep_id` gekend zijn,
-worden ze bewaard in st.session_state onder een per-speler sleutel. Bij
-een latere render waarbij `scout_result` faalt, valt de Rangschikking-tab
-terug op deze laatst gekende waarde in plaats van de hele tab te
-blokkeren - de rangschikkingslink en de eigen berekende ranking-tabel
-(`oa.render_ranking_tab`, indien een rapport gekend is) blijven dan gewoon
-zichtbaar.
+matchdata) gelukt was.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_POULE_RANKING_INTEGRATION_2026-09-27 (op verzoek van Kim:
 "ik zie nu die nieuwe logica niet me de punten per ploeg en de info in
 welke scenario's we kunnen doorgaan door bij de beste 2 te eindigen.")
 --------------------------------------------------------------------------
-ROOT CAUSE: `poule_ranking.py` (de module met de volledige rangschikkings-
-tabel + kwalificatiescenario's - "eerste 2 gaan door", tie-break via
-onderlinge confrontatie bij een gelijke stand tussen 2 ploegen) was al
-volledig gebouwd EN getest, maar nooit daadwerkelijk aangesloten op dit
-bestand - enkel de aansluitcode zelf was ooit gegeven, nooit effectief in
-dit bestand verwerkt. Vandaar dat Kim de puntentabel en de scenario's nooit
-zag verschijnen, ondanks dat de module correct werkte.
 FIX (binnen dit bestand, in `page_lineup_lab()`, tab "Rangschikking"): na
 `_render_rangschikking_link()` en `oa.render_ranking_tab()` wordt nu ook
 `poule_ranking.render_poule_ranking_tab(reeks_url_for_ranking, fixtures,
-own_ploeg_id)` aangeroepen, zodra `own_ploeg_id` gekend is. Dit gebruikt
-DEZELFDE `reeks_url_for_ranking` (nu OF uit de sticky cache) en dezelfde
-`fixtures`/`own_ploeg_id` die al in session_state zitten sinds "Volgende
-match" - dus geen extra scrape, geen nieuwe afhankelijkheid van de
-tegenstander-scout, en zichtbaar in exact dezelfde gevallen als de
-rangschikkingslink zelf. Een ontbrekende/falende `poule_ranking`-import
-wordt (zoals bij het "Andere ploegen"-tabblad hieronder) opgevangen met
-een `st.warning`, nooit met een crash van de hele pagina.
+own_ploeg_id)` aangeroepen.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27 (op verzoek
-van Kim: "nog steeds dit probleem bij rangschikking: Kon de module
-'poule_ranking' niet laden [...]" - terwijl een los diagnosescript
-bevestigde dat `import poule_ranking` LOKAAL, rechtstreeks, wel gewoon
-slaagt: geen duplicaat-bestand, geen ontbrekende dependency)
+PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27
 --------------------------------------------------------------------------
-ROOT CAUSE VAN HET ONTBREKENDE INZICHT (niet van de onderliggende fout
-zelf, die nog niet met zekerheid vastgesteld is): `except Exception:
-poule_ranking = None` hieronder ving de ECHTE foutmelding altijd stil op.
-Dat betekent dat Kim, telkens de import om eender welke reden faalt (een
-tijdelijk niet-herstarte app, een ontbrekende dependency specifiek in de
-draaiende omgeving, een subtiele padverwarring, ...), enkel de generieke
-"kon de module niet laden"-melding zag, nooit de onderliggende Python-
-foutmelding zelf - en dus telkens opnieuw een los diagnosescript nodig had
-om verder te komen.
-FIX: de faalreden wordt nu bewaard in `_poule_ranking_import_error`
-(module-niveau) en getoond in de waarschuwing in de Rangschikking-tab
-(`_render_poule_ranking_section()`, hieronder) - zodat de ECHTE oorzaak
-(bv. `ModuleNotFoundError: No module named 'bs4'`, of een fout DIEP in
-poule_ranking.py zelf bij het importeren) voortaan direct in de app
-zichtbaar is, zonder een apart script te moeten draaien.
+De echte faalreden van `import poule_ranking` wordt nu bewaard en getoond
+i.p.v. stilzwijgend verborgen (zie `_poule_ranking_import_error`).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27 (op verzoek van
+Kim, MEERMAALS GEMELD: "Kies eerst een speler bij 'Toon analyse voor'
+hierboven. Wordt getoond bij de rangschikking. Dat is niet ok. Analyse
+moet niet gestart worden om dat te kunnen zien. Pas dat aan.")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd, ondanks de eerdere PADEL_ANALYSIS_RANGSCHIKKING_
+ALTIJD_ZICHTBAAR_2026-09-27-fix hierboven): die eerdere fix loste enkel
+op dat de Rangschikking-tab niet MEER blokkeerde ZODRA `reeks_url` al ooit
+gekend was in DEZE sessie (via de sticky cache) - maar bij de EERSTE keer
+dat een speler geselecteerd wordt (bv. na het wisselen naar een andere
+speler zoals Anneleen, of bij een verse sessie), was `reeks_url` nog
+NERGENS gekend totdat de gebruiker minstens 1x "Volgende match laden"
+aanklikte of de volledige tegenstander-scout liet lopen. Dat is exact wat
+Kim "analyse starten" noemt, en precies wat hij niet wil.
+FIX: `lineup_scout._known_ranking_context()` (nieuw) leest UITSLUITEND
+reeds opgeslagen data (dagelijks ververst poule-schema + eigen
+matchhistoriek) en bepaalt daaruit reeks_url/fixtures/own_ploeg_id
+ONAFHANKELIJK van elke knop-klik of scout. `page_lineup_lab()` roept dit nu
+ONVOORWAARDELIJK aan (niet enkel als scout_result ontbreekt) en vult
+daarmee zowel `reeks_url_for_ranking` als de `vm_fixtures_`/`vm_own_ploeg_
+id_`-session-state-sleutels aan, ZONDER de bestaande, volledige scout-flow
+te wijzigen (die overschrijft deze waarden gewoon zodra ze wél slaagt -
+geen conflict, enkel een vroegere, lichtere invulling ervoor).
+Bijkomend: de meldingstekst in de else-tak hieronder ("Kies eerst een
+speler...") was sowieso MISLEIDEND - er was al lang een speler gekozen via
+de dropdown, het echte probleem was dat reeks_url nog onbekend was. De
+tekst is herschreven naar wat er werkelijk aan de hand is.
 """
 import streamlit as st
 from dashboard_common import (
@@ -114,6 +96,7 @@ from lineup_scout import (
     _build_own_official_ranks_strict, _render_official_rank_warning,
     _opponent_padelstat_ratings, _cached_docs_for_players,
     _cached_own_player_rating, _clear_rank_caches, _load_encounter_index,
+    _known_ranking_context,
 )
 from lineup_rules import _render_tournament_rules_selector
 from lineup_opponent_history import (
@@ -127,9 +110,7 @@ try:
 except Exception:  # noqa: BLE001  pragma: no cover
     osc = None
 # PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27: de echte
-# faalreden wordt nu bewaard i.p.v. stilzwijgend weggegooid - zie
-# _render_poule_ranking_section() en de uitgebreide toelichting bovenaan
-# dit bestand.
+# faalreden wordt nu bewaard i.p.v. stilzwijgend weggegooid.
 _poule_ranking_import_error = None
 try:
     import poule_ranking
@@ -353,9 +334,7 @@ def _build_rangschikking_url(reeks_url: str):
 def _render_rangschikking_link(reeks_url: str) -> None:
     """PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: deze
     functie zelf is ongewijzigd - ze toont gewoon de link zodra ze een
-    geldige `reeks_url` krijgt. De fix zit in page_lineup_lab() hieronder,
-    die deze functie nu ook aanroept met een uit session_state
-    teruggevallen waarde wanneer scout_result recent gefaald is."""
+    geldige `reeks_url` krijgt."""
     url = _build_rangschikking_url(reeks_url)
     if url:
         try:
@@ -373,14 +352,8 @@ def _render_rangschikking_link(reeks_url: str) -> None:
 def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> None:
     """PADEL_ANALYSIS_POULE_RANKING_INTEGRATION_2026-09-27: sluit de al
     langer bestaande, apart getest `poule_ranking.py`-module effectief aan.
-    Toont de volledige puntentabel van de poule + per resterende eigen
-    wedstrijd alle kwalificatiescenario's ("gaan we door bij de beste 2?").
-    Gebruikt UITSLUITEND al gekende session_state-data (`fixtures`,
-    `own_ploeg_id`) - geen extra afhankelijkheid van de tegenstander-scout,
-    dus zichtbaar in dezelfde gevallen als de rangschikkingslink hierboven.
     PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27: toont nu
-    ook de ECHTE, onderliggende importfout (indien gekend) in plaats van
-    enkel de generieke "kon niet laden"-melding - zie moduledocstring."""
+    ook de ECHTE, onderliggende importfout (indien gekend)."""
     if poule_ranking is None:
         detail = f" Details: `{_poule_ranking_import_error}`." if _poule_ranking_import_error else ""
         st.warning(
@@ -392,8 +365,9 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
     if not own_ploeg_id:
         st.info(
-            "Eigen ploeg nog niet gekend voor deze speler - laad eerst 'Volgende match' "
-            "hierboven zodat de eigen ploeg herkend kan worden."
+            "Eigen ploeg nog niet gekend voor deze speler - dit wordt automatisch aangevuld "
+            "zodra het poule-schema voor deze speler bekend is (normaal via de dagelijkse "
+            "update, of laad 'Volgende match' hierboven)."
         )
         return
     try:
@@ -452,15 +426,28 @@ def page_lineup_lab():
                 current_spelgroep_id=spelgroep_id, global_docs=global_docs,
                 key_prefix=f"scout_team_{sel_player_id}",
             )
-    # PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: zie de
-    # uitgebreide toelichting bovenaan dit bestand. reeks_url/spelgroep_id
-    # worden hier per speler gecached in session_state zodra ze gekend
-    # zijn, zodat de Rangschikking-tab hieronder daarop kan terugvallen
-    # wanneer scout_result op een latere render faalt.
+    # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: ONVOORWAARDELIJK
+    # (dus ook als scout_result al slaagde) de reeds opgeslagen data raadplegen
+    # om reeks_url/fixtures/own_ploeg_id aan te vullen, ONAFHANKELIJK van of de
+    # volledige scout is uitgevoerd. Overschrijft NOOIT een reeds door de scout
+    # gezette, autoritatieve waarde (enkel aanvullen wanneer nog leeg).
+    known_reeks_url, known_fixtures, known_own_ploeg_id = _known_ranking_context(
+        str(sel_player_id), sel_label,
+    )
+    if known_fixtures and not st.session_state.get(f"vm_fixtures_{sel_player_id}"):
+        st.session_state[f"vm_fixtures_{sel_player_id}"] = known_fixtures
+    if known_own_ploeg_id and not st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}"):
+        st.session_state[f"vm_own_ploeg_id_{sel_player_id}"] = known_own_ploeg_id
+    # PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: reeks_url/
+    # spelgroep_id worden hier per speler gecached in session_state zodra ze
+    # gekend zijn (nu OF via de nieuwe, onafhankelijke known_reeks_url),
+    # zodat de Rangschikking-tab hieronder daarop kan terugvallen.
     reeks_url_cache_key = f"vm_reeks_url_cache_{sel_player_id}"
     if reeks_url:
         st.session_state[reeks_url_cache_key] = reeks_url
-    reeks_url_for_ranking = reeks_url or st.session_state.get(reeks_url_cache_key)
+    elif known_reeks_url:
+        st.session_state[reeks_url_cache_key] = known_reeks_url
+    reeks_url_for_ranking = reeks_url or known_reeks_url or st.session_state.get(reeks_url_cache_key)
     tab_analyse, tab_rang, tab_poule, tab_saved = st.tabs(
         ["Analyseren", "Rangschikking", "Andere ploegen", "Opgeslagen analyses"]
     )
@@ -483,28 +470,31 @@ def page_lineup_lab():
                 st.divider()
                 oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
     with tab_rang:
-        # PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: niet
-        # langer `if scout_result:` als poortwachter - enkel de effectief
-        # benodigde `reeks_url_for_ranking` (nu OF uit cache) bepaalt of de
-        # rangschikking getoond kan worden.
+        # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: enkel de
+        # effectief benodigde `reeks_url_for_ranking` (nu, uit onafhankelijke
+        # bron, OF uit cache) bepaalt of de rangschikking getoond kan worden -
+        # NOOIT afhankelijk van of de gebruiker al "analyseren" heeft gedaan.
         if reeks_url_for_ranking:
             _render_rangschikking_link(reeks_url_for_ranking)
             if report_for_ai is not None:
                 oa.render_ranking_tab(report_for_ai)
             elif scout_result:
-                # scout_result lukte deze keer wel, maar leverde (nog) geen
-                # rapport op (bv. unique_players leeg) - dit onderscheidt
-                # zich van het cache-only-scenario hierboven, waar geen
-                # melding nodig is omdat de gebruiker gewoon de link ziet.
                 st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
-            # PADEL_ANALYSIS_POULE_RANKING_INTEGRATION_2026-09-27: de
-            # effectieve puntentabel + kwalificatiescenario's, tot nu toe
-            # gebouwd maar nooit aangesloten - zie de toelichting bovenaan
-            # dit bestand.
             st.divider()
             _render_poule_ranking_section(reeks_url_for_ranking, sel_player_id)
         else:
-            st.info("Kies eerst een speler bij 'Toon analyse voor' hierboven.")
+            # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: de
+            # vorige tekst ("Kies eerst een speler...") was misleidend - er
+            # was al lang een speler gekozen; het echte probleem was dat
+            # reeks_url nog nergens gekend was (ook niet via de nieuwe,
+            # onafhankelijke lookup hierboven - bv. omdat het poule-schema
+            # voor deze speler nog nooit is opgehaald, automatisch of
+            # handmatig).
+            st.info(
+                "Kon de rangschikkingslink nog niet bepalen voor deze speler - het poule-schema "
+                "is nog niet gekend (dit wordt normaal automatisch aangevuld via de dagelijkse "
+                "update, of laad 'Volgende match' hierboven om het meteen op te halen)."
+            )
     with tab_poule:
         try:
             import poule_teams_ui as ptu

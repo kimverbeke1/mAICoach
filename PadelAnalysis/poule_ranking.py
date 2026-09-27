@@ -8,7 +8,6 @@ eerste 2 van een poule gaan door. [...] als wij nog 2 keer winnen dan ga
 je zeker door. Als je nog 1 keer wint, maar ploeg A doet dit en B dat dan
 ga je ook door etc [...] bij gelijke eindscore [gaat] de ploeg door die
 de onderlinge confrontatie gewonnen heeft.").
-
 --------------------------------------------------------------------------
 BRON: interclub-rangschikking-pagina - VOLLEDIG PUBLIEK, GEEN LOGIN NODIG
 --------------------------------------------------------------------------
@@ -16,12 +15,10 @@ Bevestigd in de ruwe HTML zelf: `Liferay.ThemeDisplay.isSignedIn(): false`
 en de pagina laadt de volledige rangschikkingstabel gewoon. Geen
 authenticatie-omweg nodig - een kale requests.get() volstaat, net als bij
 schedule_scraper.py's poule-schema-fetch.
-
 De pagina-URL is opgebouwd uit exact dezelfde spelgroepId/pouleId-
 parameters die _build_rangschikking_url() (page_lineup_lab.py) al langer
 correct berekent uit de bestaande poule/tabel-URL - dat stuk hoeft dus
 NIET aangepast te worden, enkel hergebruikt.
-
 --------------------------------------------------------------------------
 PUNTENSYSTEEM: WISKUNDIG GEVERIFIEERD, NIET AANGENOMEN
 --------------------------------------------------------------------------
@@ -41,7 +38,6 @@ Deze som-check is een KEIHARDE wiskundige bevestiging, geen aanname - bij
 eender welk ander puntensysteem (bv. 3-1-0, of 1-0) zou de som NIET exact
 18 uitkomen bij deze concrete data. WIN_POINTS/DRAW_POINTS/LOSS_POINTS
 hieronder zijn dus geverifieerd, niet gegokt.
-
 --------------------------------------------------------------------------
 KWALIFICATIE: "EERSTE 2 GAAN DOOR" - ALTIJD ZO IN DE POULEFASE
 --------------------------------------------------------------------------
@@ -49,7 +45,6 @@ Bevestigd door Kim (2026-09-27): "eerste 2 gaan door is altijd zo in
 poulefase." QUALIFYING_PLACES hieronder is dus een vaste constante (2),
 niet per afdeling instelbaar - in tegenstelling tot de puntengrens-per-
 rotatie-regels in tournament_rules.py, die WEL per afdeling verschillen.
-
 --------------------------------------------------------------------------
 TIE-BREAK: ONDERLINGE CONFRONTATIE (2-PLOEGEN-GEVAL, EXPLICIET GESCOPED)
 --------------------------------------------------------------------------
@@ -59,38 +54,62 @@ ploegen won, gaat door. Deze module bepaalt dat rechtstreeks uit de
 score van hun onderlinge fixture (schedule_scraper.parse_poule_schedule()
 -resultaat) - GEEN aparte aanname, gewoon dezelfde brondata die de rest
 van de app al gebruikt.
-
 Bij een gelijke stand tussen 3 OF MEER ploegen is er geen door Kim
 bevestigde regel voor de precieze cascade (kan per bond/reglement
 verschillen: punten onderling, sets onderling, games onderling, ...).
 Dit wordt EXPLICIET als "onbepaald - controleer handmatig" gerapporteerd
 in plaats van een gok te presenteren als feit.
+EERLIJKE, NOG OPEN KANTTEKENING (PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED_
+2026-09-27, op melding van Kim: "systeem denkt dat wij verloren hebben
+tegen TC eleven maar wij hebben gewonnen"): _encounter_result() hieronder
+leidt win/verlies af uit het RUWE "score"-tekstveld van het poule-schema
+(schedule_scraper.parse_poule_schedule()) - een veld dat, in tegenstelling
+tot het "Uitslag"-veld dat elders in de app (lineup_opponent_history.py,
+na een eerder vergelijkbare bug - PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-
+26) als autoritatieve bron gebruikt wordt, NOOIT apart geverifieerd is
+tegen echte win/verlies-uitkomsten. Zie diagnose_h2h_score.py voor een
+gericht diagnosescript om de exacte oorzaak (orientatie thuis/uit
+verwisseld, of een ander score-formaat dan verwacht) vast te stellen VOOR
+dit blind te "fixen" - een gok zou hier net zo goed een nieuwe, andere bug
+kunnen introduceren.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27 (op verzoek van
+Kim: "Nu vind ik de uitleg een beetje te simpel bij elke scenario [...]
+Ik zoek dus eerder wat en/of statements maar dan duidelijk case by case
+opgelijst")
+--------------------------------------------------------------------------
+ROOT CAUSE: de vorige "wat_nodig"-tekst voor de STRIKT-BOVEN-ONS-branch
+("moet minstens X punt(en) minder halen dan hun maximum (Y) - bv.
+minstens 1 resterende wedstrijd niet winnen") klopte TOEVALLIG bij PRECIES
+1 resterende wedstrijd voor die concurrent, maar is WISKUNDIG ONVOLLEDIG/
+verwarrend zodra een concurrent 2+ resterende wedstrijden heeft: "minstens
+3 punten minder halen" kan bijvoorbeeld NOOIT met slechts 1 wedstrijd niet
+winnen (dat scheelt maximaal 2 punten), maar de tekst suggereerde dat wel.
+FIX: _describe_points_shed_requirement() hieronder berekent nu een EXACTE,
+voor ELK aantal resterende wedstrijden correcte puntengrens ("mogen in
+totaal hoogstens X punten halen over hun Y resterende wedstrijden, i.p.v.
+hun rekenkundig maximum Z") - een AND/OF-vrije, maar wel altijd wiskundig
+kloppende absolute grens, in plaats van een enkel "bv."-voorbeeld dat bij
+meerdere resterende wedstrijden misleidend kan zijn.
 """
 from __future__ import annotations
-
 import itertools
 import re
 import time
 from typing import Optional
-
 import requests
 from bs4 import BeautifulSoup
-
 BASE_URL = "https://www.tennisenpadelvlaanderen.be"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"
-
 # PADEL_ANALYSIS_POULE_RANKING_SCENARIOS_2026-09-27: wiskundig geverifieerd
 # op de echte Poule Q-data (zie moduledocstring) - geen aanname.
 WIN_POINTS = 2
 DRAW_POINTS = 1
 LOSS_POINTS = 0
-
 # Bevestigd door Kim (2026-09-27): "eerste 2 gaan door is altijd zo in
 # poulefase" - geen instelbare/per-afdeling waarde, in tegenstelling tot
 # tournament_rules.py's puntengrens-per-rotatie.
 QUALIFYING_PLACES = 2
-
-
 def fetch_poule_ranking_html(
     url: str,
     session: Optional[requests.Session] = None,
@@ -106,23 +125,16 @@ def fetch_poule_ranking_html(
     response = session.get(full_url, timeout=20)
     response.raise_for_status()
     return response.text
-
-
 def _clean(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
-
-
 def _param_from_url(href: Optional[str], param: str) -> Optional[str]:
     from urllib.parse import parse_qs, urlparse
     if not href:
         return None
     values = parse_qs(urlparse(href).query).get(param)
     return values[0] if values else None
-
-
 def parse_poule_ranking(html: str) -> dict:
     """Parse de rangschikkingstabel + poule-metadata.
-
     Geeft een dict terug:
         {
             "poule_label": "Poule Q",
@@ -135,7 +147,6 @@ def parse_poule_ranking(html: str) -> dict:
                 ...
             ],
         }
-
     Geeft lege standings terug (met de rest van de metadata indien
     beschikbaar) als de tabel niet gevonden wordt - roept NOOIT een
     exception op voor een onverwachte paginastructuur, zodat de UI dit
@@ -150,7 +161,6 @@ def parse_poule_ranking(html: str) -> dict:
         text = _clean(title.get_text())
         m = re.search(r"Poule\s+([A-Z]{1,3})\b", text, re.IGNORECASE)
         result["poule_label"] = f"Poule {m.group(1).upper()}" if m else text
-
     for li in soup.find_all("li"):
         label_el = li.find(class_="list-label")
         value_el = li.find(class_="list-value")
@@ -168,14 +178,12 @@ def parse_poule_ranking(html: str) -> dict:
             # "5 ( - )" -> "5"
             m = re.match(r"(\S+)", value)
             result["afdeling"] = m.group(1) if m else value
-
     table = soup.find("table", attrs={"role": "grid"})
     if table is None:
         return result
     tbody = table.find("tbody")
     if tbody is None:
         return result
-
     standings = []
     for row in tbody.find_all("tr"):
         cells = {
@@ -216,14 +224,17 @@ def parse_poule_ranking(html: str) -> dict:
         })
     result["standings"] = standings
     return result
-
-
 def _encounter_result(score_text: Optional[str]) -> Optional[str]:
     """Leidt "win"/"draw"/"loss" (voor de THUISPLOEG) af uit de bordscore
     van 1 ontmoeting (bv. "4-0", "3-1", "2-2", "1-3", "0-4").
-
     Geeft None terug als de score niet leesbaar is (dan wordt deze
-    ontmoeting overgeslagen i.p.v. een verzonnen resultaat te gebruiken)."""
+    ontmoeting overgeslagen i.p.v. een verzonnen resultaat te gebruiken).
+    LET OP (PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED_2026-09-27): dit
+    interpreteert het "score"-veld van schedule_scraper.parse_poule_
+    schedule() als "aantal gewonnen borden thuis - aantal gewonnen borden
+    uit". Dat veld is NOOIT apart geverifieerd tegen echte uitslagen (zie
+    moduledocstring) - gebruik diagnose_h2h_score.py om dit te bevestigen
+    voor een specifieke, betwiste ontmoeting voor je hierop een fix baseert."""
     if not score_text:
         return None
     m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)\s*$", str(score_text).strip())
@@ -235,8 +246,6 @@ def _encounter_result(score_text: Optional[str]) -> Optional[str]:
     if home < away:
         return "loss"
     return "draw"
-
-
 def _remaining_fixtures_by_team(fixtures: list) -> dict:
     """Groepeert de NOG NIET gespeelde fixtures per ploeg_id."""
     out: dict = {}
@@ -248,8 +257,6 @@ def _remaining_fixtures_by_team(fixtures: list) -> dict:
             if pid:
                 out.setdefault(str(pid), []).append(fx)
     return out
-
-
 def _head_to_head_winner(fixtures: list, ploeg_id_a: str, ploeg_id_b: str) -> Optional[str]:
     """Geeft de ploeg_id terug die de ALREADY GESPEELDE onderlinge
     ontmoeting tussen deze 2 ploegen won, of None als ze nog niet
@@ -267,8 +274,28 @@ def _head_to_head_winner(fixtures: list, ploeg_id_a: str, ploeg_id_b: str) -> Op
             return away
         return None  # gelijkspel -> geen "winnaar" van de onderlinge confrontatie
     return None
-
-
+def _describe_points_shed_requirement(n_free_remaining: int, points_to_shed: int) -> str:
+    """PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27: vertaalt
+    "moet X punten minder halen dan hun maximum" naar een EXACTE, voor élk
+    aantal resterende wedstrijden correcte puntengrens - i.p.v. de vorige
+    tekst ("bv. minstens 1 resterende wedstrijd niet winnen") die enkel
+    bij PRECIES 1 resterende wedstrijd klopte en bij 2+ misleidend/
+    onvolledig was. Zie moduledocstring voor de volledige toelichting."""
+    if n_free_remaining <= 0:
+        return (
+            "hun puntentotaal ligt al vast (geen resterende wedstrijden meer in onze data) - "
+            "controleer handmatig of dit overeenkomt met de werkelijke kalender."
+        )
+    max_possible = n_free_remaining * WIN_POINTS
+    allowed_max = max(0, max_possible - points_to_shed)
+    wedstrijden_woord = "wedstrijd" if n_free_remaining == 1 else "wedstrijden"
+    return (
+        f"mogen over hun resterende {n_free_remaining} {wedstrijden_woord} in totaal HOOGSTENS "
+        f"{allowed_max} punt(en) halen (rekenkundig maximum: {max_possible}) om ons niet voorbij "
+        f"te steken. Zodra ze samen {allowed_max + 1} punt(en) of meer halen, gaan zij ons voorbij "
+        "- dat kan via elke combinatie van winst (2 punten), gelijkspel (1 punt) en verlies "
+        "(0 punten) die samen op dat totaal uitkomt."
+    )
 def compute_qualification_scenarios(
     standings: list, fixtures: list, own_ploeg_id: str,
 ) -> dict:
@@ -276,10 +303,8 @@ def compute_qualification_scenarios(
     RESTERENDE wedstrijden van de EIGEN ploeg, of kwalificatie (top
     QUALIFYING_PLACES) GEGARANDEERD, ONMOGELIJK, of AFHANKELIJK van andere
     resultaten is.
-
     Zie moduledocstring voor de volledige, wiskundig geverifieerde
     onderbouwing van het puntensysteem en de kwalificatieregel.
-
     Geeft een dict terug:
         {
             "own_ploeg_id": ..., "own_ploeg_naam": ...,
@@ -310,12 +335,9 @@ def compute_qualification_scenarios(
     remaining_by_team = _remaining_fixtures_by_team(fixtures)
     own_remaining = remaining_by_team.get(own_id, [])
     n_own_remaining = len(own_remaining)
-
     def _opponent_of(fx, pid):
         return str(fx["away_ploeg_id"]) if str(fx["home_ploeg_id"]) == pid else str(fx["home_ploeg_id"])
-
     own_remaining_opponents = [_opponent_of(fx, own_id) for fx in own_remaining]
-
     scenarios = []
     for own_results in itertools.product(["win", "draw", "loss"], repeat=n_own_remaining):
         own_added = sum(
@@ -323,7 +345,6 @@ def compute_qualification_scenarios(
             for r in own_results
         )
         own_final = points_now[own_id] + own_added
-
         threats = []
         multi_way_tie_ids = set()
         for competitor_id, competitor_points in points_now.items():
@@ -348,14 +369,16 @@ def compute_qualification_scenarios(
                 else:
                     n_free_remaining += 1
             competitor_ceiling = competitor_points + fixed_bonus + WIN_POINTS * n_free_remaining
-
             if competitor_ceiling > own_final:
+                # PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27:
+                # exacte, voor elk aantal resterende wedstrijden correcte
+                # puntengrens i.p.v. het vorige, enkel-bij-1-wedstrijd-
+                # kloppende "bv." voorbeeld.
                 threats.append({
                     "ploeg_id": competitor_id, "ploeg_naam": names.get(competitor_id, competitor_id),
                     "hun_max_punten": competitor_ceiling,
-                    "wat_nodig": (
-                        f"moet minstens {competitor_ceiling - own_final} punt(en) minder halen dan hun "
-                        f"maximum ({competitor_ceiling}) - bv. minstens 1 resterende wedstrijd niet winnen."
+                    "wat_nodig": _describe_points_shed_requirement(
+                        n_free_remaining, competitor_ceiling - own_final,
                     ),
                 })
             elif competitor_ceiling == own_final:
@@ -420,7 +443,6 @@ def compute_qualification_scenarios(
                             "zit niet in onze resterende wedstrijden - tie-break nog onbepaald."
                         ),
                     })
-
         if len(threats) == 0 or len(threats) == 1:
             status = "gegarandeerd"
         elif n_own_remaining == 0 and own_final <= min(
@@ -440,22 +462,18 @@ def compute_qualification_scenarios(
             )
             if already_ahead >= QUALIFYING_PLACES:
                 status = "onmogelijk"
-
         scenarios.append({
             "own_results": list(own_results),
             "own_final_points": own_final,
             "status": status,
             "threats": threats,
         })
-
     return {
         "own_ploeg_id": own_id,
         "own_ploeg_naam": names.get(own_id, own_id),
         "n_remaining": n_own_remaining,
         "scenarios": scenarios,
     }
-
-
 def _build_ranking_url_from_reeks_url(reeks_url: str) -> Optional[str]:
     """Zelfde opbouw als _build_rangschikking_url() (page_lineup_lab.py) -
     hier lokaal herhaald zodat deze module ook zelfstandig (zonder die
@@ -476,27 +494,21 @@ def _build_ranking_url_from_reeks_url(reeks_url: str) -> Optional[str]:
         return f"{base}?{urlencode({'spelgroepId': spelgroep_id, 'pouleId': poule_id})}"
     except Exception:
         return None
-
-
 # ---------------------------------------------------------------------------
 # UI: te integreren in page_lineup_lab.py, tab "Rangschikking"
 # ---------------------------------------------------------------------------
 _RESULT_LABEL = {"win": "Winst", "draw": "Gelijkspel", "loss": "Verlies"}
-
-
 def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) -> None:
     """Toont de volledige rangschikkingstabel + kwalificatiescenario's voor
     de eigen ploeg. Bedoeld om aangeroepen te worden in het tabblad
     "Rangschikking" van page_lineup_lab.py, NA (of i.p.v.)
     _render_rangschikking_link(reeks_url) - die knop/link kan gewoon blijven
     staan, dit voegt de effectieve tabel + scenario's eraan toe.
-
     `fixtures`: dezelfde poule-fixtures-lijst die al in
     st.session_state[f"vm_fixtures_{sel_player_id}"] staat (het resultaat
     van schedule_scraper.parse_poule_schedule()) - geen nieuwe scrape
     nodig, enkel hergebruik."""
     import streamlit as st
-
     url = _build_ranking_url_from_reeks_url(reeks_url)
     if not url:
         st.info(
@@ -504,7 +516,6 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             "moet eerst geladen zijn (zie 'Volgende match' hierboven)."
         )
         return
-
     cache_key = f"poule_ranking_{url}"
     if cache_key not in st.session_state:
         with st.spinner("Rangschikking ophalen..."):
@@ -513,7 +524,6 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
                 st.session_state[cache_key] = parse_poule_ranking(html)
             except Exception as e:  # noqa: BLE001
                 st.session_state[cache_key] = {"error": str(e)}
-
     data = st.session_state[cache_key]
     if data.get("error"):
         st.warning(f"Kon de rangschikking niet ophalen: {data['error']}")
@@ -521,18 +531,15 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             st.session_state.pop(cache_key, None)
             st.rerun()
         return
-
     standings = data.get("standings") or []
     if not standings:
         st.info("Nog geen rangschikkingsdata gevonden voor deze poule.")
         return
-
     meta_parts = [p for p in [data.get("season"), data.get("period"), data.get("category")] if p]
     if data.get("afdeling"):
         meta_parts.append(f"afdeling {data['afdeling']}")
     if meta_parts:
         st.caption(" \u00b7 ".join(meta_parts))
-
     rows = []
     for s in standings:
         is_own = str(s.get("ploeg_id")) == str(own_ploeg_id)
@@ -547,14 +554,12 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
         })
     try:
         import pandas as _pd
-
         def _kleur(row):
             if row.get("_is_own"):
                 return ["background-color: #cfe2ff; font-weight: 600"] * len(row)
             if row.get("_gaat_door"):
                 return ["background-color: #d4edda"] * len(row)
             return [""] * len(row)
-
         zichtbaar = [k for k in rows[0].keys() if not k.startswith("_")]
         df = _pd.DataFrame(rows)
         styled = df.style.apply(_kleur, axis=1)
@@ -568,14 +573,12 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
             use_container_width=True, hide_index=True,
         )
-
     st.divider()
     st.markdown("#### Kwalificatiescenario's")
     scenario_data = compute_qualification_scenarios(standings, fixtures, own_ploeg_id)
     if scenario_data is None:
         st.info("Onze eigen ploeg werd niet teruggevonden in deze rangschikking.")
         return
-
     n_remaining = scenario_data["n_remaining"]
     if n_remaining == 0:
         st.caption(
@@ -588,7 +591,6 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             f"{3 ** n_remaining} mogelijke combinaties van winst/gelijkspel/verlies, en of dat kwalificatie "
             f"(top {QUALIFYING_PLACES}) al dan niet garandeert."
         )
-
     volgorde = {"gegarandeerd": 0, "afhankelijk": 1, "onmogelijk": 2}
     scenarios_sorted = sorted(
         scenario_data["scenarios"],
