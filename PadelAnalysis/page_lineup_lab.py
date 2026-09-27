@@ -11,7 +11,6 @@ toekomstige aanpassingen sneller en veiliger te maken (kleinere, exacte
 patches i.p.v. het hele bestand telkens opnieuw moeten reconstrueren) is
 het opgesplitst in de volgende, functioneel samenhangende modules - ELK
 FUNCTIONEEL ONGEWIJZIGD t.o.v. de vorige, monolithische versie:
-
   - lineup_scout.py            : Volgende match laden, scout-header,
                                   caching-helpers (ratings/klassement/docs),
                                   eigen-ploeg-herkenning.
@@ -35,13 +34,51 @@ FUNCTIONEEL ONGEWIJZIGD t.o.v. de vorige, monolithische versie:
 Bij een toekomstige aanpassing: identificeer eerst in WELKE module de
 betrokken functie(s) staan (zie de lijst hierboven), en patch enkel dat
 kleinere bestand - niet dit hele bestand.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27 (op verzoek van
+Kim: "Rangschikking stond er nu dat er eerst een analyse moet gebeuren.
+Lijkt me niet nodig. Je mag die rangschikking altijd zien")
+--------------------------------------------------------------------------
+ROOT CAUSE: de Rangschikking-tab toonde de rangschikkingslink enkel als
+`scout_result` niet None was - d.w.z. enkel als de VOLLEDIGE tegenstander-
+scout (opponent-analyse, incl. Playwright-ophaling van de tegenstander se
+matchdata) gelukt was. De rangschikking zelf heeft daar functioneel niets
+mee te maken: het is een PUBLIEKE TVL-pagina (bevestigd via een door Kim
+aangeleverde kopie van de pagina-HTML: `isSignedIn(): false`, geen enkel
+login-scherm, de tabel laadt gewoon) die uitsluitend `spelgroepId` +
+`pouleId` als input nodig heeft. Als de tegenstander-scout faalt (bv. nog
+geen playwright-data voor de tegenstander, een tijdelijke netwerkfout, of
+de tegenstander-roster kon nog niet ontdekt worden), blokkeerde dat dus
+ONTERECHT ook de rangschikking, zelfs als spelgroepId/pouleId al bekend
+waren uit een eerdere, wel geslaagde render deze sessie.
+
+FIX (binnen dit bestand): zodra `reeks_url`/`spelgroep_id` gekend zijn,
+worden ze bewaard in st.session_state onder een per-speler sleutel. Bij
+een latere render waarbij `scout_result` faalt, valt de Rangschikking-tab
+terug op deze laatst gekende waarde in plaats van de hele tab te
+blokkeren - de rangschikkingslink en de eigen berekende ranking-tabel
+(`oa.render_ranking_tab`, indien een rapport gekend is) blijven dan gewoon
+zichtbaar.
+
+BEPERKING (transparant, geen overclaim): dit lost het "sticky"-scenario op
+(eens de scout 1x gelukt is voor deze speler binnen deze sessie, blijft
+Rangschikking daarna beschikbaar, ook bij latere fails van de tegenstander-
+scout), maar NIET het allereerste-keer-scenario (scout nog nooit gelukt
+sinds de laatste herstart van de app/sessie). Een volledige oplossing die
+de rangschikking ONAFHANKELIJK van de tegenstander-scout ophaalt - bv.
+rechtstreeks uit het reeds opgeslagen poule/tabel-schema van de eigen
+ploeg, vóór er ook maar geprobeerd wordt de tegenstander te scouten - zou
+een aanpassing vereisen in `_render_volgende_match_and_scout()` zelf
+(lineup_scout.py). Dat bestand is bij deze wijziging niet aangeleverd, dus
+die diepere fix wordt hier bewust niet gegokt.
 """
 import streamlit as st
+
 from dashboard_common import (
     fb, ll, ss, osu, oa, _display_name, _format_scraped_at, _go_to_player,
     _get_all_profiles,
 )
-
 from lineup_scout import (
     _render_volgende_match_and_scout, _scout_team_all_fixtures,
     _recent_own_lineup_roster, _merge_full_opponent_roster,
@@ -276,6 +313,11 @@ def _build_rangschikking_url(reeks_url: str):
 
 
 def _render_rangschikking_link(reeks_url: str) -> None:
+    """PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: deze
+    functie zelf is ongewijzigd - ze toont gewoon de link zodra ze een
+    geldige `reeks_url` krijgt. De fix zit in page_lineup_lab() hieronder,
+    die deze functie nu ook aanroept met een uit session_state
+    teruggevallen waarde wanneer scout_result recent gefaald is."""
     url = _build_rangschikking_url(reeks_url)
     if url:
         try:
@@ -340,6 +382,17 @@ def page_lineup_lab():
                 current_spelgroep_id=spelgroep_id, global_docs=global_docs,
                 key_prefix=f"scout_team_{sel_player_id}",
             )
+
+    # PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: zie de
+    # uitgebreide toelichting bovenaan dit bestand. reeks_url/spelgroep_id
+    # worden hier per speler gecached in session_state zodra ze gekend
+    # zijn, zodat de Rangschikking-tab hieronder daarop kan terugvallen
+    # wanneer scout_result op een latere render faalt.
+    reeks_url_cache_key = f"vm_reeks_url_cache_{sel_player_id}"
+    if reeks_url:
+        st.session_state[reeks_url_cache_key] = reeks_url
+    reeks_url_for_ranking = reeks_url or st.session_state.get(reeks_url_cache_key)
+
     tab_analyse, tab_rang, tab_poule, tab_saved = st.tabs(
         ["Analyseren", "Rangschikking", "Andere ploegen", "Opgeslagen analyses"]
     )
@@ -362,11 +415,19 @@ def page_lineup_lab():
                 st.divider()
                 oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
     with tab_rang:
-        if scout_result:
-            _render_rangschikking_link(reeks_url)
+        # PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: niet
+        # langer `if scout_result:` als poortwachter - enkel de effectief
+        # benodigde `reeks_url_for_ranking` (nu OF uit cache) bepaalt of de
+        # rangschikking getoond kan worden.
+        if reeks_url_for_ranking:
+            _render_rangschikking_link(reeks_url_for_ranking)
             if report_for_ai is not None:
                 oa.render_ranking_tab(report_for_ai)
-            else:
+            elif scout_result:
+                # scout_result lukte deze keer wel, maar leverde (nog) geen
+                # rapport op (bv. unique_players leeg) - dit onderscheidt
+                # zich van het cache-only-scenario hierboven, waar geen
+                # melding nodig is omdat de gebruiker gewoon de link ziet.
                 st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
         else:
             st.info("Kies eerst een speler bij 'Toon analyse voor' hierboven.")
