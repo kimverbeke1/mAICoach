@@ -110,6 +110,14 @@ LOSS_POINTS = 0
 # poulefase" - geen instelbare/per-afdeling waarde, in tegenstelling tot
 # tournament_rules.py's puntengrens-per-rotatie.
 QUALIFYING_PLACES = 2
+# PADEL_ANALYSIS_QUALIFICATION_SCENARIOS_HIDDEN_2026-09-27 (op verzoek van
+# Kim: "kan je nog eventjes de kwalificatiescenario's verbergen in de UI.
+# Code mag voorlopig blijven. Ik kom daar later op terug."):
+# Enkel de UI-sectie wordt verborgen - de volledige logica hierboven
+# (compute_qualification_scenarios(), _describe_points_shed_requirement(),
+# _head_to_head_winner(), ...) blijft ONGEWIJZIGD staan, klaar om later
+# gewoon terug aan te zetten door deze vlag terug op True te zetten.
+SHOW_QUALIFICATION_SCENARIOS = False
 def fetch_poule_ranking_html(
     url: str,
     session: Optional[requests.Session] = None,
@@ -573,6 +581,13 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
             use_container_width=True, hide_index=True,
         )
+    # PADEL_ANALYSIS_QUALIFICATION_SCENARIOS_HIDDEN_2026-09-27: sectie
+    # tijdelijk verborgen op verzoek van Kim - zie de vlag hierboven bij
+    # QUALIFYING_PLACES. De rangschikkingstabel hierboven blijft gewoon
+    # zichtbaar; enkel het "Kwalificatiescenario's"-blok eronder wordt nu
+    # overgeslagen.
+    if not SHOW_QUALIFICATION_SCENARIOS:
+        return
     st.divider()
     st.markdown("#### Kwalificatiescenario's")
     scenario_data = compute_qualification_scenarios(standings, fixtures, own_ploeg_id)
