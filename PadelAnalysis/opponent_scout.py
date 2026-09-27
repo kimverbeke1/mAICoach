@@ -155,17 +155,38 @@ FIX, twee onderdelen:
      dat sowieso al opgehaald moet worden.
 LET OP — NIET in deze fix vervat: scrape_new_opponent_players() hieronder
 (de PER-SPELER matchhistoriek-scrape via het Playwright-afhankelijke
-scrape_player()) blijft bewust ONGEWIJZIGD sequentieel. Die functie is voor
-een gloednieuwe tegenstander (waar ALLE spelers nog onbekend zijn) een
-minstens even grote, mogelijk grotere tijdsfactor, maar parallelliseren
-daarvan raakt aan de expliciete "geen parallelle requests — minder
-opvallend"-designkeuze verderop in deze module EN aan scrape_player.py /
-fetch_period_playwright.py, die niet zijn nagekeken in deze ronde. Kim: dit
-apart bekijken zodra scrape_player.py (en fetch_period_playwright.py)
-beschikbaar zijn — zie mijn bericht.
+scrape_player()) blijft bewust ONGEWIJZIGD sequentieel — zie die functie
+zelf voor de reden (discretie-conventie + niet-nagekeken Playwright-bestanden).
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_KNOWN_MATCHES_CACHE_2026-09-27 (op verzoek van Kim: "ik heb
+je al honderd keer dezelfde files gegeven [...] ik wil snelheid verbeteren
+[...] pas aan waar nodig")
+--------------------------------------------------------------------------
+BEVESTIGD: _known_matches_total() deed, voor ELKE ontdekte tegenstander-
+speler, een ONGECACHETE fb.get_player()-call (enkel om len(matches) te
+tellen als vertrouwensindicator in "unique_players"). Kort daarna, in
+opponent_scout_ui.prepare_team_docs(), wordt via _cached_docs_for_players()
+(daar WEL 5 min Streamlit-gecacht) opnieuw een vergelijkbare Firestore-read
+per speler gedaan. Bij een eerste analyse is die Streamlit-cache nog leeg,
+dus dit was een reële, vermijdbare dubbele read per speler.
+FIX: _known_matches_total() gebruikt nu een eigen, lichte TTL-cache
+(_KNOWN_MATCHES_CACHE_TTL = 300s, dezelfde conventie als de st.cache_data
+(ttl=300)-caches in opponent_scout_ui.py). BEWUST GEEN st.cache_data hier:
+dit bestand moet, zoals de module-docstring hierboven al aangeeft, ook
+buiten Streamlit bruikbaar blijven (ci_scrape_all.py / GitHub Actions-
+context, waar Streamlit niet beschikbaar is) — een losse, threading-veilige
+dict-cache (met dezelfde TTL-conventie) levert dezelfde snelheidswinst
+zonder een Streamlit-afhankelijkheid toe te voegen aan dit backend-bestand.
+clear_known_matches_cache() wordt vanuit opponent_scout_ui.py aangeroepen
+op exact dezelfde plekken waar de overige caches (_load_all_player_docs,
+_cached_is_known, _data_completeness, _cached_docs_for_players) al geleegd
+worden na een geslaagde sync-actie, zodat verse matchdata nooit tot 5
+minuten "oud" blijft na een expliciete verversing.
 """
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -188,6 +209,12 @@ MAX_LOOKBACK_DEFAULT = 4
 # tegelijk opgehaald mogen worden (I/O-bound, dus ruim boven CPU-count kan,
 # maar bewust beperkt om niet nodeloos veel gelijktijdige requests te doen).
 SCOUT_FETCH_MAX_WORKERS_DEFAULT = 4
+# PADEL_ANALYSIS_KNOWN_MATCHES_CACHE_2026-09-27: zelfde TTL-conventie (300s)
+# als de st.cache_data-caches in opponent_scout_ui.py, maar hier als een
+# eigen, Streamlit-onafhankelijke dict-cache (zie moduledocstring).
+_KNOWN_MATCHES_CACHE_TTL = 300
+_known_matches_cache: dict[str, tuple[float, int]] = {}
+_known_matches_cache_lock = threading.Lock()
 
 
 def _normalize(text: str) -> str:
@@ -224,13 +251,37 @@ def _known_matches_total(player_id: str) -> int:
     """PADEL_ANALYSIS_TEAM_ROSTER_TOO_SMALL_FIX_2026-09-20: telt hoeveel
     matchen WIJ al kennen van deze speler (players-collectie), ongeacht club
     of team. Faalt de lookup (bv. nog geen document), dan is 0 een correct,
-    verwacht antwoord - geen foutafhandeling nodig die de rest blokkeert."""
+    verwacht antwoord - geen foutafhandeling nodig die de rest blokkeert.
+
+    PADEL_ANALYSIS_KNOWN_MATCHES_CACHE_2026-09-27: nu 300s gecacht (zie
+    moduledocstring) - voorheen een ONGECACHETE fb.get_player()-call per
+    speler bij ELKE scout_opponent()-aanroep, vlak voor/na een vergelijkbare
+    read in opponent_scout_ui.prepare_team_docs()."""
+    now = time.time()
+    with _known_matches_cache_lock:
+        cached = _known_matches_cache.get(player_id)
+        if cached is not None and (now - cached[0]) < _KNOWN_MATCHES_CACHE_TTL:
+            return cached[1]
     try:
         doc = fb.get_player(player_id) or {}
+        matches = doc.get("matches") or []
+        result = len(matches) if isinstance(matches, list) else 0
     except Exception:  # noqa: BLE001
-        return 0
-    matches = doc.get("matches") or []
-    return len(matches) if isinstance(matches, list) else 0
+        result = 0
+    with _known_matches_cache_lock:
+        _known_matches_cache[player_id] = (now, result)
+    return result
+
+
+def clear_known_matches_cache() -> None:
+    """PADEL_ANALYSIS_KNOWN_MATCHES_CACHE_2026-09-27: leegt de cache
+    hierboven. Aan te roepen na elke geslaagde sync-actie voor een
+    tegenstander-roster (matchdata/klassement/padelstat), op dezelfde
+    plekken als de overige cache-clears in opponent_scout_ui.py, zodat een
+    net gescrapete speler niet tot 5 minuten een verouderd "known_matches_
+    total" blijft tonen."""
+    with _known_matches_cache_lock:
+        _known_matches_cache.clear()
 
 
 def get_opponent_previous_fixtures(
@@ -450,6 +501,10 @@ def scout_opponent(
     bovendien PARALLEL opgehaald via _fetch_fixtures_parallel() i.p.v.
     sequentieel met time.sleep(1.0) ertussen.
 
+    PADEL_ANALYSIS_KNOWN_MATCHES_CACHE_2026-09-27: "known_matches_total" per
+    speler (hieronder) gebruikt nu een 300s-gecachete _known_matches_total()
+    i.p.v. een ongecachete Firestore-read per speler - zie moduledocstring.
+
     Elke entry in "unique_players" bevat "appearances" (in hoeveel van de
     doorzochte wedstrijden deze speler voorkwam) en "known_matches_total"
     (hun totaal gekende matchen in onze database, ongeacht team/club).
@@ -550,21 +605,12 @@ def scrape_new_opponent_players(
     aan te passen).
 
     Geen parallellisatie — bewust, om niet als één plotse vlaag van requests
-    op te vallen (zie gesprek over discretie vs. snelheid).
-
-    PADEL_ANALYSIS_SCOUT_PARALLEL_FETCH_2026-09-27: BEWUST NOG NIET
-    aangepast in deze ronde. Voor een gloednieuwe tegenstander zijn ALLE
-    spelers hier "onbekend", dus dit is (naast de nu opgeloste
-    scout_opponent()-bottleneck) een minstens even grote kandidaat voor de
-    "eerste analyse is traag"-klacht: elke speler doorloopt hier een volle,
-    Playwright-afhankelijke scrape_player()-aanroep, sequentieel, MET een
-    expliciete time.sleep(delay) (standaard 1.5s) erna. Dit NIET blind
-    parallelliseren omdat (a) scrape_player.py / fetch_period_playwright.py
-    niet zijn nagekeken in deze ronde — meerdere Playwright-instanties
-    tegelijk kunnen resource-/thread-safety-implicaties hebben die ik niet
-    wil gokken, en (b) de sequentiële aanpak hier expliciet als bewuste
-    discretiekeuze gedocumenteerd staat. Zie mijn bericht: dit apart
-    bekijken zodra die bestanden beschikbaar zijn.
+    op te vallen (zie gesprek over discretie vs. snelheid). Voor een
+    gloednieuwe tegenstander doorloopt elke speler hier een volle,
+    Playwright-afhankelijke scrape_player()-aanroep - bewust NIET
+    geparallelliseerd omdat scrape_player.py/fetch_period_playwright.py
+    bovendien ook via GitHub Actions (niet lokaal/interactief) draaien; deze
+    functie wordt sowieso enkel lokaal (can_scrape=True) synchroon gebruikt.
 
     PADEL_ANALYSIS_SCOUT_PROFILE_INTEGRITY_2026-09-17: gebruikt nu
     _ensure_profile_safe() i.p.v. een kale fb.save_player_profile()-aanroep,
