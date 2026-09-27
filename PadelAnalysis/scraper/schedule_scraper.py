@@ -45,9 +45,34 @@ koppeling voorronde -> eindronde hard te maken.
 De eindronde-tabs dekken alfabetische poulereeksen ("Eindronde Q TOT AF").
 find_eindronde_for_poule() kiest op basis daarvan de juiste tab: Poule AA
 valt in Q..AF, dus spelgroepId 21011.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SILENT_EXCEPTION_CI_DIAGNOSIS_2026-09-27 (op verzoek van Kim:
+"bekijk de prescan poule of de logica nu werkt" - de nachtelijke workflow
+bleef "Eigen ploeg niet herkenbaar" melden voor OOK Kim's eigen profiel,
+ondanks dat de own_display_name-fix bevestigd correct staat in zowel dit
+bestand als discover_poule_players.py/page_lineup_lab.py)
+--------------------------------------------------------------------------
+ROOT CAUSE (van de aanhoudende CI-mislukking, niet van de own-ploeg-logica
+zelf - die is al gefixt): _fixture_player_sides() ving elke fout van
+scrape_uitslagenblad() af met een kale `except Exception: return set(),
+set()` - zonder ooit te loggen WAT er misging. Op Kim's eigen machine
+(diagnose_identify_own_ploeg.py, eerder deze sessie) werkte de fetch
+probleemloos; in de GitHub Actions-omgeving (ander netwerk/IP-bereik, vaak
+strenger behandeld door bot-detectie dan een residentieel IP) kan diezelfde
+aanroep om een heel andere reden falen - maar die reden was tot nu toe
+volledig onzichtbaar in de workflow-log, wat elke verdere diagnose tot
+gissen herleidde.
+
+FIX: de except-clausule logt nu expliciet het foutype en de boodschap
+(logger.warning), zodat de EERSTVOLGENDE workflow-run in de log toont WAT
+er precies misgaat (timeout, 403, connectiefout, ...) i.p.v. het stil te
+verzwijgen. Dit lost de onderliggende oorzaak niet vanzelf op, maar maakt
+haar voor het eerst meetbaar in plaats van giswerk.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Optional
@@ -55,6 +80,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.tennisenpadelvlaanderen.be"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"
@@ -494,16 +521,12 @@ def _known_names_for_date(
     sleutels "player_name" en "display_name" bestaan NOOIT op matchniveau
     (dat zijn profielvelden, geen matchvelden) - de oude for-lus hierboven
     kon dus voor own_side STRUCTUREEL NOOIT meer dan de partnernaam
-    verzamelen, nooit de naam van de speler zelf. identify_own_ploeg_id()'s
-    eigen docstring verraadt dit ("vergelijkt [...] met partner- en
-    tegenstandernamen" - de eigen naam wordt daar letterlijk niet genoemd).
+    verzamelen, nooit de naam van de speler zelf.
 
     Bij een bord met 2 spelers per kant kon de "eigen kant"-overlapscore
     daardoor nooit hoger dan 1 uitkomen op naam, ongeacht hoe duidelijk de
     data was - en bij een gelijkspel (home_score == away_score) slaat
-    identify_own_ploeg_id() de kandidaat gewoon over. Dat verklaart precies
-    waarom alle 6 kandidaten in de diagnose met perfect leesbare spelersdata
-    toch geen resultaat opleverden.
+    identify_own_ploeg_id() de kandidaat gewoon over.
 
     FIX: `own_display_name` (de weergavenaam van de speler zelf, bv. uit
     diens player_profiles-document) wordt hier expliciet en ALTIJD aan
@@ -533,14 +556,40 @@ def _known_names_for_date(
 
 
 def _fixture_player_sides(fixture: dict) -> tuple[set[str], set[str]]:
-    """Lees het uitslagenblad en geef de spelersnamen per kant terug."""
+    """Lees het uitslagenblad en geef de spelersnamen per kant terug.
+
+    PADEL_ANALYSIS_SILENT_EXCEPTION_CI_DIAGNOSIS_2026-09-27 (op verzoek van
+    Kim: "bekijk de prescan poule of de logica nu werkt" - de nachtelijke
+    workflow bleef, ook voor Kim's eigen profiel, "Eigen ploeg niet
+    herkenbaar" melden, ondanks dat de own_display_name-fix bevestigd
+    correct in de code staat).
+
+    ROOT CAUSE (van de aanhoudende CI-mislukking): deze functie ving elke
+    fout van scrape_uitslagenblad() af met een kale `except Exception:
+    return set(), set()` - zonder ooit te loggen WAT er misging. Op Kim's
+    eigen machine werkte de fetch probleemloos (bevestigd via
+    diagnose_identify_own_ploeg.py); in de GitHub Actions-omgeving (ander
+    netwerk/IP-bereik) kan diezelfde aanroep om een heel andere reden falen
+    - maar die reden bleef tot nu toe volledig onzichtbaar in de
+    workflow-log.
+
+    FIX: logt nu expliciet het foutype en de boodschap zodra de fetch/parse
+    faalt, zodat de eerstvolgende workflow-run toont WAT er precies misgaat
+    (timeout, HTTP-statuscode, connectiefout, ...) in plaats van dit stil
+    te verzwijgen. Het gedrag bij een fout (lege sets teruggeven, kandidaat
+    overslaan) blijft ONGEWIJZIGD - enkel de zichtbaarheid verandert.
+    """
     url = fixture.get("uitslagenblad_url")
     if not url:
         return set(), set()
     try:
         from scraper_v2 import scrape_uitslagenblad
         data = scrape_uitslagenblad(requests.Session(), url)
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"_fixture_player_sides: kon uitslagenblad niet ophalen/verwerken "
+            f"voor {url}: {type(e).__name__}: {e}"
+        )
         return set(), set()
     home_players: set[str] = set()
     away_players: set[str] = set()
