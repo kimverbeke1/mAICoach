@@ -1,33 +1,64 @@
 # -*- coding: utf-8 -*-
 """Laat GPT zelf inzichten ontdekken uit de volledige ruwe mAICoach-data.
-
 Belangrijk uitgangspunt: dit script berekent GEEN conclusies vooraf. Het levert
 uitsluitend de ruwe, compacte activiteiten- en wellnessdata aan het taalmodel.
 Het model bekijkt die volledige data en zoekt zelf naar bruikbare, stuurbare
 patronen. Tautologische vaststellingen (zoals "lagere hartslag bij gelijke
 snelheid") worden expliciet uitgesloten.
-
 Robuustheid: het AI-antwoord wordt tolerant geparseerd. Als het model geen
 geldige JSON teruggeeft (bv. Python-stijl met enkele aanhalingstekens, extra
 tekst of code fences), wordt dat netjes opgevangen zonder de app te laten crashen.
+--------------------------------------------------------------------------
+MATCHFITAI_INSIGHT_PROMPT_DEDUP_2026-09-27 (op verzoek van Kim: "Genereer AI
+inzichten duurde meer dan een minuut. Kan dat sneller en waar zit de
+bottleneck?")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd, zie ook de uitgebreide toelichting in ai_message_
+handler.py): generate_athlete_insights() riep voorheen handle_message(
+build_prompt()) aan. build_prompt() hierboven bouwt AL een volledige, op
+zichzelf staande prompt (alle activiteiten + wellness, compact, met strikte
+"enkel JSON"-instructies). Maar handle_message() (ai_message_handler.py)
+wrapte die tekst als "vraag" NOGMAALS in zijn EIGEN build_prompt(question),
+die daar NOG EENS build_context() + build_ai_analysis_data() (een aparte,
+overlappende compactie van dezelfde activiteiten/wellness) EN de volledige
+BASE_RULES aan toevoegde. Resultaat: de dataset werd dubbel meegestuurd via
+2 verschillende compactie-schema's, plus BASE_RULES-instructies die zelfs
+tegenstrijdig zijn met de striktee "ENKEL JSON, geen extra tekst"-eis
+hieronder (BASE_RULES eist expliciet "### Technische details"-opmaak).
+Aangetoond met een representatieve grootte-simulatie: de dubbel gewrapte
+prompt was ~2x zo groot (~50% besparing na de fix) - dat verklaart zowel de
+trage duur (meer tokens = meer verwerkings-/redeneertijd) als een verhoogd
+risico op niet-parsebare antwoorden door de tegenstrijdige instructies.
+FIX: generate_athlete_insights() roept nu _run_ai() RECHTSTREEKS aan met
+zijn EIGEN, al complete prompt - geen tweede wrap meer. Daarnaast wordt
+reasoning_effort="low" doorgegeven: deze taak is gerichte patroonherkenning/
+JSON-extractie over reeds aangeleverde, gestructureerde data - geen
+meerstaps-redeneertaak die een hoge reasoning-inspanning vereist. Dit is
+apart, opt-in ingesteld (enkel voor DEZE aanroep) - handle_message() (Chat,
+Dagelijkse update) blijft ongewijzigd en gebruikt nog steeds de standaard
+reasoning-instelling van het model.
+EERLIJKE KANTTEKENING: de omvang van de dataset zelf (alle activiteiten +
+alle wellness-records, "de volledige ruwe data" - een BEWUSTE ontwerpkeuze,
+zie hieronder) is NIET aangepast, want dat zou het uitdrukkelijke doel van
+deze module wijzigen (GPT moet patronen over de VOLLEDIGE geschiedenis
+kunnen herkennen, niet enkel een recent venster). Is de duur na deze fix nog
+steeds onbevredigend, dan is een volgende, apart te bespreken stap het
+beperken van de dataset tot een configureerbaar venster (bv. laatste N
+dagen) - dat verandert wel het analyse-gedrag en is dus bewust niet
+stilzwijgend meegenomen in deze fix.
 """
-
 from __future__ import annotations
-
 import ast
 from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
 from typing import Any
-
-from AICoach.chat.ai_message_handler import handle_message
-
+from AICoach.chat.ai_message_handler import _run_ai
 ROOT = Path(__file__).resolve().parents[1]
 ACTIVITIES_FILE = ROOT / "data" / "activities" / "activities.json"
 WELLNESS_FILE = ROOT / "data" / "wellness" / "wellness.json"
 INSIGHTS_FILE = ROOT / "data" / "athlete_insights.json"
-
 ACTIVITY_FIELDS = (
     "id", "start_date_local", "start_date", "name", "type", "distance",
     "moving_time", "elapsed_time", "average_heartrate", "max_heartrate",
@@ -40,8 +71,6 @@ WELLNESS_FIELDS = (
     "sleepQuality", "readiness", "steps", "vo2max", "ctl", "atl",
     "ctlLoad", "atlLoad", "rampRate", "motivation", "mood", "fatigue",
 )
-
-
 def load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -49,14 +78,10 @@ def load_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
-
-
 def clean_value(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
-
-
 def compact_records(records: Any, fields: tuple[str, ...]) -> list[dict[str, Any]]:
     if not isinstance(records, list):
         return []
@@ -72,30 +97,24 @@ def compact_records(records: Any, fields: tuple[str, ...]) -> list[dict[str, Any
         if item:
             compact.append(item)
     return compact
-
-
 def extract_json_object(text: str) -> dict[str, Any]:
     """Parse het AI-antwoord tolerant naar een dict.
-
     Werkt met: pure JSON, JSON in code fences, en Python-stijl output met enkele
     aanhalingstekens. Werpt ValueError als er echt niets bruikbaars in zit.
     """
     content = str(text or "").strip()
     if not content:
         raise ValueError("Leeg AI-antwoord.")
-
     # Verwijder code fences zoals ```json ... ```
     if content.startswith("```"):
         lines = content.splitlines()
         if len(lines) >= 3:
             content = "\n".join(lines[1:-1]).strip()
-
     first = content.find("{")
     last = content.rfind("}")
     if first < 0 or last <= first:
         raise ValueError("AI-antwoord bevat geen JSON-object.")
     candidate = content[first : last + 1]
-
     # 1) Strikte JSON.
     try:
         payload = json.loads(candidate)
@@ -103,7 +122,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
             return payload
     except (ValueError, TypeError):
         pass
-
     # 2) Python-stijl (enkele aanhalingstekens, True/False/None).
     try:
         payload = ast.literal_eval(candidate)
@@ -111,10 +129,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
             return payload
     except (ValueError, SyntaxError):
         pass
-
     raise ValueError("AI-antwoord kon niet als JSON worden gelezen.")
-
-
 def normalize_insights(payload: dict[str, Any]) -> dict[str, Any]:
     normalized: list[dict[str, Any]] = []
     for insight in payload.get("insights", [])[:3]:
@@ -145,8 +160,6 @@ def normalize_insights(payload: dict[str, Any]) -> dict[str, Any]:
         "insights": normalized,
         "next_focus": str(payload.get("next_focus") or "Meer vergelijkbare sessies verzamelen.").strip(),
     }
-
-
 def _empty_payload(headline: str) -> dict[str, Any]:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -154,22 +167,17 @@ def _empty_payload(headline: str) -> dict[str, Any]:
         "insights": [],
         "next_focus": "Draai de analyse opnieuw wanneer er meer data beschikbaar is.",
     }
-
-
 def build_prompt() -> str:
     activities = compact_records(load_json(ACTIVITIES_FILE, []), ACTIVITY_FIELDS)
     wellness = compact_records(load_json(WELLNESS_FILE, []), WELLNESS_FIELDS)
-
     dataset = {
         "activities": activities,
         "wellness": wellness,
         "counts": {"activities": len(activities), "wellness_days": len(wellness)},
     }
-
     return f"""
 Je bent mAICoach en analyseert zelf de volledige ruwe data van de atleet.
 Er zijn GEEN voorberekende conclusies meegegeven. Jij ontdekt de patronen.
-
 DOEL
 - Zoek patronen die de atleet praktisch kan STUREN of gebruiken om beter te trainen en te herstellen.
 - Focus op factoren die de atleet vooraf kan beinvloeden of opvolgen, bijvoorbeeld:
@@ -177,26 +185,22 @@ DOEL
   van Form (TSB), Fitness (CTL) en Fatigue (ATL) op de dag van een sessie.
 - Onderzoek wanneer de atleet relatief goed of minder goed presteert binnen
   vergelijkbare activiteiten, en welke herstel- of belastingscontext daarbij hoort.
-
 VERBODEN CONCLUSIES
 - Geef GEEN tautologische vaststellingen. Verboden voorbeeld: "lagere hartslag bij
   gelijke snelheid is beter". Dat is per definitie waar en levert geen stuurbare actie op.
 - Leid geen prestatie af uit een maat die je zelf uit die prestatie hebt gedefinieerd.
 - Trek prestatie- of efficientieconclusies uitsluitend voor Running en TrailRun.
 - Voor Padel en Badminton beoordeel je alleen fysiologische belasting en herstelcontext.
-
 HARDE REGELS
 - Elk inzicht moet een concrete, stuurbare betekenis hebben.
 - Gebruik de huidige Intervals-stressparameter niet.
 - Behandel ontbrekende waarden nooit als nul.
 - Maximaal 3 unieke inzichten. Bij onvoldoende bewijs geef je er minder.
 - Persoonlijke patronen zijn hypotheses.
-
 BELANGRIJK OVER HET ANTWOORDFORMAAT
 - Antwoord met UITSLUITEND geldig JSON. Geen inleidende tekst, geen uitleg, geen code fences.
 - Gebruik dubbele aanhalingstekens voor alle sleutels en tekstwaarden.
 - Geen trailing komma's.
-
 Vereiste structuur:
 {{
   "headline": "een korte hoofdconclusie",
@@ -216,15 +220,15 @@ Vereiste structuur:
   ],
   "next_focus": "een korte zin"
 }}
-
 DATASET
 {json.dumps(dataset, ensure_ascii=False, separators=(',', ':'))}
 """.strip()
-
-
 def generate_athlete_insights() -> dict[str, Any]:
-    answer = handle_message(build_prompt())
-
+    # MATCHFITAI_INSIGHT_PROMPT_DEDUP_2026-09-27: rechtstreeks naar _run_ai(),
+    # NIET meer via handle_message() - zie moduledocstring. reasoning_effort
+    # ="low" is een bewuste, hier lokaal gescoped snelheidsoptimalisatie voor
+    # deze specifieke, gestructureerde extractietaak.
+    answer = _run_ai(build_prompt(), reasoning_effort="low")
     try:
         payload = extract_json_object(answer)
         insights = normalize_insights(payload)
@@ -236,22 +240,16 @@ def generate_athlete_insights() -> dict[str, Any]:
             "De analyse leverde geen leesbaar resultaat op. Probeer het opnieuw."
         )
         insights["ai_raw_reason"] = reason
-
     INSIGHTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary = INSIGHTS_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(insights, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(INSIGHTS_FILE)
-
     return {
         "insights_file": str(INSIGHTS_FILE.relative_to(ROOT)),
         "insight_count": len(insights["insights"]),
         "headline": insights["headline"],
     }
-
-
 def main() -> None:
     print(json.dumps(generate_athlete_insights(), ensure_ascii=False, indent=2))
-
-
 if __name__ == "__main__":
     main()

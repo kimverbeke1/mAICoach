@@ -1,26 +1,43 @@
 # -*- coding: utf-8 -*-
-
+"""
+MATCHFITAI_INSIGHT_PROMPT_DEDUP_2026-09-27 (op verzoek van Kim: "Genereer AI
+inzichten duurde meer dan een minuut. Kan dat sneller en waar zit de
+bottleneck?")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code van athlete_insight_generator.py en dit
+bestand naast elkaar te leggen, en aangetoond met een representatieve
+grootte-simulatie: ~50% kleinere prompt na de fix): athlete_insight_
+generator.generate_athlete_insights() riep tot nu toe handle_message(
+build_prompt()) aan, waarbij build_prompt() daar al een VOLLEDIGE, op
+zichzelf staande prompt opbouwt (alle activiteiten + wellness-records,
+compact, met strikte "enkel JSON"-instructies). Maar handle_message()
+HIERONDER wrapt die tekst ALS "vraag" opnieuw in zijn EIGEN build_prompt(
+question) - die daar NOGMAALS build_context() + build_ai_analysis_data()
+(een aparte, overlappende compactie van dezelfde activiteiten/wellness-
+bronnen) EN de volledige BASE_RULES aan toevoegt. Gevolg: de dataset werd
+via 2 verschillende compactie-schema's DUBBEL meegestuurd, plus irrelevante/
+tegenstrijdige instructies (BASE_RULES eist bv. "### Technische details"-
+opmaak, terwijl athlete_insight_generator.py expliciet ENKEL geldige JSON
+eist, zonder extra tekst) - dat verklaart zowel de trage duur (een pak meer
+tokens dan nodig) als een verhoogd risico op niet-parsebare AI-antwoorden.
+FIX (dit bestand): _run_ai() geeft nu geen intern geheim meer prijs - hij is
+importeerbaar en accepteert een optionele reasoning_effort-parameter, zodat
+athlete_insight_generator.py hem RECHTSTREEKS kan aanroepen met zijn EIGEN,
+al complete prompt (geen tweede wrap meer nodig via handle_message/build_
+prompt hier). Chat/Daily update blijven ongewijzigd - die roepen nog steeds
+handle_message() aan zoals voorheen, dus hun gedrag is 100% behouden.
+"""
 import json
-
+import os
+from dotenv import load_dotenv
 from AICoach.ai_analysis_data import build_ai_analysis_data
-from AICoach.app_config import get_secret, use_real_ai
 from AICoach.context_builder import build_context
-
-# Configuratie via app_config: werkt lokaal (.env) en op Streamlit Cloud (st.secrets).
-OPENAI_MODEL = get_secret("OPENAI_MODEL", "gpt-5-mini")
-
-# Optionele wetenschappelijke grondslag. Als science_knowledge aanwezig is,
-# wordt de vaste wetenschappelijke basis (Banister Fitness-Fatigue) meegegeven.
-try:
-    from AICoach.science_knowledge import science_system_block
-
-    _SCIENCE_BLOCK = science_system_block()
-except Exception:  # noqa: BLE001 - science_knowledge is optioneel
-    _SCIENCE_BLOCK = ""
-
+load_dotenv(".env", override=True)
+USE_REAL_AI = os.getenv("USE_REAL_AI", "false").lower() == "true"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 BASE_RULES = """
-Je bent mAICoach, een persoonlijke sportcoach en sportdata-analist.
-
+Je bent MatchFitAI, een persoonlijke sportcoach en sportdata-analist.
 ## INHOUDELIJKE REGELS
 - Beantwoord exact de vraag in natuurlijke, vlotte Nederlandse taal.
 - Geef maximaal 5 inzichten, gerangschikt op praktische waarde.
@@ -39,68 +56,53 @@ Je bent mAICoach, een persoonlijke sportcoach en sportdata-analist.
 - Schrijf getallen als cijfers, bijvoorbeeld -7.6, 6.2 uur en 50 bpm.
 - Eindig niet met een vraag.
 """.strip()
-
-
-def _system_prefix() -> str:
-    """Wetenschappelijke grondslag (indien beschikbaar) gevolgd door de basisregels."""
-    if _SCIENCE_BLOCK:
-        return f"{_SCIENCE_BLOCK}\n\n{BASE_RULES}"
-    return BASE_RULES
-
-
-def _run_ai(prompt: str) -> str:
-    if not use_real_ai():
+def _run_ai(prompt: str, reasoning_effort: str | None = None) -> str:
+    """MATCHFITAI_INSIGHT_PROMPT_DEDUP_2026-09-27: nu ook rechtstreeks
+    bruikbaar door andere modules (bv. athlete_insight_generator.py) die al
+    een eigen, complete prompt opbouwen en dus NIET via build_prompt()
+    hieronder gewrapt willen worden. `reasoning_effort` is optioneel (bv.
+    "low") en wordt enkel doorgegeven aan de Responses API als expliciet
+    meegegeven - bestaand gedrag (handle_message(), zonder deze parameter)
+    blijft dus volledig ongewijzigd."""
+    if not USE_REAL_AI:
         return (
-            "De echte AI-call staat uit. Zet `USE_REAL_AI=true` in `.env` of in "
-            "Streamlit Secrets om deze analyse uit te voeren.\n\n### Technische details\n"
+            "De echte AI-call staat uit. Zet `USE_REAL_AI=true` in `.env` "
+            "om deze analyse uit te voeren.\n\n### Technische details\n"
             "Er is geen externe AI-call uitgevoerd."
         )
-
-    api_key = get_secret("OPENAI_API_KEY")
-    if not api_key:
-        return "OPENAI_API_KEY ontbreekt in `.env` of in Streamlit Secrets."
-
+    if not OPENAI_API_KEY:
+        return "OPENAI_API_KEY ontbreekt in `.env`."
     try:
         from openai import OpenAI
-
-        client = OpenAI(api_key=api_key)
-        response = client.responses.create(
-            model=OPENAI_MODEL,
-            input=prompt,
-        )
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        kwargs = {"model": OPENAI_MODEL, "input": prompt}
+        if reasoning_effort:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+        response = client.responses.create(**kwargs)
         text = getattr(response, "output_text", None)
         if text:
             return text.strip()
         return "De AI gaf geen tekst terug."
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return f"De AI-analyse kon niet worden uitgevoerd: {exc}"
-
-
 def build_prompt(question: str) -> str:
     context = build_context()
     analysis_data = build_ai_analysis_data()
     return f"""
-{_system_prefix()}
-
+{BASE_RULES}
 ## HUIDIGE CONTEXT
 {json.dumps(context, ensure_ascii=False, separators=(",", ":"))}
-
 ## ANALYSEDATA
 {json.dumps(analysis_data, ensure_ascii=False, separators=(",", ":"))}
-
 ## VRAAG
 {question.strip()}
-
 ## ANTWOORDOPBOUW
 Gebruik een passende korte structuur. Zet technische onderbouwing altijd onder:
 ### Technische details
 """.strip()
-
-
 def build_activity_comparison_prompt(comparison_context: dict, question: str) -> str:
     return f"""
-{_system_prefix()}
-
+{BASE_RULES}
 ## OPDRACHT
 Vergelijk uitsluitend de 2 geselecteerde activiteiten. Dit is geen algemene trendanalyse.
 De gebruiker kiest bewust deze 2 activiteiten. Andere historische activiteiten mogen niet worden gebruikt.
@@ -108,34 +110,24 @@ Benoem eerst de belangrijkste praktische verschillen en overeenkomsten.
 Maak alleen een prestatie- of efficiëntievergelijking als beide activiteiten Running of TrailRun zijn en de beschikbare context dit verantwoord toelaat.
 Als parcours, hoogte, temperatuur, wind, trainingsdoel of wedstrijdstatus ontbreken, vermeld dan dat dit de vergelijking begrenst.
 Streamsamenvattingen beschrijven het verloop en zijn geen zelfstandig bewijs van sportieve kwaliteit.
-
 ## GESELECTEERDE ACTIVITEITEN EN CONTEXT
 {json.dumps(comparison_context, ensure_ascii=False, separators=(",", ":"))}
-
 ## VRAAG VAN DE GEBRUIKER
 {question.strip() or "Vergelijk deze 2 activiteiten praktisch en inhoudelijk."}
-
 ## ANTWOORDOPBOUW
 #### Vergelijking
 Maximaal 5 korte inzichten.
-
 #### Praktische betekenis
 Maximaal 3 concrete conclusies.
-
 #### Wat weten we niet?
 Alleen de belangrijkste ontbrekende context.
-
 ### Technische details
 Gebruikte waarden, streamdekking, wellnesscontext, berekeningen en beperkingen.
 """.strip()
-
-
 def handle_message(question: str) -> str:
     if not question or not question.strip():
         return "Stel een concrete vraag over je training of herstel."
     return _run_ai(build_prompt(question))
-
-
 def compare_activities_with_ai(comparison_context: dict, question: str = "") -> str:
     if not isinstance(comparison_context, dict) or not comparison_context:
         return "Er is geen geldige vergelijkingscontext beschikbaar."

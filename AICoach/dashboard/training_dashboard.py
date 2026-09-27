@@ -2,20 +2,17 @@
 #training_dashboard.py
 from pathlib import Path
 import sys
-
 import streamlit as st
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
 from AICoach.chat.ai_message_handler import handle_message
 from AICoach.context_builder import build_context
 from AICoach.dashboard.activities_tab import render_activities
 from AICoach.dashboard.best_results_tab import render_best_results
 from AICoach.dashboard.charts import render_time_chart, selected_date_from_event
 from AICoach.dashboard.comparison_tab import render_comparison_tab
-from AICoach.dashboard.daily_update import render_daily_update
+from AICoach.dashboard.daily_update import render_daily_update, reset_widget_key_counters
 from AICoach.dashboard.data_loaders import load_history
 from AICoach.dashboard.knowledge_tab import render_knowledge
 from AICoach.dashboard.recovery_tab import render_recovery
@@ -27,8 +24,6 @@ from AICoach.dashboard.ui_helpers import (
 )
 from AICoach.persistent_data import gcs_status, mirror_all_to_local
 from AICoach.saved_insights import render_saved_insights, save_insight
-
-
 def _inject_css() -> None:
     st.markdown(
         """
@@ -72,8 +67,6 @@ def _inject_css() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
 # --------------------------------------------------------------------------- #
 # DATA-VERVERSING - VOORGESCHIEDENIS EN HUIDIGE AANPAK
 #
@@ -130,20 +123,16 @@ def _inject_css() -> None:
 # app zou geholpen hebben.
 # --------------------------------------------------------------------------- #
 _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-sync-workflow
-
-
 def _refresh_local_data_from_storage() -> None:
     """Spiegelt history, wellness en activities van GCS terug naar lokale
     bestanden. GEEN intervals.icu-aanroep - enkel een lezing van reeds
     bestaande, door de uur-gebaseerde GitHub Actions-workflow bijgewerkte
     opslag.
-
     Doet dit maximaal 1x per _MIRROR_CACHE_SECONDS per sessie (tijdstempel in
     st.session_state), in plaats van bij elke rerun - dat verklaarde eerder de
     trage paginawissels. Faalt de lezing (bv. GCS onbereikbaar), dan wordt dat
     opgevangen en blijft de app de reeds lokaal aanwezige data tonen; de
     volgende poging gebeurt bij het verstrijken van de cache-termijn.
-
     MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een mirror die overal 0
     teruggeeft (zonder exceptie) wordt nu ALSNOG als mogelijk probleem
     onderzocht via gcs_status() - zie het uitgebreide commentaarblok
@@ -173,8 +162,6 @@ def _refresh_local_data_from_storage() -> None:
         else:
             st.session_state.pop("data_refresh_warning", None)
     st.session_state["_data_mirror_last_refreshed_at"] = now
-
-
 def render_dashboard():
     df = load_history()
     context = build_context()
@@ -218,8 +205,6 @@ def render_dashboard():
             title="Training load",
             default_granularity="Maand",
         )
-
-
 def render_chat():
     st.subheader("mAICoach")
     if "chat_history" not in st.session_state:
@@ -249,14 +234,20 @@ def render_chat():
             render_assistant_answer(answer)
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
-
-
 def render_health_app() -> None:
     """Bouwt de volledige mAICoach-pagina (titel, data-verversing, tabs).
     Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
     opgebouwd. Zowel de standalone uitvoering (streamlit run
     training_dashboard.py) als de gecombineerde app (via
-    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan."""
+    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
+    MATCHFITAI_DAILY_BUTTON_KEY_FIX_2026-09-27: reset_widget_key_counters()
+    wordt hier, als EERSTE actie, exact 1x per script-run aangeroepen - dit is
+    de enige echte top-level entry point (zie hierboven), dus dit garandeert
+    dat de widget-keys in daily_update.py weer stabiel zijn over reruns heen.
+    Zie de uitgebreide root-cause-analyse in daily_update.py's moduledocstring
+    voor waarom dit nodig was ("Laat AI meedenken..."-knop deed voorheen
+    niets)."""
+    reset_widget_key_counters()
     try:
         st.set_page_config(page_title="mAICoach", page_icon="\U0001F3C3", layout="wide")
     except Exception:
@@ -344,8 +335,6 @@ def render_health_app() -> None:
     if comparison_active:
         with tabs[6]:
             render_comparison_tab()
-
-
 # Bouwt de pagina ALLEEN op wanneer dit bestand rechtstreeks wordt uitgevoerd
 # (bv. `streamlit run AICoach/dashboard/training_dashboard.py`). Bij een
 # `import` vanuit app.py (de gecombineerde app) blijft __name__ gelijk aan de
