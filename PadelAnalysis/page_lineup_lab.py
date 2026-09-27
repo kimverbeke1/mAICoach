@@ -80,6 +80,28 @@ tegenstander-scout, en zichtbaar in exact dezelfde gevallen als de
 rangschikkingslink zelf. Een ontbrekende/falende `poule_ranking`-import
 wordt (zoals bij het "Andere ploegen"-tabblad hieronder) opgevangen met
 een `st.warning`, nooit met een crash van de hele pagina.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27 (op verzoek
+van Kim: "nog steeds dit probleem bij rangschikking: Kon de module
+'poule_ranking' niet laden [...]" - terwijl een los diagnosescript
+bevestigde dat `import poule_ranking` LOKAAL, rechtstreeks, wel gewoon
+slaagt: geen duplicaat-bestand, geen ontbrekende dependency)
+--------------------------------------------------------------------------
+ROOT CAUSE VAN HET ONTBREKENDE INZICHT (niet van de onderliggende fout
+zelf, die nog niet met zekerheid vastgesteld is): `except Exception:
+poule_ranking = None` hieronder ving de ECHTE foutmelding altijd stil op.
+Dat betekent dat Kim, telkens de import om eender welke reden faalt (een
+tijdelijk niet-herstarte app, een ontbrekende dependency specifiek in de
+draaiende omgeving, een subtiele padverwarring, ...), enkel de generieke
+"kon de module niet laden"-melding zag, nooit de onderliggende Python-
+foutmelding zelf - en dus telkens opnieuw een los diagnosescript nodig had
+om verder te komen.
+FIX: de faalreden wordt nu bewaard in `_poule_ranking_import_error`
+(module-niveau) en getoond in de waarschuwing in de Rangschikking-tab
+(`_render_poule_ranking_section()`, hieronder) - zodat de ECHTE oorzaak
+(bv. `ModuleNotFoundError: No module named 'bs4'`, of een fout DIEP in
+poule_ranking.py zelf bij het importeren) voortaan direct in de app
+zichtbaar is, zonder een apart script te moeten draaien.
 """
 import streamlit as st
 from dashboard_common import (
@@ -104,10 +126,16 @@ try:
     import opponent_scout as osc
 except Exception:  # noqa: BLE001  pragma: no cover
     osc = None
+# PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27: de echte
+# faalreden wordt nu bewaard i.p.v. stilzwijgend weggegooid - zie
+# _render_poule_ranking_section() en de uitgebreide toelichting bovenaan
+# dit bestand.
+_poule_ranking_import_error = None
 try:
     import poule_ranking
-except Exception:  # noqa: BLE001  pragma: no cover
+except Exception as e:  # noqa: BLE001  pragma: no cover
     poule_ranking = None
+    _poule_ranking_import_error = f"{type(e).__name__}: {e}"
 
 
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
@@ -349,11 +377,15 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
     wedstrijd alle kwalificatiescenario's ("gaan we door bij de beste 2?").
     Gebruikt UITSLUITEND al gekende session_state-data (`fixtures`,
     `own_ploeg_id`) - geen extra afhankelijkheid van de tegenstander-scout,
-    dus zichtbaar in dezelfde gevallen als de rangschikkingslink hierboven."""
+    dus zichtbaar in dezelfde gevallen als de rangschikkingslink hierboven.
+    PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27: toont nu
+    ook de ECHTE, onderliggende importfout (indien gekend) in plaats van
+    enkel de generieke "kon niet laden"-melding - zie moduledocstring."""
     if poule_ranking is None:
+        detail = f" Details: `{_poule_ranking_import_error}`." if _poule_ranking_import_error else ""
         st.warning(
             "Kon de module 'poule_ranking' niet laden - controleer of poule_ranking.py "
-            "in dezelfde map staat als de andere PadelAnalysis-bestanden."
+            f"in dezelfde map staat als de andere PadelAnalysis-bestanden.{detail}"
         )
         return
     fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
@@ -367,7 +399,7 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
     try:
         poule_ranking.render_poule_ranking_tab(reeks_url_for_ranking, fixtures, own_ploeg_id)
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Kon de poule-rangschikking niet laden: {exc}")
+        st.warning(f"Kon de poule-rangschikking niet laden: {type(exc).__name__}: {exc}")
 
 
 def page_lineup_lab():
