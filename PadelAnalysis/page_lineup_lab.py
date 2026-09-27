@@ -59,31 +59,59 @@ i.p.v. stilzwijgend verborgen (zie `_poule_ranking_import_error`).
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27 (op verzoek van
 Kim, MEERMAALS GEMELD: "Kies eerst een speler bij 'Toon analyse voor'
-hierboven. Wordt getoond bij de rangschikking. Dat is niet ok. Analyse
-moet niet gestart worden om dat te kunnen zien. Pas dat aan.")
+hierboven. Wordt getoond bij de rangschikking. Dat is niet ok.")
 --------------------------------------------------------------------------
-ROOT CAUSE (bevestigd, ondanks de eerdere PADEL_ANALYSIS_RANGSCHIKKING_
-ALTIJD_ZICHTBAAR_2026-09-27-fix hierboven): die eerdere fix loste enkel
-op dat de Rangschikking-tab niet MEER blokkeerde ZODRA `reeks_url` al ooit
-gekend was in DEZE sessie (via de sticky cache) - maar bij de EERSTE keer
-dat een speler geselecteerd wordt (bv. na het wisselen naar een andere
-speler zoals Anneleen, of bij een verse sessie), was `reeks_url` nog
-NERGENS gekend totdat de gebruiker minstens 1x "Volgende match laden"
-aanklikte of de volledige tegenstander-scout liet lopen. Dat is exact wat
-Kim "analyse starten" noemt, en precies wat hij niet wil.
-FIX: `lineup_scout._known_ranking_context()` (nieuw) leest UITSLUITEND
-reeds opgeslagen data (dagelijks ververst poule-schema + eigen
-matchhistoriek) en bepaalt daaruit reeks_url/fixtures/own_ploeg_id
-ONAFHANKELIJK van elke knop-klik of scout. `page_lineup_lab()` roept dit nu
-ONVOORWAARDELIJK aan (niet enkel als scout_result ontbreekt) en vult
-daarmee zowel `reeks_url_for_ranking` als de `vm_fixtures_`/`vm_own_ploeg_
-id_`-session-state-sleutels aan, ZONDER de bestaande, volledige scout-flow
-te wijzigen (die overschrijft deze waarden gewoon zodra ze wél slaagt -
-geen conflict, enkel een vroegere, lichtere invulling ervoor).
-Bijkomend: de meldingstekst in de else-tak hieronder ("Kies eerst een
-speler...") was sowieso MISLEIDEND - er was al lang een speler gekozen via
-de dropdown, het echte probleem was dat reeks_url nog onbekend was. De
-tekst is herschreven naar wat er werkelijk aan de hand is.
+FIX: `lineup_scout._known_ranking_context()` leest UITSLUITEND reeds
+opgeslagen data en bepaalt daaruit reeks_url/fixtures/own_ploeg_id
+ONAFHANKELIJK van elke knop-klik of scout.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_FRAGMENT_ISOLATION_STAGE2_2026-09-27 (op verzoek van Kim:
+"Vorige gespeelde matchen bekijken duurt nog steeds lang [...] Wegklikken
+speler voor ploegopstelling of matchen aanpassen ook [...] bekijk nog eens
+of dat herladen van de pagina in stukken wel goed opgelost is nu")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen, geen gok): de fragment-
+isolatie van PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26 werd toegepast op
+`_render_rotation_planner()` (lineup_rotation.py) en `_render_lineup_
+sandbox()` (lineup_sandbox.py) - beide correct met `@st.fragment` - maar
+NIET op de functie die BEIDE aanroept: `_render_opstelling_scenario()`
+hieronder. Precies IN die buitenste functie zitten de widgets waarover Kim
+klaagt:
+  - `_render_previous_opponent_lineup()` (lineup_opponent_history.py) -
+    de "Welke ontmoeting wil je bekijken?"-dropdown = "Vorige gespeelde
+    matchen bekijken".
+  - `st.multiselect("Beschikbare eigen spelers", ...)` = "Wegklikken
+    speler voor ploegopstelling".
+  - `st.number_input("Aantal wedstrijden deze ontmoeting", ...)` en de
+    per-speler `st.number_input(..., key=f"scenario_max_{pid}")` =
+    "matchen aanpassen".
+Omdat `_render_opstelling_scenario()` ZELF geen `@st.fragment` had, bleef
+ELKE interactie met deze widgets een VOLLEDIGE Streamlit-rerun van de HELE
+pagina veroorzaken - inclusief het opnieuw doorlopen van `_render_
+volgende_match_and_scout()` (scout-header-logica), `get_team_report()`/
+`render_team_header()` (padelstat-verversingscheck), EN het opnieuw
+volledig tekenen van de reeds berekende (maar niet herberekende) matchup-
+tabel, groepstabellen en AI-sectie - vandaar de aanhoudende traagheid,
+ondanks dat de eigenlijke BEREKENINGEN al correct gecachet waren via
+session_state-signatures.
+FIX: `_render_opstelling_scenario()` krijgt nu zelf ook `@st.fragment`,
+consistent met de reeds bewezen aanpak voor de 2 functies die ze aanroept.
+Nested fragments (een fragment binnen een fragment) worden ondersteund in
+de huidige Streamlit-versie (1.58.0, bevestigd via eerdere `pip show`-
+controle) - `_render_rotation_planner()` en `_render_lineup_sandbox()`
+draaien dus voortaan als geneste fragments binnen dit fragment, wat geen
+probleem is. Alle widget-interacties binnen `_render_opstelling_scenario()`
+(vorige-ontmoeting-dropdown, spelersselectie, aantal-wedstrijden-velden,
+"Bereken alle geldige matchups", plus de reeds geïsoleerde rotatieplanner
+en sandbox erbinnen) triggeren nu enkel nog een HERLADING VAN DIT FRAGMENT
+- niet meer van de volledige pagina (dus niet meer van de scout-header,
+het team-rapport, of de tabs errond).
+EERLIJKE KANTTEKENING: de "Ploeg opnieuw ophalen"-knop binnenin roept nog
+steeds een ONGESCOPEDE `st.rerun()` aan (bewust ongewijzigd gelaten) - dat
+is de enige actie binnen dit fragment die WEL bewust een volledige
+pagina-herlading veroorzaakt, want die knop wist caches die ook BUITEN dit
+fragment relevant zijn (own_roster/full_scout-caches). Dat is functioneel
+correct en dus niet aangepast.
 """
 import streamlit as st
 from dashboard_common import (
@@ -119,7 +147,14 @@ except Exception as e:  # noqa: BLE001  pragma: no cover
     _poule_ranking_import_error = f"{type(e).__name__}: {e}"
 
 
+@st.fragment
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
+    """PADEL_ANALYSIS_FRAGMENT_ISOLATION_STAGE2_2026-09-27: @st.fragment
+    isoleert nu ook DEZE, buitenste functie van een volledige pagina-rerun
+    - zie de uitgebreide toelichting bovenaan dit bestand. Alle widgets
+    hieronder (vorige-ontmoeting-dropdown, spelersselectie, aantal-
+    wedstrijden-velden) triggeren voortaan enkel een herlading van dit
+    fragment, niet meer van de hele pagina."""
     st.divider()
     st.markdown('<div class="section-header">Opstelling-analyse</div>', unsafe_allow_html=True)
     with st.expander("Wat betekenen winkans, verwachte matchen, synergie, puntengrens en 'Reglementair'?", expanded=False):
@@ -184,6 +219,10 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                 st.session_state.pop(key, None)
             _load_encounter_index.clear()
             _clear_rank_caches()
+            # PADEL_ANALYSIS_FRAGMENT_ISOLATION_STAGE2_2026-09-27: bewust
+            # NIET scope="fragment" - deze knop wist caches die ook BUITEN
+            # dit fragment relevant zijn, dus een volledige pagina-herlading
+            # is hier functioneel correct.
             st.rerun()
     if roster:
         default_labels = [lbl for lbl, pid in own_label_to_id.items() if pid in roster]
@@ -483,13 +522,6 @@ def page_lineup_lab():
             st.divider()
             _render_poule_ranking_section(reeks_url_for_ranking, sel_player_id)
         else:
-            # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: de
-            # vorige tekst ("Kies eerst een speler...") was misleidend - er
-            # was al lang een speler gekozen; het echte probleem was dat
-            # reeks_url nog nergens gekend was (ook niet via de nieuwe,
-            # onafhankelijke lookup hierboven - bv. omdat het poule-schema
-            # voor deze speler nog nooit is opgehaald, automatisch of
-            # handmatig).
             st.info(
                 "Kon de rangschikkingslink nog niet bepalen voor deze speler - het poule-schema "
                 "is nog niet gekend (dit wordt normaal automatisch aangevuld via de dagelijkse "
