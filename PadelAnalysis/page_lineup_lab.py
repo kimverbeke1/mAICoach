@@ -17,6 +17,15 @@ opnieuw ophalen"-knop binnenin doet bewust WEL een ongescopede st.rerun(),
 want die wist caches die ook buiten dit fragment gelden.
 
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_PERF_TIMING_2026-09-28: deze versie bevat bovendien
+meetpunten (perf_timing.py) rond elke zware stap, plus een paneel
+"Laadtijd-analyse (debug)" onderaan de pagina dat per render toont waar de
+tijd effectief zit. LET OP bij het lezen: _render_opstelling_scenario()
+is een @st.fragment - bij een fragment-only rerun draait perf.reset()
+NIET, dus meet de EERSTE pagina-load door de pagina te herladen (F5),
+niet door in een widget te klikken.
+
+--------------------------------------------------------------------------
 PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28 (op verzoek van Kim: "laden van
 opstellingsanalyse pagina zonder al ergens op te drukken duurt lang")
 --------------------------------------------------------------------------
@@ -78,6 +87,27 @@ from lineup_opponent_history import (
 from lineup_rotation import _render_rotation_planner, _WIN_PROB_DISCLAIMER
 from lineup_matchup_table import _render_all_valid_matchups
 from lineup_sandbox import _render_lineup_sandbox
+
+# PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
+# Faalt de import, dan draait de pagina gewoon door zonder metingen.
+try:
+    import perf_timing as perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    class _PerfNoop:
+        @staticmethod
+        def reset():
+            pass
+
+        @staticmethod
+        def render_panel(**_kwargs):
+            pass
+
+        @staticmethod
+        def step(_label):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    perf = _PerfNoop()
 
 try:
     import opponent_scout as osc
@@ -150,12 +180,15 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     except Exception:
         before_date = ""
 
-    full_opp_bundle = _scout_team_all_fixtures(
-        fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,
-    ) if fixtures else {}
+    with perf.step("_scout_team_all_fixtures (in fragment)"):
+        full_opp_bundle = _scout_team_all_fixtures(
+            fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,
+        ) if fixtures else {}
 
-    _render_previous_opponent_lineup(bundle, opp=opp, full_bundle=full_opp_bundle)
-    _render_match1_frequency_opponent(bundle, full_bundle=full_opp_bundle)
+    with perf.step("_render_previous_opponent_lineup (vorige ontmoetingen)"):
+        _render_previous_opponent_lineup(bundle, opp=opp, full_bundle=full_opp_bundle)
+    with perf.step("_render_match1_frequency_opponent"):
+        _render_match1_frequency_opponent(bundle, full_bundle=full_opp_bundle)
 
     own_candidates = sorted(profiles, key=lambda x: x.get("display_name") or "")
     own_labels = [_display_name(p) for p in own_candidates]
@@ -164,7 +197,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         for p in own_candidates if p.get("player_id") is not None
     }
 
-    roster = _recent_own_lineup_roster(fixtures, own_ploeg_id)
+    with perf.step("_recent_own_lineup_roster (eigen ploeg scrapen)"):
+        roster = _recent_own_lineup_roster(fixtures, own_ploeg_id)
     known_ids = set(own_label_to_id.values())
     for pid, naam in roster.items():
         if pid in known_ids:
@@ -253,44 +287,50 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         st.error(f"Speler-plaatsen ({total_slots}) moet gelijk zijn aan 2x wedstrijden ({2*total_boards}).")
         return
 
-    docs_for_synergy = _cached_docs_for_players(tuple(sorted(available_ids)))
-    own_synergy = ll.compute_pairwise_synergy(docs_for_synergy, available_ids)
-    synergy_fn = ll.make_pair_score_fn(own_synergy, docs_for_synergy)
+    with perf.step("synergie berekenen (docs + pairwise)"):
+        docs_for_synergy = _cached_docs_for_players(tuple(sorted(available_ids)))
+        own_synergy = ll.compute_pairwise_synergy(docs_for_synergy, available_ids)
+        synergy_fn = ll.make_pair_score_fn(own_synergy, docs_for_synergy)
 
-    player_ratings = {pid: _cached_own_player_rating(pid) for pid in available_ids}
-    player_ratings = {k: v for k, v in player_ratings.items() if v is not None}
+    with perf.step("eigen player_ratings ophalen"):
+        player_ratings = {pid: _cached_own_player_rating(pid) for pid in available_ids}
+        player_ratings = {k: v for k, v in player_ratings.items() if v is not None}
 
     official_ranks_strict = official_ranks_for_suggestion
     _render_official_rank_warning(available_ids, official_ranks_strict, name_lookup_global)
 
-    opponent_ratings = _opponent_padelstat_ratings(bundle)
+    with perf.step("_opponent_padelstat_ratings"):
+        opponent_ratings = _opponent_padelstat_ratings(bundle)
 
     for _lbl, _pid in own_label_to_id.items():
         name_lookup_global.setdefault(_pid, _lbl)
 
-    all_matchups = _render_all_valid_matchups(
-        bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
-        player_ratings, official_ranks_strict, opponent_ratings, report,
-        name_lookup_global, sel_player_id,
-        tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
-    ) or []
+    with perf.step("_render_all_valid_matchups (matchup-tabel)"):
+        all_matchups = _render_all_valid_matchups(
+            bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
+            player_ratings, official_ranks_strict, opponent_ratings, report,
+            name_lookup_global, sel_player_id,
+            tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
+        ) or []
 
     st.divider()
     chosen_scenario_boards = None
-    _render_rotation_planner(
-        available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
-        opponent_boards=chosen_scenario_boards, player_ratings=player_ratings,
-        opponent_ratings=opponent_ratings, report_for_ai=report,
-        tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
-        bundle=bundle, total_boards=total_boards,
-    )
+    with perf.step("_render_rotation_planner"):
+        _render_rotation_planner(
+            available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
+            opponent_boards=chosen_scenario_boards, player_ratings=player_ratings,
+            opponent_ratings=opponent_ratings, report_for_ai=report,
+            tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
+            bundle=bundle, total_boards=total_boards,
+        )
 
     st.divider()
-    _render_lineup_sandbox(
-        bundle, opp, available_ids, name_lookup_global,
-        player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
-        profiles=profiles, sel_player_id=sel_player_id,
-    )
+    with perf.step("_render_lineup_sandbox"):
+        _render_lineup_sandbox(
+            bundle, opp, available_ids, name_lookup_global,
+            player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
+            profiles=profiles, sel_player_id=sel_player_id,
+        )
 
 
 def _render_saved_lineup_analyses(name_lookup_global: dict):
@@ -433,7 +473,8 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
     draait nu uitsluitend wanneer de gebruiker deze sectie effectief
     bekijkt - voorheen draaide ze bij elke pagina-render, ook wanneer de
     gebruiker in een andere tab keek."""
-    scout_result = _render_volgende_match_and_scout(str(sel_player_id), sel_label)
+    with perf.step("_render_volgende_match_and_scout (schema + scout-header)"):
+        scout_result = _render_volgende_match_and_scout(str(sel_player_id), sel_label)
     if not scout_result:
         return
 
@@ -442,7 +483,8 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
         st.session_state[f"vm_reeks_url_cache_{sel_player_id}"] = reeks_url
 
     _fixtures_voor_roster = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
-    bundle = _merge_full_opponent_roster(bundle, _fixtures_voor_roster, opp)
+    with perf.step("_merge_full_opponent_roster (volledige tegenstander-historiek)"):
+        bundle = _merge_full_opponent_roster(bundle, _fixtures_voor_roster, opp)
 
     extra_namen = bundle.get("_roster_extended_with") or []
     if extra_namen:
@@ -462,41 +504,53 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
 
     report_for_ai = None
     if bundle.get("unique_players"):
-        all_docs, global_docs = osu.prepare_team_docs(bundle, str(sel_player_id))
-        report_for_ai = oa.get_team_report(
-            bundle, opp, all_docs, current_reeks_url=reeks_url,
-            current_spelgroep_id=spelgroep_id, global_docs=global_docs,
-            key_prefix=f"scout_team_{sel_player_id}",
-        )
-        report_for_ai = oa.render_team_header(
-            report_for_ai, bundle, opp, all_docs, current_reeks_url=reeks_url,
-            current_spelgroep_id=spelgroep_id, global_docs=global_docs,
-            key_prefix=f"scout_team_{sel_player_id}",
-        )
+        with perf.step("osu.prepare_team_docs (spelersdocumenten laden)"):
+            all_docs, global_docs = osu.prepare_team_docs(bundle, str(sel_player_id))
+        with perf.step("oa.get_team_report (rapport bouwen/cache-check)"):
+            report_for_ai = oa.get_team_report(
+                bundle, opp, all_docs, current_reeks_url=reeks_url,
+                current_spelgroep_id=spelgroep_id, global_docs=global_docs,
+                key_prefix=f"scout_team_{sel_player_id}",
+            )
+        with perf.step("oa.render_team_header"):
+            report_for_ai = oa.render_team_header(
+                report_for_ai, bundle, opp, all_docs, current_reeks_url=reeks_url,
+                current_spelgroep_id=spelgroep_id, global_docs=global_docs,
+                key_prefix=f"scout_team_{sel_player_id}",
+            )
 
     sub_overzicht, sub_detail = st.tabs(["Overzicht", "Detail per speler"])
     with sub_overzicht:
         if report_for_ai is not None:
-            oa.render_overview_tab(report_for_ai)
+            with perf.step("oa.render_overview_tab"):
+                oa.render_overview_tab(report_for_ai)
             st.divider()
-        _render_opstelling_scenario(
-            bundle, opp, profiles, name_lookup_global, str(sel_player_id), report_for_ai,
-        )
+        with perf.step("_render_opstelling_scenario (fragment)"):
+            _render_opstelling_scenario(
+                bundle, opp, profiles, name_lookup_global, str(sel_player_id), report_for_ai,
+            )
     with sub_detail:
         if report_for_ai is not None:
-            oa.render_player_detail_tab(report_for_ai, key_prefix=f"scout_team_{sel_player_id}")
+            with perf.step("oa.render_player_detail_tab"):
+                oa.render_player_detail_tab(report_for_ai, key_prefix=f"scout_team_{sel_player_id}")
         else:
             st.info("Nog geen rapport beschikbaar voor deze tegenploeg.")
 
     if report_for_ai is not None:
         st.divider()
-        oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
+        with perf.step("oa.render_ai_section (enkel UI, geen AI-call)"):
+            oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
 
 
 def page_lineup_lab():
+    # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: metingen van de VORIGE render
+    # wissen. Moet de allereerste regel zijn, vóór elke perf.step().
+    perf.reset()
+
     st.header("Opstelling-analyse")
 
-    profiles = _get_all_profiles()
+    with perf.step("_get_all_profiles"):
+        profiles = _get_all_profiles()
     if not profiles:
         st.info("Nog geen spelers in de database.")
         return
@@ -504,7 +558,8 @@ def page_lineup_lab():
     name_lookup_global = {p.get("player_id"): _display_name(p) for p in profiles}
     profile_map = {_display_name(p): p for p in sorted(profiles, key=lambda x: x.get("display_name") or "")}
 
-    settings = fb.get_app_settings()
+    with perf.step("fb.get_app_settings"):
+        settings = fb.get_app_settings()
     home_id = settings.get("home_player_id")
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
 
@@ -523,17 +578,20 @@ def page_lineup_lab():
     )
 
     if section == SECTION_ANALYSE:
-        _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_global)
+        with perf.step("SECTIE Analyseren"):
+            _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_global)
 
     elif section == SECTION_RANG:
         # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: deze
         # sectie hangt NOOIT af van of de gebruiker al "analyseren" deed -
         # ze werkt volledig op reeds opgeslagen data.
-        reeks_url_for_ranking = _ensure_known_ranking_context(sel_player_id, sel_label)
+        with perf.step("_ensure_known_ranking_context"):
+            reeks_url_for_ranking = _ensure_known_ranking_context(sel_player_id, sel_label)
         if reeks_url_for_ranking:
             _render_rangschikking_link(reeks_url_for_ranking)
             st.divider()
-            _render_poule_ranking_section(reeks_url_for_ranking, sel_player_id)
+            with perf.step("SECTIE Rangschikking (poule_ranking)"):
+                _render_poule_ranking_section(reeks_url_for_ranking, sel_player_id)
         else:
             st.info(
                 "Kon de rangschikkingslink nog niet bepalen voor deze speler - het poule-schema "
@@ -542,11 +600,19 @@ def page_lineup_lab():
             )
 
     elif section == SECTION_POULE:
-        try:
-            import poule_teams_ui as ptu
-            ptu.render_poule_teams_tab(str(sel_player_id), name_lookup_global, go_to_player_fn=_go_to_player)
-        except Exception as exc:
-            st.warning(f"Kon deze sectie niet laden: {exc}")
+        with perf.step("SECTIE Andere ploegen (poule_teams_ui)"):
+            try:
+                import poule_teams_ui as ptu
+                ptu.render_poule_teams_tab(str(sel_player_id), name_lookup_global, go_to_player_fn=_go_to_player)
+            except Exception as exc:
+                st.warning(f"Kon deze sectie niet laden: {exc}")
 
     elif section == SECTION_SAVED:
-        _render_saved_lineup_analyses(name_lookup_global)
+        with perf.step("SECTIE Opgeslagen analyses"):
+            _render_saved_lineup_analyses(name_lookup_global)
+
+    # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: het meetpaneel staat bewust
+    # HELEMAAL onderaan, zodat het de metingen van de volledige render kan
+    # tonen. Zet perf_timing.PERF_ENABLED = False om het uit te schakelen.
+    st.divider()
+    perf.render_panel()
