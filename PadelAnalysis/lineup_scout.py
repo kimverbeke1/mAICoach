@@ -66,7 +66,53 @@ FIX (2 delen, beide hieronder):
      scout de waarden NIET al gezet heeft (zie dat bestand) - dus in het
      normale geval waarin de analyse al geladen is, gebeurt dit werk
      helemaal niet meer.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28 (op verzoek van Kim, na
+een MEETSESSIE met perf_timing.py - geen gok meer, maar cijfers)
+--------------------------------------------------------------------------
+GEMETEN (2 opeenvolgende runs, paneel "Laadtijd-analyse"):
+  - run 1: totaal 10.36s, waarvan 10.18s in _render_volgende_match_and_scout()
+  - run 2: totaal 10.93s, waarvan 10.16s (92.9%) in _resolve_own_ploeg_id().
+    ALLE andere stappen samen bleven onder 0.6s; osu.render_scout_header()
+    kostte slechts 0.002s en was dus onterecht verdacht.
+
+ROOT CAUSE (bevestigd in schedule_scraper.py): _resolve_own_ploeg_id()
+roept ss.identify_own_ploeg_id() aan. Die functie loopt over de kandidaat-
+fixtures en roept per kandidaat _fixture_player_sides() aan, die op zijn
+beurt doet:
+      from scraper_v2 import scrape_uitslagenblad
+      data = scrape_uitslagenblad(requests.Session(), url)
+Dat is een LIVE HTTP-scrape van het uitslagenblad, PER FIXTURE, telkens met
+een VERSE requests.Session(). De loop stopt pas zodra home_score !=
+away_score; bij een gelijke of lege uitkomst gaat hij naar de volgende
+kandidaat en scrapet opnieuw. Vandaar ~10s.
+
+Het resultaat is echter VOLLEDIG DETERMINISTISCH voor een gegeven speler +
+schema: de eigen ploeg-ID verandert niet tussen twee page-loads. Toch werd
+die hele scrape-loop bij ELKE render opnieuw uitgevoerd, want er zat
+nergens een cache omheen.
+
+FIX (bewust ENKEL in deze app-laag, NIET in schedule_scraper.py):
+  - _cached_identify_own_ploeg_id() hieronder wikkelt
+    ss.identify_own_ploeg_id() in @st.cache_data met een TTL van 24u. De
+    cache-sleutel is (player_id, display_name, fixtures-handtekening),
+    waarbij die handtekening enkel de velden bevat die de uitkomst kunnen
+    beinvloeden (ploeg-ids/datum/score van de GESPEELDE fixtures, plus de
+    datums van de eigen interclubmatchen). Wijzigt er een uitslag, dan
+    wijzigt de handtekening en wordt automatisch opnieuw gerekend; blijft
+    alles gelijk, dan kost dit 0s.
+  - clear_identify_own_team_cache() wist deze cache. De knop "Ploeg opnieuw
+    ophalen" (page_lineup_lab.py) bereikt ze via _clear_rank_caches().
+
+BEWUST NIET AANGEPAST: schedule_scraper.py zelf (de verse Session per
+fixture, en de loop over alle kandidaten). Die module wordt ook door de
+nachtelijke GitHub Actions-prescan gebruikt, waar deze sessie net veel aan
+gerepareerd is - een wijziging daar riskeert die werkende prescan-logica te
+breken voor een winst die deze cache hier al volledig oplevert.
 """
+
+import json
 
 import streamlit as st
 
@@ -147,11 +193,88 @@ def _render_schema_refresh_button(sel_player_id: str) -> None:
         )
 
 
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28
+# Zie de module-docstring voor de gemeten root cause (10.16s van 10.93s).
+# ─────────────────────────────────────────────
+def _fixtures_signature(fixtures: list, own_interclub_matches: list) -> str:
+    """Compacte handtekening van ALLES wat de uitkomst van
+    identify_own_ploeg_id() kan beinvloeden. Verandert er niets aan de
+    gespeelde uitslagen of aan de eigen matchdatums, dan blijft deze string
+    identiek en mag het (dure) resultaat hergebruikt worden."""
+    fx_part = sorted(
+        "|".join([
+            str(fx.get("home_ploeg_id") or ""),
+            str(fx.get("away_ploeg_id") or ""),
+            str(fx.get("date_text") or ""),
+            str(fx.get("score") or ""),
+            str(fx.get("match_id") or ""),
+        ])
+        for fx in (fixtures or [])
+        if fx.get("played")
+    )
+    match_part = sorted(
+        str(m.get("match_date") or "")
+        for m in (own_interclub_matches or [])
+        if m.get("match_type") == "interclub"
+    )
+    return json.dumps({"f": fx_part, "m": match_part}, sort_keys=True)
+
+
+@st.cache_data(ttl=86400, show_spinner="Eigen ploeg bepalen (eenmalig)...")
+def _cached_identify_own_ploeg_id(
+    player_id: str, display_name: str, signature: str,
+    fixtures_json: str, matches_json: str,
+):
+    """Gecachete wrapper rond ss.identify_own_ploeg_id().
+
+    `signature` doet het echte cache-werk; `fixtures_json`/`matches_json`
+    dragen de data die de onderliggende functie nodig heeft. Ze worden als
+    JSON doorgegeven zodat Streamlit ze betrouwbaar kan hashen. Faalt de
+    aanroep, dan geven we (None, None, None) terug - identiek aan het
+    gedrag van de originele functie bij een mislukte herkenning."""
+    try:
+        fixtures = json.loads(fixtures_json)
+        own_interclub_matches = json.loads(matches_json)
+        return ss.identify_own_ploeg_id(
+            fixtures, own_interclub_matches, own_display_name=display_name,
+        )
+    except Exception:  # noqa: BLE001
+        return None, None, None
+
+
+def clear_identify_own_team_cache() -> None:
+    """Wist de cache van _cached_identify_own_ploeg_id(). Aangeroepen via
+    _clear_rank_caches(), dus ook door de knop "Ploeg opnieuw ophalen"."""
+    try:
+        _cached_identify_own_ploeg_id.clear()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_display_name=None):
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
-    home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(
-        fixtures, own_interclub_matches, own_display_name=own_display_name,
-    )
+
+    # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28: deze aanroep deed
+    # een live uitslagenblad-scrape PER kandidaat-fixture en kostte gemeten
+    # 10.16s bij ELKE render. Het resultaat is deterministisch, dus het
+    # gaat nu door een cache met een handtekening op de gespeelde uitslagen.
+    signature = _fixtures_signature(fixtures, own_interclub_matches)
+    try:
+        fixtures_json = json.dumps(fixtures, default=str, sort_keys=True)
+        matches_json = json.dumps(own_interclub_matches, default=str, sort_keys=True)
+    except Exception:  # noqa: BLE001 - nooit de app breken op serialisatie
+        fixtures_json = matches_json = None
+
+    if fixtures_json is not None and matches_json is not None:
+        home_ploeg_id, away_ploeg_id, matched_fx = _cached_identify_own_ploeg_id(
+            str(sel_player_id), own_display_name or "", signature,
+            fixtures_json, matches_json,
+        )
+    else:
+        home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(
+            fixtures, own_interclub_matches, own_display_name=own_display_name,
+        )
     own_ploeg_id = st.session_state.get(override_team_key)
     if not own_ploeg_id and matched_fx:
         own_ploeg_id = matched_fx.get("resolved_own_ploeg_id")
@@ -220,9 +343,15 @@ def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
 
     own_ploeg_id = None
     if saved_fixtures:
+        # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28: ook dit pad
+        # gaat nu door dezelfde cache - anders zou de Rangschikking-sectie
+        # alsnog de volle ~10s scrape-loop betalen.
         try:
-            own_ploeg_id, _own_id2, _resolved = ss.identify_own_ploeg_id(
-                saved_fixtures, own_interclub_matches, own_display_name=sel_label,
+            signature = _fixtures_signature(saved_fixtures, own_interclub_matches)
+            own_ploeg_id, _own_id2, _resolved = _cached_identify_own_ploeg_id(
+                str(sel_player_id), sel_label or "", signature,
+                json.dumps(saved_fixtures, default=str, sort_keys=True),
+                json.dumps(own_interclub_matches, default=str, sort_keys=True),
             )
         except Exception:
             own_ploeg_id = None
@@ -487,6 +616,11 @@ def _clear_rank_caches() -> None:
         _cached_docs_for_players.clear()
     except Exception:
         pass
+    # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28: de eigen-ploeg-
+    # herkenning hoort bij een bewuste verversing ook opnieuw bepaald te
+    # worden. Aparte try/except, zodat een fout hierboven dit niet
+    # overslaat.
+    clear_identify_own_team_cache()
 
 
 def _merge_full_opponent_roster(bundle: dict, fixtures: list, opp: dict) -> dict:
