@@ -3,8 +3,10 @@ lineup_scout.py - Volgende match laden, scout-header, eigen-ploeg-
 herkenning, en de gedeelde caching-helpers (padelstat/klassement/officieel-
 klassement/eigen-matchdocumenten) die de rest van de Opstelling-analyse-
 modules hergebruiken.
+
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie page_lineup_lab.py voor het volledige overzicht van alle modules.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27 (op verzoek van
 Kim, meermaals gemeld: "Kies eerst een speler bij 'Toon analyse voor'
@@ -13,6 +15,7 @@ hierboven. Wordt getoond bij de rangschikking. Dat is niet ok.")
 _known_ranking_context() leest UITSLUITEND reeds opgeslagen data en bepaalt
 daaruit reeks_url/fixtures/own_ploeg_id ONAFHANKELIJK van elke knop-klik of
 scout.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SHARED_FETCH_CACHE_2026-09-28 (op verzoek van Kim, na analyse
 i.s.m. opponent_scout.py + opponent_scout_ui.py: "eerste laadactie van de
@@ -23,7 +26,7 @@ BEVESTIGD (concrete, geen vermoeden): _scout_team_all_fixtures() hieronder
 "Vorige gespeelde matchen"/match1-match2-frequentie-features) deed een
 TWEEDE, volledig onafhankelijke osc.scout_opponent()-aanroep voor DEZELFDE
 tegenstander-ploeg als opponent_scout_ui._run_scout_and_scrape() (bij
-"🔍 Tegenstander analyseren") - maar dan met lookback=ALLE dit seizoen
+"Tegenstander analyseren") - maar dan met lookback=ALLE dit seizoen
 gespeelde wedstrijden i.p.v. enkel de laatste 1-4. Omdat scout_opponent()'s
 fetched_cache tot nu toe ENKEL lokaal (binnen 1 aanroep) leefde, herhaalde
 deze 2e, bredere aanroep fetches die de 1e aanroep al gedaan had - exact op
@@ -34,22 +37,51 @@ aan osc.scout_opponent() als opponent_scout_ui._run_scout_and_scrape() -
 via osc.shared_fetch_cache_key(ploeg_id) in st.session_state (zie
 opponent_scout.py voor de centrale sleutel-definitie en de volledige
 toelichting). Welke van de 2 aanroepen ook het eerst gebeurt op een
-pagina-render (de volgorde ligt vast in page_lineup_lab.py: eerst de
-scout-header/knop, dan pas _merge_full_opponent_roster()), de tweede
-aanroep hergebruikt nu de fixtures die de eerste al ophaalde i.p.v. ze
-opnieuw te fetchen.
+pagina-render, de tweede aanroep hergebruikt nu de fixtures die de eerste
+al ophaalde i.p.v. ze opnieuw te fetchen.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28 (op verzoek van Kim: "laden van
+opstellingsanalyse pagina zonder al ergens op te drukken duurt lang")
+--------------------------------------------------------------------------
+BEVESTIGD (door de code na te lezen, geen gok): _known_ranking_context()
+deed bij ELKE pagina-render opnieuw exact hetzelfde werk dat
+_render_volgende_match_and_scout() vlak daarvoor al had gedaan:
+  - een 2e _get_saved_schedule(sel_player_id) (Firestore-read van het
+    volledige poule-schema),
+  - een 2e _get_saved_poule_url(sel_player_id),
+  - een 2e ss.identify_own_ploeg_id() over datzelfde, volledige schema
+    (de duurste stap: naam-matching over alle fixtures x alle eigen
+    interclubmatchen).
+Dat was pure duplicatie - geen bug in de uitkomst, wel dubbele kost op
+exact de render waar Kim op wacht.
+
+FIX (2 delen, beide hieronder):
+  1. _known_ranking_context() wordt gememoiseerd per (player_id, label) in
+     st.session_state, zodat ze binnen dezelfde sessie hoogstens EEN keer
+     echt rekent i.p.v. bij elke rerun opnieuw. De memo wordt gewist door
+     clear_known_ranking_context_cache(), die de bestaande "Ploeg opnieuw
+     ophalen"-knop (page_lineup_lab.py) nu mee aanroept.
+  2. page_lineup_lab() roept ze bovendien nog uitsluitend aan wanneer de
+     scout de waarden NIET al gezet heeft (zie dat bestand) - dus in het
+     normale geval waarin de analyse al geladen is, gebeurt dit werk
+     helemaal niet meer.
 """
+
 import streamlit as st
+
 from dashboard_common import (
     fb, ll, ss, osu, oa, is_scraping_available, render_cloud_scrape_trigger,
     _parse_match_date, _format_scraped_at, _clean_name,
     _get_saved_poule_url, _save_poule_url, _get_saved_schedule,
     _load_poule_fixtures, _load_poule_schedule_robust, _official_current_rank,
 )
+
 try:
     import opponent_scout as osc
 except Exception:  # noqa: BLE001  pragma: no cover
     osc = None
+
 try:
     import manual_poule_input
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -139,16 +171,27 @@ def _cached_own_full_doc(player_id: str):
         return None
 
 
-def _known_ranking_context(sel_player_id: str, sel_label: str):
-    """PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: bepaalt
-    (reeks_url, fixtures, own_ploeg_id) UITSLUITEND op basis van reeds
-    opgeslagen data, ONAFHANKELIJK van de "Volgende match laden"-knop of de
-    volledige tegenstander-scout."""
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28
+# ─────────────────────────────────────────────
+_KNOWN_RANKING_MEMO_PREFIX = "known_ranking_ctx_v1_"
+
+
+def clear_known_ranking_context_cache() -> None:
+    """Wist de sessie-memo van _known_ranking_context(). Wordt aangeroepen
+    door de "Ploeg opnieuw ophalen"-knop (page_lineup_lab.py), samen met de
+    andere cache-wissers, zodat een bewuste verversing ook hier doorwerkt."""
+    for key in [k for k in list(st.session_state) if str(k).startswith(_KNOWN_RANKING_MEMO_PREFIX)]:
+        st.session_state.pop(key, None)
+
+
+def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
     saved_fixtures, _sched_at = _get_saved_schedule(sel_player_id)
     sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"
     ]
+
     reeks_url = _get_saved_poule_url(sel_player_id)
     if not reeks_url:
         ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
@@ -159,6 +202,7 @@ def _known_ranking_context(sel_player_id: str, sel_label: str):
                 reverse=True,
             )[0]
             reeks_url = most_recent.get("reeks_url")
+
     own_ploeg_id = None
     if saved_fixtures:
         try:
@@ -167,7 +211,29 @@ def _known_ranking_context(sel_player_id: str, sel_label: str):
             )
         except Exception:
             own_ploeg_id = None
+
     return reeks_url, (saved_fixtures or []), own_ploeg_id
+
+
+def _known_ranking_context(sel_player_id: str, sel_label: str):
+    """PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: bepaalt
+    (reeks_url, fixtures, own_ploeg_id) UITSLUITEND op basis van reeds
+    opgeslagen data, ONAFHANKELIJK van de "Volgende match laden"-knop of de
+    volledige tegenstander-scout.
+
+    PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28: het resultaat wordt nu
+    gememoiseerd per (player_id, label) in st.session_state. Voorheen deed
+    deze functie bij ELKE rerun opnieuw een volledige _get_saved_schedule()
+    + ss.identify_own_ploeg_id() over dat hele schema - werk dat
+    _render_volgende_match_and_scout() vlak ervoor meestal al gedaan had.
+    De uitkomst is identiek; enkel de herhaalde kost is weg. Gebruik
+    clear_known_ranking_context_cache() om dit bewust te verversen."""
+    memo_key = f"{_KNOWN_RANKING_MEMO_PREFIX}{sel_player_id}_{sel_label}"
+    if memo_key in st.session_state:
+        return st.session_state[memo_key]
+    result = _compute_known_ranking_context(sel_player_id, sel_label)
+    st.session_state[memo_key] = result
+    return result
 
 
 def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
@@ -175,9 +241,12 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     load_key = f"vm_loaded_{sel_player_id}"
+
     _render_schema_refresh_button(sel_player_id)
+
     sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"]
+
     def _finish(fixtures, reeks_url_val):
         own_ploeg_id = _resolve_own_ploeg_id(
             sel_player_id, fixtures, own_interclub_matches, own_display_name=sel_label,
@@ -191,6 +260,7 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             return None
         bundle, opp = header_result
         return bundle, opp, reeks_url_val, opp.get("spelgroep_id")
+
     saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
     if saved_fixtures:
         reeks_url = _get_saved_poule_url(sel_player_id) or ""
@@ -198,13 +268,16 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             st.caption(f"Schema automatisch opgehaald (via de dagelijkse update) op {_format_scraped_at(sched_at)}.")
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_saved", expanded=False)
         return _finish(saved_fixtures, reeks_url)
+
     ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
     auto_reeks_url = None
     if ic_with_url:
         most_recent = sorted(ic_with_url, key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0), reverse=True)[0]
         auto_reeks_url = most_recent["reeks_url"]
+
     saved_url = _get_saved_poule_url(sel_player_id)
     reeks_url = st.session_state.get(override_url_key) or saved_url or auto_reeks_url
+
     if not reeks_url:
         st.info(
             f"Nog geen poule/tabel-schema gekend voor {sel_label}. Dit wordt normaal automatisch "
@@ -213,6 +286,7 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         )
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nourl")
         return None
+
     if not st.session_state.get(load_key):
         src = "handmatig ingesteld" if (st.session_state.get(override_url_key) or saved_url) else "automatisch gevonden via je laatste interclubmatch"
         st.caption(f"Poule/tabel-link is {src}. Klik om je volgende match te laden.")
@@ -229,14 +303,17 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
                 st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_haveurl", expanded=False)
         return None
+
     with st.spinner("Wedstrijdschema ophalen..."):
         try:
             fixtures, fetch_error, meta = _load_poule_schedule_robust(sel_player_id, reeks_url)
         except Exception as e:
             fixtures, fetch_error, meta = [], str(e), None
+
     if meta is not None and fixtures and not fetch_error:
         st.session_state.pop(load_key, None)
         st.rerun()
+
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
         if st.button("Opnieuw proberen", key=f"retry_vm_{sel_player_id}"):
@@ -250,6 +327,7 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_fetcherr")
         return None
+
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
         if st.button("Opnieuw proberen", key=f"retry_nofix_{sel_player_id}"):
@@ -262,6 +340,7 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nofix")
         return None
+
     return _finish(fixtures, reeks_url)
 
 
@@ -277,7 +356,7 @@ def _own_team_name(fixtures: list, own_ploeg_id: str) -> str:
 def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, before_date: str) -> dict:
     """PADEL_ANALYSIS_SHARED_FETCH_CACHE_2026-09-28: geeft nu dezelfde
     GEDEELDE fetch-cache mee aan osc.scout_opponent() als
-    opponent_scout_ui._run_scout_and_scrape() (bij "🔍 Tegenstander
+    opponent_scout_ui._run_scout_and_scrape() (bij "Tegenstander
     analyseren") - via osc.shared_fetch_cache_key(ploeg_id) in
     st.session_state. Zie moduledocstring voor de volledige, bevestigde
     analyse van de dubbele-fetch-bug die dit oplost."""
@@ -322,9 +401,8 @@ def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
         # PADEL_ANALYSIS_SHARED_FETCH_CACHE_2026-09-28: eigen ploeg heeft een
         # ANDER ploeg_id dan de tegenstander, dus geen overlap met
         # _scout_team_all_fixtures()/opponent_scout_ui - maar voor
-        # consistentie en om een toekomstige duplicatie (bv. als deze roster
-        # ooit ELDERS ook opgevraagd wordt) meteen te vermijden, gebruikt
-        # ook dit de gedeelde cache-conventie.
+        # consistentie en om een toekomstige duplicatie meteen te vermijden,
+        # gebruikt ook dit de gedeelde cache-conventie.
         shared_cache = st.session_state.setdefault(
             osc.shared_fetch_cache_key(str(own_ploeg_id)), {}
         )
