@@ -77,6 +77,21 @@ from dashboard_common import (
     _load_poule_fixtures, _load_poule_schedule_robust, _official_current_rank,
 )
 
+# PADEL_ANALYSIS_PERF_TIMING_STAGE2_2026-09-28: de eerste meting wees
+# 10.18s van de 10.36s toe aan _render_volgende_match_and_scout(). Deze
+# versie meet de 4 substappen BINNEN die functie, zodat duidelijk wordt
+# welke van hen de tijd opslorpt.
+try:
+    import perf_timing as perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    class _PerfNoop:
+        @staticmethod
+        def step(_label):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    perf = _PerfNoop()
+
 try:
     import opponent_scout as osc
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -242,31 +257,44 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     load_key = f"vm_loaded_{sel_player_id}"
 
-    _render_schema_refresh_button(sel_player_id)
+    with perf.step("  _render_schema_refresh_button"):
+        _render_schema_refresh_button(sel_player_id)
 
-    sel_doc = _cached_own_full_doc(str(sel_player_id))
+    with perf.step("  _cached_own_full_doc (eigen spelersdocument)"):
+        sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"]
 
     def _finish(fixtures, reeks_url_val):
-        own_ploeg_id = _resolve_own_ploeg_id(
-            sel_player_id, fixtures, own_interclub_matches, own_display_name=sel_label,
-        )
+        with perf.step("  _resolve_own_ploeg_id (eigen-ploeg-herkenning)"):
+            own_ploeg_id = _resolve_own_ploeg_id(
+                sel_player_id, fixtures, own_interclub_matches, own_display_name=sel_label,
+            )
         if not own_ploeg_id:
+            # PADEL_ANALYSIS_PERF_TIMING_STAGE2_2026-09-28: maak zichtbaar
+            # DAT hier afgebroken wordt - anders lijkt de pagina enkel
+            # traag, terwijl ze in werkelijkheid ook nog eens niets
+            # oplevert.
+            st.caption("debug: gestopt in _finish() - own_ploeg_id kon niet bepaald worden.")
             return None
         st.session_state[f"vm_fixtures_{sel_player_id}"] = fixtures
         st.session_state[f"vm_own_ploeg_id_{sel_player_id}"] = own_ploeg_id
-        header_result = osu.render_scout_header(sel_player_id=str(sel_player_id), fixtures=fixtures, own_ploeg_id=own_ploeg_id)
+        with perf.step("  osu.render_scout_header (tegenstander ophalen)"):
+            header_result = osu.render_scout_header(sel_player_id=str(sel_player_id), fixtures=fixtures, own_ploeg_id=own_ploeg_id)
         if not header_result:
+            st.caption("debug: gestopt na render_scout_header() - geen bundle/opp teruggekregen.")
             return None
         bundle, opp = header_result
         return bundle, opp, reeks_url_val, opp.get("spelgroep_id")
 
-    saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
+    with perf.step("  _get_saved_schedule (poule-schema uit Firestore)"):
+        saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
     if saved_fixtures:
-        reeks_url = _get_saved_poule_url(sel_player_id) or ""
+        with perf.step("  _get_saved_poule_url"):
+            reeks_url = _get_saved_poule_url(sel_player_id) or ""
         if sched_at:
             st.caption(f"Schema automatisch opgehaald (via de dagelijkse update) op {_format_scraped_at(sched_at)}.")
-        _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_saved", expanded=False)
+        with perf.step("  _render_manual_url_fallback"):
+            _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_saved", expanded=False)
         return _finish(saved_fixtures, reeks_url)
 
     ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
