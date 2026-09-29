@@ -155,22 +155,19 @@ geven dit per rotatie door, zodat page_lineup_lab.py
 ❓-waarschuwing i.p.v. het te negeren — exact hetzelfde patroon als de
 Opstelling-scenario's-tabel al gebruikt voor dit probleem.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_PARALLEL_DOCS_2026-09-29 (op verzoek van Kim, na een
-MEETSESSIE: "Mijn profiel" -> sectie Partners deed 66 Firestore-reads NA
-ELKAAR, samen ~19s)
+PADEL_ANALYSIS_DOCS_FS_PREFETCH_2026-09-29 (op verzoek van Kim: "bij
+opstelling analyse duurt de 1ste maal zo lang"; eerdere meting: sectie
+Partners op "Mijn profiel" deed 66 get_player-reads NA ELKAAR, ~19s)
 --------------------------------------------------------------------------
-get_docs_for_players() las elk spelersdocument een voor een
-(fb.get_player() in een lus). De reads zijn onafhankelijk van elkaar, dus
-ze gebeuren nu in parallel (max. 16 tegelijk, via
-fb_request_cache.parallel_read()). Verwacht: van ~19s naar ~1.5-2s voor 66
-spelers. Het resultaat is IDENTIEK: zelfde dict, zelfde sleutels (enkel
-spelers met een document), zelfde volgorde van invoer.
-De threads gebruiken de ONGEWIKKELDE fb._raw_get_player (gezet door
-dashboard_common.py) indien aanwezig, want de timing- en geheugenlaag
-gebruiken st.session_state, dat buiten de Streamlit-hoofdthread niet werkt.
-Buiten de app (scrapers) bestaat _raw_get_player niet en is fb.get_player
-gewoon de originele functie. Ontbreekt fb_request_cache, dan valt dit terug
-op de oude lus.
+get_docs_for_players() las elk spelersdocument een voor een. Het leest nu
+eerst ALLE nog niet gecachete documenten PARALLEL in de gedeelde leescache
+(fb._fs_prefetch, geinstalleerd door dashboard_common.py), en loopt daarna
+- ONGEWIJZIGD - over fb.get_player(pid), dat dan uit die cache komt.
+Resultaat, sleutels en volgorde zijn identiek aan voorheen.
+Dit versnelt elke aanroeper tegelijk: Partners (player_dashboard_shared),
+prepare_team_docs (opponent_scout_ui), synergie en ontmoetingen
+(lineup_scout). Buiten de app (scrapers, standalone) bestaat fb._fs_prefetch
+niet en gedraagt deze functie zich exact zoals voorheen.
 """
 import heapq
 import itertools
@@ -192,28 +189,18 @@ def get_all_profiles() -> List[dict]:
 
 
 def get_docs_for_players(player_ids: List[str]) -> Dict[str, dict]:
-    """PADEL_ANALYSIS_PARALLEL_DOCS_2026-09-29: leest de documenten in
-    parallel - zie moduledocstring."""
-    try:
-        import fb_request_cache as _rc
-    except Exception:  # noqa: BLE001
-        _rc = None
-    if _rc is None:
-        out = {}
-        for pid in player_ids:
-            doc = fb.get_player(pid)
-            if doc:
-                out[str(pid)] = doc
-        return out
-    raw_get_player = getattr(fb, "_raw_get_player", None) or fb.get_player
-    pids = [str(p) for p in player_ids if p]
-    with _rc.timed_step(f"Firestore: get_player parallel ({len(set(pids))} spelers)"):
-        gelezen = _rc.parallel_read(raw_get_player, pids)
+    # PADEL_ANALYSIS_DOCS_FS_PREFETCH_2026-09-29 - zie moduledocstring.
+    prefetch = getattr(fb, "_fs_prefetch", None)
+    if callable(prefetch):
+        try:
+            prefetch(("get_player",), [str(p) for p in player_ids if p])
+        except Exception:  # noqa: BLE001 - voorophalen mag nooit iets breken
+            pass
     out = {}
-    for pid in pids:
-        doc = gelezen.get(pid)
+    for pid in player_ids:
+        doc = fb.get_player(pid)
         if doc:
-            out[pid] = doc
+            out[str(pid)] = doc
     return out
 
 

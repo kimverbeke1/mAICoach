@@ -185,6 +185,28 @@ opponent_dossier.py te wijzigen):
   rechtstreeks (niet via fb.get_...), en is dat bestand de volgende stap.
 _needs_rebuild() geeft nog steeds een bool terug (achterwaarts compatibel);
 de reden komt uit de nieuwe _rebuild_reason().
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TEAM_REPORT_FS_PREFETCH_2026-09-29 (op verzoek van Kim: "bij
+opstelling analyse duurt de 1ste maal zo lang")
+--------------------------------------------------------------------------
+BUG: het voorophalen hierboven (fb_request_cache.prefetch) deed in de
+praktijk NIETS. Die per-render-cache wordt nergens geinstalleerd - de
+gedeelde leescache in dashboard_common.py (PADEL_ANALYSIS_FIRESTORE_READ_
+CACHE / _FS_CACHE_PREFETCH) is de enige actieve. De aanroep eindigde dus
+stil, en elke read hieronder bleef een aparte, sequentiele netwerkronde.
+GEMETEN (export 2026-09-29T17-26, koude start): onder get_team_report
+stonden per tegenstander ~5 reads NA ELKAAR - get_padelstat_rating,
+get_player, get_player_profile en 2x get_official_klassement_via_padelstat
+- samen 9.3s voor 7 spelers. Dat is het patroon van een HERBOUW van het
+rapport: opponent_dossier.build_player_summary() leest per speler exact die
+functies.
+FIX: _prefetch_team_reads() gebruikt nu fb._fs_prefetch (dashboard_common.
+py) - dezelfde gedeelde leescache, TTL en invalidatie als de rest van de
+app - voor ALLE vier de functies die build_player_summary() per speler
+leest, voor alle spelers van de ploeg in EEN parallelle batch. Staat de
+cache al warm, dan leest fb._fs_prefetch niets. Ontbreekt de gedeelde
+leescache (bv. standalone gebruik), dan doet dit niets en werkt alles zoals
+voorheen.
 """
 from __future__ import annotations
 import re
@@ -237,10 +259,9 @@ except Exception:  # pragma: no cover
         return False, "cloud_helpers ontbreekt"
 REPORTS_COLLECTION = "team_scouting_reports"
 # PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29 - zie moduledocstring.
-try:
-    import fb_request_cache as _rc
-except Exception:  # noqa: BLE001  pragma: no cover
-    _rc = None
+# PADEL_ANALYSIS_TEAM_REPORT_FS_PREFETCH_2026-09-29: de import van
+# fb_request_cache is weg - die cache werd nooit geinstalleerd, zie
+# _prefetch_team_reads() hieronder.
 try:
     import perf_timing as _perf
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -252,6 +273,37 @@ def _step(label: str):
         from contextlib import nullcontext
         return nullcontext()
     return _perf.step(label)
+
+
+# PADEL_ANALYSIS_TEAM_REPORT_FS_PREFETCH_2026-09-29 - zie moduledocstring.
+# Exact de leesfuncties die opponent_dossier.build_player_summary() per
+# speler aanroept (plus wat de freshness-check nodig heeft).
+_TEAM_REPORT_READS = (
+    "get_player",
+    "get_player_profile",
+    "get_padelstat_rating",
+    "get_official_klassement_via_padelstat",
+)
+
+
+def _prefetch_team_reads(bundle: dict) -> None:
+    """Leest de per-speler-reads van deze ploeg PARALLEL in de gedeelde
+    leescache (fb._fs_prefetch, dashboard_common.py). Doet niets als die
+    cache niet geinstalleerd is. Faalt altijd stil."""
+    functie = getattr(fb, "_fs_prefetch", None)
+    if not callable(functie):
+        return
+    pids = [
+        str(p.get("user_id"))
+        for p in (bundle.get("unique_players", []) or [])
+        if p.get("user_id")
+    ]
+    if not pids:
+        return
+    try:
+        functie(_TEAM_REPORT_READS, pids)
+    except Exception:  # noqa: BLE001 - voorophalen mag nooit de pagina breken
+        pass
 
 
 REPORT_SCHEMA_VERSION = 10  # TVL officieel klassement is weer autoritatief; padelstat-snapshot enkel als terugval
@@ -429,12 +481,9 @@ def get_team_report(
     # PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29: alle per-speler-reads
     # in EEN parallelle batch, VOOR de freshness-check en een eventuele
     # herbouw - zie moduledocstring.
-    if _rc is not None:
-        try:
-            pids = [str(p.get("user_id")) for p in bundle.get("unique_players", []) or [] if p.get("user_id")]
-            _rc.prefetch(("get_padelstat_rating", "get_player"), pids)
-        except Exception:  # noqa: BLE001 - nooit de pagina breken
-            pass
+    # PADEL_ANALYSIS_TEAM_REPORT_FS_PREFETCH_2026-09-29: via de ACTIEVE
+    # gedeelde leescache (de vorige aanroep hier deed in de praktijk niets).
+    _prefetch_team_reads(bundle)
     with _step("team report: freshness-check"):
         reason = _rebuild_reason(report, bundle, current_spelgroep_id)
     if reason is not None:
