@@ -72,6 +72,17 @@ gekend zijn, hun profiel/playing strength/spelersdocument in EEN
 parallelle batch voor (lineup_scout.prefetch_own_player_reads), VOOR het
 officieel klassement en de player_ratings. Meetpunt: "eigen spelers:
 parallel voorophalen". Gemeten winst verwacht: ~1s bij een koude start.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SHARED_PLAYER_DOCS_2026-09-29 (op verzoek van Kim, koude-start-meting export 2026-09-29T18-32)
+--------------------------------------------------------------------------
+GEMETEN: "oa.render_player_detail_tab" kostte 0.89s bij een koude start
+(0.52s eerder), terwijl "Detail per speler" standaard NIET zichtbaar is.
+Oorzaak: de sub-tabs "Overzicht" / "Detail per speler" gebruikten nog
+st.tabs - en Streamlit voert de inhoud van ELKE tab uit, ook de verborgen.
+Hetzelfde patroon als PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28 hierboven.
+FIX: st.radio (horizontaal) i.p.v. st.tabs. Enkel de gekozen weergave
+draait nog; standaard "Overzicht". De inhoud van beide weergaven is
+ongewijzigd, en de AI-sectie eronder blijft altijd zichtbaar.
 """
 
 import streamlit as st
@@ -532,8 +543,12 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
                 key_prefix=f"scout_team_{sel_player_id}",
             )
 
-    sub_overzicht, sub_detail = st.tabs(["Overzicht", "Detail per speler"])
-    with sub_overzicht:
+    # PADEL_ANALYSIS_SHARED_PLAYER_DOCS_2026-09-29: st.radio i.p.v. st.tabs - enkel de gekozen weergave draait.
+    weergave = st.radio(
+        "Weergave", ["Overzicht", "Detail per speler"], horizontal=True,
+        label_visibility="collapsed", key=f"lineup_lab_subview_{sel_player_id}",
+    )
+    if weergave == "Overzicht":
         if report_for_ai is not None:
             with perf.step("oa.render_overview_tab"):
                 oa.render_overview_tab(report_for_ai)
@@ -542,7 +557,7 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
             _render_opstelling_scenario(
                 bundle, opp, profiles, name_lookup_global, str(sel_player_id), report_for_ai,
             )
-    with sub_detail:
+    else:
         if report_for_ai is not None:
             with perf.step("oa.render_player_detail_tab"):
                 oa.render_player_detail_tab(report_for_ai, key_prefix=f"scout_team_{sel_player_id}")

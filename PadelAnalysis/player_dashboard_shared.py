@@ -70,6 +70,29 @@ PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim: "TTL van 30 minute
 _cached_partner_docs: TTL 5 -> 30 minuten. De eerste keer Partners openen
 (3.2s) wordt dus pas na 30 minuten inactiviteit opnieuw betaald i.p.v. na 5.
 De refresh-knoppen hierboven wissen deze cache nog altijd meteen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SHARED_PLAYER_DOCS_2026-09-29 (op verzoek van Kim, na controle van firebase_service.py)
+--------------------------------------------------------------------------
+GEMETEN: Partners laadde bij een koude start 64 spelersdocumenten apart
+(parallel, 3.2s). Opstelling-analyse laadt DEZELFDE collectie in EEN
+stream (opponent_scout_ui._load_all_player_docs, ~2.2s). Twee keer
+betalen voor dezelfde data.
+FIX: _cached_partner_docs() gebruikt nu die gedeelde stream. Wie eerst
+Opstelling-analyse opende, krijgt Partners gratis; omgekeerd ook. En ook
+alleen is Partners sneller (1 stream i.p.v. 64 reads).
+WAAROM DIT VEILIG IS (nagekeken in firebase_service.py):
+  - fb.get_player(pid) = convert_firestore_values(doc.to_dict()). De stream
+    geeft doc.to_dict() ZONDER conversie. Hier wordt dus per document exact
+    dezelfde fb.convert_firestore_values() toegepast: het resultaat is
+    identiek aan wat Partners voorheen kreeg (datums als ISO-tekst).
+  - De gedeelde stream zelf blijft ONGEWIJZIGD (niet geconverteerd), zodat
+    opponent_analysis/opponent_dossier exact dezelfde data blijven krijgen.
+  - Zelfde selectie als ll.get_docs_for_players(): enkel de gevraagde ids,
+    en lege/ontbrekende documenten vallen weg.
+  - Faalt de stream of geeft ze niets terug, dan valt dit terug op het oude
+    pad (ll.get_docs_for_players, parallel).
+  - clear_partner_docs_cache() wist nu ook de gedeelde stream, zodat de
+    refresh-knoppen hierboven verse data opleveren.
 """
 import datetime as _datetime_module
 import streamlit as st
@@ -88,15 +111,32 @@ _SECTIONS = ["Overzicht", "Match Explorer", "Partners", "Tegenstanders", "\U0001
 
 @st.cache_data(ttl=1800, show_spinner="Partnergegevens ophalen (eenmalig)...")  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _cached_partner_docs(player_ids: tuple):
-    """Gecachete wrapper rond ll.get_docs_for_players() voor de sectie
-    Partners. Sleutel = gesorteerde tuple van ids, zodat elke speler
-    dezelfde cache-entry deelt zolang de spelerslijst niet wijzigt."""
-    return ll.get_docs_for_players(list(player_ids))
+    """Spelersdocumenten voor de sectie Partners. Sleutel = gesorteerde
+    tuple van ids. PADEL_ANALYSIS_SHARED_PLAYER_DOCS_2026-09-29: komt uit de gedeelde stream
+    van alle spelersdocumenten (zie moduledocstring), met exact dezelfde
+    conversie als fb.get_player()."""
+    try:
+        alle_docs = dc.osu.load_all_player_docs() or {}
+    except Exception:  # noqa: BLE001
+        alle_docs = {}
+    if not alle_docs:
+        return ll.get_docs_for_players(list(player_ids))
+    out = {}
+    for pid in player_ids:
+        doc = alle_docs.get(str(pid))
+        if doc:
+            out[str(pid)] = fb.convert_firestore_values(doc)
+    return out
 
 
 def clear_partner_docs_cache() -> None:
     try:
         _cached_partner_docs.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    # PADEL_ANALYSIS_SHARED_PLAYER_DOCS_2026-09-29: ook de gedeelde stream, anders blijft die tot 30 min oud.
+    try:
+        dc.osu._load_all_player_docs.clear()
     except Exception:  # noqa: BLE001
         pass
 
