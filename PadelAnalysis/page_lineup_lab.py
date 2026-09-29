@@ -105,6 +105,14 @@ matchup-tabel, de rotatieplanner en de sandbox. Het aantal matchen per
 rotatie blijft vast op 2. 'Max. matchen per speler' is begrensd op het
 aantal rotaties (een speler speelt per rotatie hoogstens 1 match) en wordt
 ook aan de rotatieplanner doorgegeven.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29 (op verzoek van Kim: "F5 springt
+terug naar analyse")
+--------------------------------------------------------------------------
+De sectie binnen Opstelling-analyse staat nu ook in de URL als ?s=analyse,
+?s=rangschikking, ?s=ploegen of ?s=opgeslagen. F5, een nieuw tabblad en een
+bladwijzer openen daardoor opnieuw dezelfde sectie. De bestaande ?p=
+opstelling van dashboard.py blijft onaangeraakt.
 """
 
 import streamlit as st
@@ -176,6 +184,37 @@ SECTION_RANG = "Rangschikking"
 SECTION_POULE = "Andere ploegen"
 SECTION_SAVED = "Opgeslagen analyses"
 _SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED]
+
+# PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29 (op verzoek van Kim: "F5 springt
+# terug naar analyse"): de gekozen sectie staat ook in ?s=<slug>, naast de
+# bestaande ?p=opstelling van dashboard.py. Een nieuwe Streamlit-sessie na
+# F5 leest de sectie uit de URL. Onbekend/ontbrekend -> Analyseren.
+_SECTION_SLUGS = {
+    SECTION_ANALYSE: "analyse",
+    SECTION_RANG: "rangschikking",
+    SECTION_POULE: "ploegen",
+    SECTION_SAVED: "opgeslagen",
+}
+_SLUG_TO_SECTION = {slug: section for section, slug in _SECTION_SLUGS.items()}
+
+
+def _section_from_url() -> str:
+    try:
+        slug = st.query_params.get("s")
+    except Exception:  # noqa: BLE001 - URL mag de pagina nooit breken
+        slug = None
+    return _SLUG_TO_SECTION.get(str(slug or "").strip().lower(), SECTION_ANALYSE)
+
+
+def _sync_section_to_url(section: str) -> None:
+    slug = _SECTION_SLUGS.get(section)
+    if not slug:
+        return
+    try:
+        if st.query_params.get("s") != slug:
+            st.query_params["s"] = slug
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @st.fragment
@@ -658,10 +697,17 @@ def page_lineup_lab():
     # PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: st.radio i.p.v. st.tabs -
     # zie de module-docstring. Tabs voeren ELKE tab-body uit bij elke
     # render; met een radio + if/elif draait er nog exact EEN sectie.
+    # PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29: bij de eerste run van een
+    # nieuwe sessie (F5) de keuze uit ?s= lezen; daarna session_state als
+    # bron gebruiken en de URL bij elke run synchroniseren.
+    section_key = f"lineup_lab_section_{sel_player_id}"
+    if section_key not in st.session_state or st.session_state[section_key] not in _SECTIONS:
+        st.session_state[section_key] = _section_from_url()
     section = st.radio(
         "Sectie", _SECTIONS, horizontal=True, label_visibility="collapsed",
-        key=f"lineup_lab_section_{sel_player_id}",
+        key=section_key,
     )
+    _sync_section_to_url(section)
 
     if section == SECTION_ANALYSE:
         with perf.step("SECTIE Analyseren"):
