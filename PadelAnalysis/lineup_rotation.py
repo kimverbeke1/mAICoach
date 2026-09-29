@@ -7,6 +7,7 @@ Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix in deze functies - dit
 bestand is functioneel ONGEWIJZIGD t.o.v. die vorige versie.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29 (op verzoek van Kim: "aantal matchen per ontmoeting in
 rotaties is gedefinieerd normaal via het reglement. die parameters zijn niet
@@ -20,6 +21,7 @@ de najaarsinterclub. De constanten hieronder zijn nu de ENIGE bron van
 waarheid; page_lineup_lab.py, lineup_sandbox.py en team_ai_advisor.py
 lezen ze hier. Bij een ander formaat (bv. een andere periode) volstaat het
 deze drie regels aan te passen.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29 (op verzoek van Kim: "zorg dat je bij de opstelling
 aantal rotaties kan instellen. zal handig zijn voor in voorjaar waar het dan
@@ -30,6 +32,7 @@ effectieve aantal rotaties wordt op de Opstelling-analyse-pagina gekozen
 (page_lineup_lab.py) en doorgegeven aan de matchup-tabel, de
 rotatieplanner en de sandbox. MATCHES_PER_ROTATION (2 matchen tegelijk per
 rotatie) blijft vast.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -38,6 +41,63 @@ spelers, i.p.v. alle geselecteerde spelers in koppels te verdelen. Zie
 _generate_rotation_candidates() voor de details. De oude hulpfuncties
 (_count_perfect_matchings, _expand_tied_orderings) blijven staan maar
 worden door de planner niet meer gebruikt.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 (op verzoek van Kim, na
+brainstorm over de matchup-analyse: "puntensysteem. 0 bij verlies, 1 bij
+gelijkspel en 2 bij winst" + "opoffer"-scenario's + weging op historische
+tegenstander-opstellingen)
+--------------------------------------------------------------------------
+ROOT CAUSE van "3 bijna-identieke resultaten" (Kim's voorbeeld: Best 2.05 /
+2.05 / 2.03): de matchup-tabel middelde elke eigen opstelling over ALLE
+mogelijke tegenstander-opstellingen alsof die allemaal even waarschijnlijk
+zijn, en gebruikte als maatstaf "verwacht aantal gewonnen matchen" (EBW) -
+een getal dat niet zegt of dat een veilige 3-1 is of een muntstuk tussen
+2-2 en 3-1.
+
+FIX, twee nieuwe bouwstenen, VOLLEDIG LOS van de bestaande EBW-logica (die
+blijft bestaan, ongewijzigd, als secundair/tiebreak-getal):
+
+  1. _match_outcome_point_probabilities(win_probs) - NIEUW. Neemt de 4
+     (of n) individuele winkansen van 1 opstelling tegen 1 specifiek
+     tegenstander-scenario, en berekent EXACT (geen simulatie - bij 4
+     onafhankelijke kansen zijn er maar 16 combinaties) de kans op elke
+     mogelijke uitslag, opgeteld tot puntensysteem 0/1/2 (Kim, bevestigd
+     2026-09-30: 0 bij verlies, 1 bij gelijkspel/2-2, 2 bij winst - dus
+     MEER matchen gewonnen dan de tegenstander = 2, gelijk aantal = 1,
+     MINDER = 0). Ontbrekende winkansen (None) worden behandeld als 50%
+     voor deze berekening ALLEEN (net als een neutrale muntworp) - de
+     aanroeper kan aan de hand van _n_missing_win_probs() zien hoeveel dat
+     er waren, om desgewenst te waarschuwen.
+
+  2. Weging van tegenstander-scenario's: elk "unique_opponent_lineups"-item
+     (uit lineup_rotation._collect_unique_opponent_lineups(), dit seizoen)
+     krijgt een gewicht i.p.v. gelijk te tellen - zie
+     _opponent_lineup_weight(). Een lineup die de tegenstander al N keer
+     zo speelde (in _dezelfde_ rotatie-positie: rotatie 1 blijft apart van
+     rotatie 2, want dat is een ander tactisch signaal) weegt zwaarder dan
+     een louter theoretische, nooit geobserveerde combinatie. AL het
+     gewicht komt uit dit SEIZOEN (bundle.previous_fixtures) - "alle
+     seizoenen" was Kim's uiteindelijke voorkeur, maar de app heeft op dit
+     moment GEEN betrouwbare rotatiepositie-informatie over vorige
+     seizoenen (enkel round_text zoals "poule - 5", geen rotatienummer).
+     Zie de uitgebreide toelichting hierover in het gesprek van
+     2026-09-30 (Kim akkoord: "optie 1" = nu bouwen met dit seizoen,
+     architectuur zo dat vorige seizoenen er later gewoon bij kunnen).
+     _opponent_lineup_weight() is BEWUST de enige plek die dit bepaalt,
+     zodat een latere uitbreiding (vorige-seizoenen-data erbij) hier
+     lokaal blijft.
+
+  3. _aggregate_group_point_probabilities(rows, weights) - combineert de
+     per-scenario resultaten van 1 groep (1 eigen opstelling) tot een
+     GEWOGEN gemiddelde kans op 2/1/0 punten over alle doorgerekende
+     tegenstander-scenario's van die groep. Dit wordt het NIEUWE
+     hoofdgetal in lineup_matchup_table.py; de bestaande best/worst-EBW
+     blijft daarnaast zichtbaar als secundair getal.
+
+Niets van het bovenstaande verandert de REGLEMENT-laag (bordvolgorde,
+puntengrens per rotatie - art. 6.6/2.1) of de bestaande EBW/win_probability-
+berekening: dit is een PARALLELLE, aanvullende maatstaf.
 """
 import itertools
 import streamlit as st
@@ -46,7 +106,6 @@ from lineup_scout import (
     _cached_official_rank, _cached_own_player_rating,
     _render_official_rank_warning, _format_points_bounds_diagnostic,
 )
-
 # PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: zie lineup_lab.py voor de
 # volledige toelichting bij de kalibratie van de winkans-formule.
 # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: reglement najaarsinterclub = 2 rotaties x 2 matchen.
@@ -64,6 +123,119 @@ _WIN_PROB_DISCLAIMER = (
     "underdogs is de schatting nog steeds aan de voorzichtige kant, en de steekproef is "
     "klein - richtinggevend signaal dus, geen garantie."
 )
+
+# -----------------------------------------------
+# PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 - zie moduledocstring.
+# -----------------------------------------------
+def _n_missing_win_probs(win_probs: list) -> int:
+    """Aantal onbekende (None) winkansen in de lijst - de aanroeper kan dit
+    gebruiken om te waarschuwen dat de puntenkans-berekening deels op een
+    neutrale 50%-aanname steunt."""
+    return sum(1 for p in win_probs if p is None)
+
+
+def _match_outcome_point_probabilities(win_probs: list) -> dict:
+    """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: exacte kansverdeling op
+    het PLOEGRESULTAAT (0/1/2 punten - Kim, bevestigd 2026-09-30) voor 1
+    opstelling tegen 1 specifiek tegenstander-scenario, gegeven de
+    individuele winkans per match.
+
+    Puntensysteem: MEER matchen gewonnen dan de tegenstander -> 2 punten,
+    EVENVEEL -> 1 punt, MINDER -> 0 punten. Bij een even aantal matchen (het
+    gebruikelijke geval, bv. 4) is een gelijke stand (bv. 2-2) mogelijk en
+    geeft 1 punt; bij een oneven aantal matchen kan dat niet voorkomen en is
+    de kans op 1 punt dus 0.
+
+    Berekent dit EXACT (geen Monte Carlo): met n individuele, onafhankelijke
+    kansen zijn er 2^n mogelijke uitkomsten - voor de gebruikelijke n=4 is
+    dat 16, dus dit is triviaal snel. Werkt voor elk aantal matchen (bv. 6
+    bij een ander formaat), niet enkel 4.
+
+    Ontbrekende winkansen (None - onvoldoende rating-data) worden voor DEZE
+    berekening als 50% behandeld (neutrale muntworp), zodat de functie
+    nooit crasht of None propageert. Gebruik _n_missing_win_probs() om te
+    weten hoeveel dat er waren en dat eventueel apart te signaleren.
+
+    Geeft {"p2": float, "p1": float, "p0": float} terug (som = 1.0)."""
+    probs = [(0.5 if p is None else max(0.0, min(1.0, float(p)))) for p in win_probs]
+    n = len(probs)
+    if n == 0:
+        return {"p2": 0.0, "p1": 0.0, "p0": 0.0}
+    half = n / 2.0
+    p2 = p1 = p0 = 0.0
+    for outcome in itertools.product((0, 1), repeat=n):
+        # outcome[i] == 1 betekent: wij winnen match i.
+        prob = 1.0
+        for won, p in zip(outcome, probs):
+            prob *= p if won else (1.0 - p)
+        wins = sum(outcome)
+        if wins > half:
+            p2 += prob
+        elif wins == half:
+            p1 += prob
+        else:
+            p0 += prob
+    return {"p2": p2, "p1": p1, "p0": p0}
+
+
+def _opponent_lineup_weight(info: dict) -> float:
+    """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: gewicht van 1
+    tegenstander-scenario ("unique_opponent_lineups"-item) voor de gewogen
+    puntenkans-aggregatie hieronder.
+
+    Regel (dit seizoen, zie moduledocstring voor waarom): elke keer dat de
+    tegenstander deze EXACTE koppelverdeling, IN DEZELFDE ROTATIE-POSITIE,
+    dit seizoen effectief speelde (info["historical_count"], gezet door
+    _collect_unique_opponent_lineups()) telt voor +1.0 gewicht bovenop een
+    vaste BASIS van 1.0 die elk scenario al krijgt (ook een zuiver
+    theoretisch, nooit geobserveerd scenario telt dus nog mee, maar wel
+    veel lichter dan een herhaald patroon).
+
+    Voorbeeld: nooit gespeeld -> gewicht 1.0. 1x gespeeld -> gewicht 2.0.
+    3x gespeeld -> gewicht 4.0 (die combinatie weegt dan 4x zo zwaar als
+    een nooit geobserveerde combinatie in het gewogen gemiddelde).
+
+    BEWUST de ENIGE plek die dit bepaalt: een latere uitbreiding met
+    vorige-seizoenen-data (zodra die met een betrouwbare rotatiepositie
+    beschikbaar is) hoeft enkel deze functie aan te passen."""
+    n_seen = int(info.get("historical_count", 0) or 0)
+    return 1.0 + float(n_seen)
+
+
+def _aggregate_group_point_probabilities(rows: list, weights: dict) -> dict:
+    """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: combineert de
+    per-tegenstander-scenario resultaten van 1 groep (1 eigen opstelling,
+    dus een lijst van matchup-dicts met een reeds berekende
+    "point_probs"-veld) tot een GEWOGEN gemiddelde puntenkans over alle
+    doorgerekende scenario's van die groep.
+
+    `weights` is een dict {matchup_id(m): gewicht}, typisch gevuld via
+    _opponent_lineup_weight() per onderliggend tegenstander-scenario - de
+    aanroeper (lineup_matchup_table.py) kent de koppeling tussen elke rij en
+    zijn tegenstander-scenario-sleutel, dit bestand niet.
+
+    Geeft {"p2": float, "p1": float, "p0": float, "n_missing_ratings": int}
+    terug. Bij een lege of ongewogen (totaalgewicht 0) invoer: alle kansen
+    0.0 en n_missing_ratings 0, om de aanroeper nooit te laten crashen."""
+    totaal_gewicht = 0.0
+    p2 = p1 = p0 = 0.0
+    n_missing = 0
+    for m in rows:
+        gewicht = weights.get(id(m), 1.0)
+        pp = m.get("point_probs") or {}
+        totaal_gewicht += gewicht
+        p2 += gewicht * pp.get("p2", 0.0)
+        p1 += gewicht * pp.get("p1", 0.0)
+        p0 += gewicht * pp.get("p0", 0.0)
+        n_missing += int(m.get("n_missing_win_probs", 0) or 0)
+    if totaal_gewicht <= 0:
+        return {"p2": 0.0, "p1": 0.0, "p0": 0.0, "n_missing_ratings": n_missing}
+    return {
+        "p2": p2 / totaal_gewicht,
+        "p1": p1 / totaal_gewicht,
+        "p0": p0 / totaal_gewicht,
+        "n_missing_ratings": n_missing,
+    }
 
 
 # -----------------------------------------------
@@ -446,9 +618,16 @@ def _compute_matchup(
     own_ordered_pairs: list, opp_boards: list,
     synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
 ) -> dict:
+    """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: berekent nu ook
+    "point_probs" (exacte 2/1/0-puntenkans, zie
+    _match_outcome_point_probabilities()) en "n_missing_win_probs" naast de
+    bestaande, ONGEWIJZIGDE velden (assignment/expected_boards_won/
+    total_score). De volgorde en inhoud van 'assignment' is exact hetzelfde
+    als voorheen - enkel deze 2 nieuwe top-level velden zijn toegevoegd."""
     assignment = []
     expected_boards_won = 0.0
     total_score = 0.0
+    win_probs_for_points = []
     n = min(len(own_ordered_pairs), len(opp_boards))
     for i in range(n):
         p1, p2 = tuple(own_ordered_pairs[i])
@@ -472,6 +651,7 @@ def _compute_matchup(
         their_avg = (sum(their_eff_known) / len(their_eff_known)) if their_eff_known else None
         edge = ll.matchup_edge(our_eff, their_eff)
         win_prob = ll.estimate_win_probability(our_avg, their_avg)
+        win_probs_for_points.append(win_prob)
         if win_prob is not None:
             expected_boards_won += win_prob
         total_score += syn + edge
@@ -485,10 +665,13 @@ def _compute_matchup(
             "their_effective_rating": round(their_avg, 1) if their_avg is not None else None,
             "opponent_board": board,
         })
+    point_probs = _match_outcome_point_probabilities(win_probs_for_points)
     return {
         "assignment": assignment,
         "expected_boards_won": round(expected_boards_won, 2),
         "total_score": round(total_score, 3),
+        "point_probs": point_probs,
+        "n_missing_win_probs": _n_missing_win_probs(win_probs_for_points),
     }
 
 
@@ -657,13 +840,14 @@ def _generate_rotation_candidates(
                         "ordered_pairs": pairs,
                         "assignment": computed["assignment"],
                         "rotations": rot_info,
+                        "point_probs": computed.get("point_probs"),
                     })
                 else:
                     score = sum(synergy_fn(*tuple(p)) for p in pairs)
                     results.append({
                         "expected_boards_won": None, "score": round(score, 3),
                         "ordered_pairs": pairs, "assignment": None,
-                        "rotations": rot_info,
+                        "rotations": rot_info, "point_probs": None,
                     })
     results.sort(key=lambda r: (
         -(r["expected_boards_won"] if r["expected_boards_won"] is not None else -1),
@@ -829,7 +1013,6 @@ def _render_rotation_planner(
                 "Laat je dit leeg, dan wordt enkel op eigen synergie gerangschikt (geen "
                 "matchup-inschatting tegen een specifieke tegenstander)."
             )
-
             def _opp_pick_label(speler: dict) -> str:
                 naam = speler.get("name", "?")
                 uid = str(speler.get("user_id") or "")
@@ -839,7 +1022,6 @@ def _render_rotation_planner(
                 if padelstat is not None:
                     delen.append(f"ps {int(padelstat)}")
                 return f"{naam} ({' \u00b7 '.join(delen)})"
-
             paar_frequentie = {}
             for fx_b in (bundle or {}).get("previous_fixtures", []) or []:
                 for b in fx_b.get("boards", []) or []:
@@ -848,13 +1030,11 @@ def _render_rotation_planner(
                         k = frozenset(str(x.get("user_id")) for x in p if x.get("user_id"))
                         if len(k) == 2:
                             paar_frequentie[k] = paar_frequentie.get(k, 0) + 1
-
             def _pair_label(p1: dict, p2: dict) -> str:
                 uid1, uid2 = str(p1.get("user_id")), str(p2.get("user_id"))
                 n = paar_frequentie.get(frozenset({uid1, uid2}), 0)
                 badge = f"({n}x) " if n else ""
                 return f"{badge}{_opp_pick_label(p1)} / {_opp_pick_label(p2)}"
-
             alle_paren = list(itertools.combinations(unique_opp_players, 2))
             alle_paren.sort(
                 key=lambda pr: paar_frequentie.get(
@@ -878,10 +1058,8 @@ def _render_rotation_planner(
                                 if frozenset({str(p1.get("user_id")), str(p2.get("user_id"))}) == scenario_key:
                                     voorstel_idx[i] = j
                                     break
-
             def _opp_pair_uids(paar):
                 return {str(p.get("user_id")) for p in paar} if paar else set()
-
             gekozen_paren = [None, None]
             col_o1, col_o2 = st.columns(2)
             cols = (col_o1, col_o2)
