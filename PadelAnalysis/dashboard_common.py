@@ -143,27 +143,48 @@ meten levert het meeste inzicht per regel code op:
      niet-gecachete aanroeper (_get_all_profiles) wordt wel gemeten.
   3. De repo-root wordt op sys.path gezet (append), omdat perf_timing.py
      daar nu staat - zie dashboard.py.
+
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29 (op verzoek van Kim, na een
-MEETSESSIE: hetzelfde document werd tot 4x per render gelezen)
+PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29 (op verzoek van Kim, na de
+eerste volledige meting van "Opstelling-analyse": 40.4s render)
 --------------------------------------------------------------------------
-GEMETEN (tweede F5 na Reboot, tabel "Opgeteld per stapnaam"):
-  Mijn profiel: 4x get_player (2.45s) + 4x get_player_profile (1.31s);
-  Spelers:      4x get_player_profile (1.96s) + 3x get_player (1.06s).
-Telkens HETZELFDE document, gelezen door verschillende helpers in dit
-bestand (_get_club, _official_current_rank, _virtual_rank, ...) en door
-player_dashboard_shared.render_player_dashboard().
-FIX: fb_request_cache.py (nieuw, zie dat bestand voor de volledige uitleg)
-wordt hieronder geinstalleerd, in deze volgorde:
-  1. fb_request_cache.save_raw_originals(fb) - bewaart de ONGEWIKKELDE
-     leesfuncties als fb._raw_<naam>, voor parallelle reads in threads.
-  2. de bestaande timing-omwikkeling (ongewijzigd).
-  3. fb_request_cache.install(fb) - lees-geheugen per render ROND de
-     timing-laag. Gevolg in het paneel: enkel ECHTE netwerk-reads
-     verschijnen nog als "Firestore: ..."; geheugen-treffers niet.
-De drie directe fb.db-schrijfhelpers hier (_save_poule_url, _save_club,
-_persist_stats_if_needed) wissen het geheugen voor die speler, zodat een
-wijziging meteen zichtbaar is.
+METING (export 2026-09-29T17-26): 147 Firestore-reads in 1 render, samen
+~24.6s eigen tijd - voor een ploeg van ~15 unieke spelers:
+    get_player_profile                      54x  11.5s
+    get_player                              38x   8.3s
+    get_padelstat_rating                    26x   4.5s
+    get_official_klassement_via_padelstat   28x   (leest intern het profiel)
+ROOT CAUSE: elke module (opponent_scout_ui, lineup_scout, opponent_analysis,
+page_lineup_lab, ...) leest dezelfde spelersdocumenten telkens opnieuw
+rechtstreeks uit Firestore (~0.2s per read, netwerk-latency). Een speler
+wordt zo 5-8x per render gelezen, en bij ELKE volgende render opnieuw.
+
+FIX: dezelfde lees-functies die hierboven al omwikkeld werden voor timing,
+krijgen nu ook een GEDEELDE cache (st.cache_data, TTL 5 min - dezelfde
+conventie als de andere caches in dit project). Omdat de functie op het
+fb-module-object zelf vervangen wordt, geldt dit voor ALLE modules tegelijk,
+ook voor aanroepen binnen firebase_service zelf.
+  - Enkel aanroepen met exact 1 positioneel argument (player_id) worden
+    gecachet; elke andere aanroepvorm gaat ongewijzigd naar Firestore.
+  - st.cache_data geeft telkens een KOPIE terug: een aanroeper die het
+    resultaat wijzigt, kan de cache niet vervuilen.
+  - Faalt het cachen (bv. een niet-serialiseerbare Firestore-waarde), dan
+    valt die functie voorgoed terug op de originele, ongecachete read.
+  - In het timing-paneel verschijnen voortaan ENKEL nog de ECHTE
+    Firestore-reads ("Firestore: <naam>"); cache-hits kosten ~0s en worden
+    niet getoond. Het aantal zulke regels = het aantal echte reads.
+INVALIDATIE (geen verouderde data na een eigen wijziging):
+  - elke schrijf-functie van firebase_service (save_/set_/update_/delete_/
+    add_/upsert_/remove_/mark_/write_/merge_/store_...) leegt na afloop de
+    cache;
+  - de rechtstreekse .set()-schrijvers in DIT bestand (_save_club,
+    _save_poule_url, _persist_stats_if_needed) doen hetzelfde;
+  - freshness_cache.invalidate_all() (o.a. de "Verversen"-knop in
+    opponent_analysis) en clear_all_profiles_cache() ("Ploeg opnieuw
+    ophalen") legen deze cache mee.
+BEPERKING: wat de GitHub Actions-scrapers op de achtergrond wegschrijven, is
+hier maximaal 5 minuten later zichtbaar - identiek aan freshness_cache.
+Via clear_firestore_read_cache() kan elke knop dit ook expliciet forceren.
 """
 import re
 import sys
@@ -196,21 +217,6 @@ try:
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
-# PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29 - zie moduledocstring.
-try:
-    import fb_request_cache as _rc
-except Exception:  # noqa: BLE001  pragma: no cover
-    _rc = None
-
-
-def _invalidate_doc_cache(player_id=None) -> None:
-    """Wist het lees-geheugen per render (fb_request_cache) - veilig als die
-    module ontbreekt."""
-    if _rc is not None:
-        try:
-            _rc.invalidate(player_id)
-        except Exception:  # noqa: BLE001
-            pass
 
 # ─────────────────────────────────────────────
 # PERF_TIMING_ROLLOUT_2026-09-29 - zie moduledocstring
@@ -242,13 +248,6 @@ _FIRESTORE_READS_TO_TIME = (
 
 
 def _instrument_firestore_reads() -> None:
-    # PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29: stap 1 - de ONGEWIKKELDE
-    # originelen bewaren, VOOR de timing-laag eromheen komt.
-    if _rc is not None:
-        try:
-            _rc.save_raw_originals(fb)
-        except Exception:  # noqa: BLE001
-            pass
     if _perf is None or getattr(fb, "_perf_instrumented", False):
         return
     for naam in _FIRESTORE_READS_TO_TIME:
@@ -266,13 +265,127 @@ def _instrument_firestore_reads() -> None:
 
 
 _instrument_firestore_reads()
-# PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29: stap 3 - lees-geheugen per
-# render ROND de timing-laag (zie moduledocstring).
-if _rc is not None:
+
+
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29 - zie moduledocstring
+# ─────────────────────────────────────────────
+_FS_CACHE_TTL_SECONDS = 300
+
+_FIRESTORE_READS_TO_CACHE = (
+    "get_player_profile",
+    "get_player",
+    "get_padelstat_rating",
+    "get_official_klassement_via_padelstat",
+)
+
+_FIRESTORE_WRITE_PREFIXES = (
+    "save_", "set_", "update_", "delete_", "add_", "upsert_",
+    "remove_", "mark_", "write_", "merge_", "store_",
+)
+
+# naam -> (reeds timing-omwikkelde) originele lees-functie
+_FS_ORIGINALS: dict = {}
+# functies waarvoor cachen onmogelijk bleek (niet-serialiseerbaar resultaat)
+_FS_UNCACHEABLE: set = set()
+
+
+@st.cache_data(ttl=_FS_CACHE_TTL_SECONDS, show_spinner=False, max_entries=5000)
+def _fs_cached_read(naam: str, key: str):
+    return _FS_ORIGINALS[naam](key)
+
+
+def _make_cached_reader(naam: str, origineel):
+    def _reader(*args, **kwargs):
+        if (
+            len(args) == 1 and not kwargs
+            and isinstance(args[0], (str, int))
+            and naam not in _FS_UNCACHEABLE
+        ):
+            try:
+                return _fs_cached_read(naam, str(args[0]))
+            except Exception:  # noqa: BLE001 - cache mag nooit de app breken
+                _FS_UNCACHEABLE.add(naam)
+        return origineel(*args, **kwargs)
+
+    _reader.__name__ = getattr(origineel, "__name__", naam)
+    _reader.__doc__ = getattr(origineel, "__doc__", None)
+    _reader._fs_cached = True
+    return _reader
+
+
+def _clear_fs_cache_local() -> None:
     try:
-        _rc.install(fb)
-    except Exception:  # noqa: BLE001 - nooit de app breken op deze laag
+        _fs_cached_read.clear()
+    except Exception:  # noqa: BLE001
         pass
+
+
+def clear_firestore_read_cache() -> None:
+    """Leegt de gedeelde Firestore-leescache. Veilig om vanuit elke module
+    aan te roepen (bv. na een eigen schrijfactie of een ververs-knop)."""
+    functie = getattr(fb, "_fs_cache_clear", None)
+    if callable(functie):
+        functie()
+    else:
+        _clear_fs_cache_local()
+
+
+def _make_invalidating_writer(origineel):
+    def _writer(*args, **kwargs):
+        try:
+            return origineel(*args, **kwargs)
+        finally:
+            clear_firestore_read_cache()
+
+    _writer.__name__ = getattr(origineel, "__name__", "writer")
+    _writer.__doc__ = getattr(origineel, "__doc__", None)
+    _writer._fs_invalidating = True
+    return _writer
+
+
+def _install_firestore_read_cache() -> None:
+    if getattr(fb, "_fs_cache_installed", False):
+        return
+    # 1) lees-functies cachen
+    for naam in _FIRESTORE_READS_TO_CACHE:
+        origineel = getattr(fb, naam, None)
+        if not callable(origineel) or getattr(origineel, "_fs_cached", False):
+            continue
+        try:
+            _FS_ORIGINALS[naam] = origineel
+            setattr(fb, naam, _make_cached_reader(naam, origineel))
+        except Exception:  # noqa: BLE001
+            _FS_ORIGINALS.pop(naam, None)
+    # 2) schrijf-functies laten invalideren
+    for naam in dir(fb):
+        if not naam.startswith(_FIRESTORE_WRITE_PREFIXES):
+            continue
+        origineel = getattr(fb, naam, None)
+        if not callable(origineel) or isinstance(origineel, type):
+            continue
+        if getattr(origineel, "_fs_invalidating", False):
+            continue
+        try:
+            setattr(fb, naam, _make_invalidating_writer(origineel))
+        except Exception:  # noqa: BLE001
+            pass
+    # 3) bestaande ververs-mechanisme (freshness_cache) meenemen
+    try:
+        import freshness_cache as _fcache
+        orig_inv = getattr(_fcache, "invalidate_all", None)
+        if callable(orig_inv) and not getattr(orig_inv, "_fs_invalidating", False):
+            _fcache.invalidate_all = _make_invalidating_writer(orig_inv)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        fb._fs_cache_clear = _clear_fs_cache_local
+        fb._fs_cache_installed = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_install_firestore_read_cache()
 # ─────────────────────────────────────────────
 # Datum-/tekst-helpers
 # ─────────────────────────────────────────────
@@ -419,7 +532,7 @@ def _persist_stats_if_needed(player_id: str, player_doc: dict, live_stats: dict)
         )
     except Exception:
         pass
-    _invalidate_doc_cache(player_id)
+    clear_firestore_read_cache()  # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29
 def _winrate_str(wins, losses) -> str:
     known = wins + losses
     if known == 0:
@@ -555,6 +668,10 @@ def _load_poule_schedule_robust(player_id: str, reeks_url: str):
         return [], str(e), None
     if result.get("error"):
         return [], result["error"], None
+    # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29: update_player_poule()
+    # heeft net het profiel herschreven - zonder dit leest
+    # _get_saved_schedule() hieronder nog de gecachete, oude versie.
+    clear_firestore_read_cache()
     fixtures, _sched_at = _get_saved_schedule(player_id)
     meta = {
         "poule_id": result.get("poule_id"),
@@ -617,6 +734,9 @@ def clear_all_profiles_cache() -> None:
         _get_all_profiles_cached.clear()
     except Exception:
         pass
+    # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29: ook de per-speler-
+    # leescache legen, anders blijft een net ververste speler tot 5 min oud.
+    clear_firestore_read_cache()
 @_timed("_get_saved_poule_url")
 def _get_saved_poule_url(player_id: str) -> Optional[str]:
     try:
@@ -631,7 +751,7 @@ def _save_poule_url(player_id: str, url: str) -> None:
         )
     except Exception:
         pass
-    _invalidate_doc_cache(player_id)
+    clear_firestore_read_cache()  # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29
 @_timed("_get_saved_schedule")
 def _get_saved_schedule(player_id: str):
     try:
@@ -892,7 +1012,7 @@ def _save_club(player_id: str, club: str) -> None:
         )
     except Exception:
         pass
-    _invalidate_doc_cache(player_id)
+    clear_firestore_read_cache()  # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29
 def _render_club_editor(player_id: str, profile: dict, key_prefix: str) -> None:
     """PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20 (op verzoek van Kim: "Die
     scrape moet weten in welke ploeg ik speel. ik kan dat niet instellen. ik
