@@ -105,14 +105,18 @@ matchup-tabel, de rotatieplanner en de sandbox. Het aantal matchen per
 rotatie blijft vast op 2. 'Max. matchen per speler' is begrensd op het
 aantal rotaties (een speler speelt per rotatie hoogstens 1 match) en wordt
 ook aan de rotatieplanner doorgegeven.
+
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29 (op verzoek van Kim: "F5 springt
-terug naar analyse")
+PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29 (op verzoek van Kim: "stel
+dat ik met Nico en Joris mijn 2 matchen speel in de 2de match van elke
+rotatie. wat zijn dan mijn winstkansen. Hoger dan met Carl?")
 --------------------------------------------------------------------------
-De sectie binnen Opstelling-analyse staat nu ook in de URL als ?s=analyse,
-?s=rangschikking, ?s=ploegen of ?s=opgeslagen. F5, een nieuw tabblad en een
-bladwijzer openen daardoor opnieuw dezelfde sectie. De bestaande ?p=
-opstelling van dashboard.py blijft onaangeraakt.
+Nieuwe sectie na de matchup-tabel: _render_whatif_comparison() (lineup_
+whatif.py) laat 2 partnerkeuzes voor jezelf op EEN gekozen bordpositie
+exact naast elkaar berekenen en vergelijken - zonder AI, met dezelfde
+winkans-formule als de rest van de app. Zie lineup_whatif.py voor de
+volledige toelichting bij waarom dit een apart instrument is naast de
+volledige-ploeg-matchup-tabel hierboven.
 """
 
 import streamlit as st
@@ -142,6 +146,7 @@ from lineup_rotation import (
 )
 from lineup_matchup_table import _render_all_valid_matchups
 from lineup_sandbox import _render_lineup_sandbox
+from lineup_whatif import _render_whatif_comparison  # PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29
 
 # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
 # Faalt de import, dan draait de pagina gewoon door zonder metingen.
@@ -184,37 +189,6 @@ SECTION_RANG = "Rangschikking"
 SECTION_POULE = "Andere ploegen"
 SECTION_SAVED = "Opgeslagen analyses"
 _SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED]
-
-# PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29 (op verzoek van Kim: "F5 springt
-# terug naar analyse"): de gekozen sectie staat ook in ?s=<slug>, naast de
-# bestaande ?p=opstelling van dashboard.py. Een nieuwe Streamlit-sessie na
-# F5 leest de sectie uit de URL. Onbekend/ontbrekend -> Analyseren.
-_SECTION_SLUGS = {
-    SECTION_ANALYSE: "analyse",
-    SECTION_RANG: "rangschikking",
-    SECTION_POULE: "ploegen",
-    SECTION_SAVED: "opgeslagen",
-}
-_SLUG_TO_SECTION = {slug: section for section, slug in _SECTION_SLUGS.items()}
-
-
-def _section_from_url() -> str:
-    try:
-        slug = st.query_params.get("s")
-    except Exception:  # noqa: BLE001 - URL mag de pagina nooit breken
-        slug = None
-    return _SLUG_TO_SECTION.get(str(slug or "").strip().lower(), SECTION_ANALYSE)
-
-
-def _sync_section_to_url(section: str) -> None:
-    slug = _SECTION_SLUGS.get(section)
-    if not slug:
-        return
-    try:
-        if st.query_params.get("s") != slug:
-            st.query_params["s"] = slug
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @st.fragment
@@ -431,6 +405,18 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             name_lookup_global, sel_player_id,
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
         ) or []
+
+    st.divider()
+    # PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29: gerichte "wat als"-
+    # vergelijking (2 partnerkeuzes voor jezelf op 1 bordpositie), los van de
+    # volledige-ploeg-optimalisatie hierboven - zie lineup_whatif.py.
+    with perf.step("_render_whatif_comparison (wat-als partnervergelijking)"):
+        _render_whatif_comparison(
+            bundle, opp, available_ids, name_lookup_global,
+            player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
+            sel_player_id, name_lookup_global.get(sel_player_id, sel_player_id),
+            n_rotations=n_rotations,
+        )
 
     st.divider()
     chosen_scenario_boards = None
@@ -697,17 +683,10 @@ def page_lineup_lab():
     # PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: st.radio i.p.v. st.tabs -
     # zie de module-docstring. Tabs voeren ELKE tab-body uit bij elke
     # render; met een radio + if/elif draait er nog exact EEN sectie.
-    # PADEL_ANALYSIS_SECTION_IN_URL_2026-09-29: bij de eerste run van een
-    # nieuwe sessie (F5) de keuze uit ?s= lezen; daarna session_state als
-    # bron gebruiken en de URL bij elke run synchroniseren.
-    section_key = f"lineup_lab_section_{sel_player_id}"
-    if section_key not in st.session_state or st.session_state[section_key] not in _SECTIONS:
-        st.session_state[section_key] = _section_from_url()
     section = st.radio(
         "Sectie", _SECTIONS, horizontal=True, label_visibility="collapsed",
-        key=section_key,
+        key=f"lineup_lab_section_{sel_player_id}",
     )
-    _sync_section_to_url(section)
 
     if section == SECTION_ANALYSE:
         with perf.step("SECTIE Analyseren"):
