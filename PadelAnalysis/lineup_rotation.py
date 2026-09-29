@@ -2,12 +2,10 @@
 lineup_rotation.py - Rotatieplanner: combinatoriek, bordvolgorde-regels
 (art. 6.6 + padelstat-tiebreak), best/worst-case-variantenumeratie, en de
 matchup-berekening per bord.
-
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix in deze functies - dit
 bestand is functioneel ONGEWIJZIGD t.o.v. die vorige versie.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29 (op verzoek van Kim: "aantal matchen per ontmoeting in
 rotaties is gedefinieerd normaal via het reglement. die parameters zijn niet
@@ -21,7 +19,6 @@ de najaarsinterclub. De constanten hieronder zijn nu de ENIGE bron van
 waarheid; page_lineup_lab.py, lineup_sandbox.py en team_ai_advisor.py
 lezen ze hier. Bij een ander formaat (bv. een andere periode) volstaat het
 deze drie regels aan te passen.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29 (op verzoek van Kim: "zorg dat je bij de opstelling
 aantal rotaties kan instellen. zal handig zijn voor in voorjaar waar het dan
@@ -32,7 +29,6 @@ effectieve aantal rotaties wordt op de Opstelling-analyse-pagina gekozen
 (page_lineup_lab.py) en doorgegeven aan de matchup-tabel, de
 rotatieplanner en de sandbox. MATCHES_PER_ROTATION (2 matchen tegelijk per
 rotatie) blijft vast.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -41,7 +37,6 @@ spelers, i.p.v. alle geselecteerde spelers in koppels te verdelen. Zie
 _generate_rotation_candidates() voor de details. De oude hulpfuncties
 (_count_perfect_matchings, _expand_tied_orderings) blijven staan maar
 worden door de planner niet meer gebruikt.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 (op verzoek van Kim, na
 brainstorm over de matchup-analyse: "puntensysteem. 0 bij verlies, 1 bij
@@ -54,10 +49,8 @@ mogelijke tegenstander-opstellingen alsof die allemaal even waarschijnlijk
 zijn, en gebruikte als maatstaf "verwacht aantal gewonnen matchen" (EBW) -
 een getal dat niet zegt of dat een veilige 3-1 is of een muntstuk tussen
 2-2 en 3-1.
-
 FIX, twee nieuwe bouwstenen, VOLLEDIG LOS van de bestaande EBW-logica (die
 blijft bestaan, ongewijzigd, als secundair/tiebreak-getal):
-
   1. _match_outcome_point_probabilities(win_probs) - NIEUW. Neemt de 4
      (of n) individuele winkansen van 1 opstelling tegen 1 specifiek
      tegenstander-scenario, en berekent EXACT (geen simulatie - bij 4
@@ -69,7 +62,6 @@ blijft bestaan, ongewijzigd, als secundair/tiebreak-getal):
      voor deze berekening ALLEEN (net als een neutrale muntworp) - de
      aanroeper kan aan de hand van _n_missing_win_probs() zien hoeveel dat
      er waren, om desgewenst te waarschuwen.
-
   2. Weging van tegenstander-scenario's: elk "unique_opponent_lineups"-item
      (uit lineup_rotation._collect_unique_opponent_lineups(), dit seizoen)
      krijgt een gewicht i.p.v. gelijk te tellen - zie
@@ -87,17 +79,78 @@ blijft bestaan, ongewijzigd, als secundair/tiebreak-getal):
      _opponent_lineup_weight() is BEWUST de enige plek die dit bepaalt,
      zodat een latere uitbreiding (vorige-seizoenen-data erbij) hier
      lokaal blijft.
-
   3. _aggregate_group_point_probabilities(rows, weights) - combineert de
      per-scenario resultaten van 1 groep (1 eigen opstelling) tot een
      GEWOGEN gemiddelde kans op 2/1/0 punten over alle doorgerekende
      tegenstander-scenario's van die groep. Dit wordt het NIEUWE
      hoofdgetal in lineup_matchup_table.py; de bestaande best/worst-EBW
      blijft daarnaast zichtbaar als secundair getal.
-
 Niets van het bovenstaande verandert de REGLEMENT-laag (bordvolgorde,
 puntengrens per rotatie - art. 6.6/2.1) of de bestaande EBW/win_probability-
 berekening: dit is een PARALLELLE, aanvullende maatstaf.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30 (op verzoek van Kim: "Drie
+beslissingskaarten + vastpinnen. Per rotatie tonen we niet 6+ rijen met
+bijna-gelijke scores, maar maximaal 3 aanbevolen kaarten [...] koppelkeuze,
+kans op winst van die match, impact op kans op totale ploegresultaat, korte
+risiconotitie. De Rotatieplanner heeft al een vastpin-mechanisme
+(locked_rotations) - dat hergebruiken we, alleen de kaarten en de sortering
+veranderen.")
+--------------------------------------------------------------------------
+De rotatieplanner toonde tot nu toe een st.radio met ALLE (tot 15)
+kandidaten als platte tekstregels, gerangschikt op EBW - exact het
+"6+ bijna-identieke rijen"-probleem dat PADEL_ANALYSIS_POINT_PROBABILITY_
+2026-09-30 hierboven al voor de matchup-tabel oploste, maar hier nog niet.
+
+FIX, hergebruikt VOLLEDIG de bestaande punten-kans-infrastructuur
+hierboven (_match_outcome_point_probabilities, _n_missing_win_probs) -
+geen nieuwe kansberekening, enkel een nieuwe TOEPASSING ervan:
+
+1. "Impact op het totale ploegresultaat" (niet enkel deze ene rotatie):
+   _rank_and_label_candidates_for_cards() bouwt per kandidaat de volledige
+   winkans-lijst van de ontmoeting: [reeds BEVESTIGDE rotaties se
+   winkansen] + [deze kandidaat se 2 winkansen] + [nog niet geplande
+   rotaties, als PLACEHOLDER]. _match_outcome_point_probabilities()
+   behandelt elke onbekende/placeholder-waarde al automatisch als 50%
+   (neutrale muntworp) - dat is dus PRECIES het gedrag dat "nog te plannen
+   rotaties" nodig hebben, zonder enige nieuwe aanname te hoeven bouwen.
+   NIEUW om dit mogelijk te maken: `locked_win_probs_key` (session_state)
+   houdt naast locked_rotations/locked_opponents ook de effectief gebruikte
+   winkansen per BEVESTIGDE rotatie bij (2 per rotatie, of [None, None] als
+   toen geen tegenstander gekozen was) - dit bestond nog niet.
+2. Drie kaarten i.p.v. een platte lijst van tot 15 opties:
+   - "Aanbevolen": hoogste impact op de kans op 2 ploegpunten (P(2p)) voor
+     de HELE ontmoeting - dit is dus NIET noodzakelijk de kandidaat met de
+     hoogste EBW voor deze ene rotatie; net dat verschil maakt "opoffer"-
+     achtige keuzes (bewust een zware match verliezen om de kans op
+     ploegwinst elders te maximaliseren) zichtbaar i.p.v. weggefilterd.
+   - "Veiligst": onder de kandidaten met BEIDE winkansen gekend, de
+     kandidaat met de HOOGSTE MINIMALE winkans (vermijdt een bijna zekere
+     nederlaag op 1 van de 2 matchen van deze rotatie).
+   - "Alternatief": de eerstvolgende kandidaat (op impact P(2p)) met een
+     ANDERE koppelverdeling dan de 2 kaarten hierboven (dedupe op de set
+     van koppels, ongeacht bordvolgorde) - zodat de 3 kaarten een echt
+     ander PROFIEL tonen, niet 3x hetzelfde koppel in een andere volgorde.
+   Minder dan 3 zinvol te onderscheiden kandidaten -> minder kaarten, nooit
+   een crash of een lege/dubbele kaart.
+3. Risiconotitie per match: HERGEBRUIKT ll.risk_note_for_probability(),
+   dezelfde functie die de rest van de app al gebruikt (_compute_matchup,
+   _render_assignment_with_outcome) - geen nieuwe, inconsistente
+   risico-schaal.
+4. Vastpinnen: ONGEWIJZIGD hergebruikt. Een kaart-knop "Kies deze kaart"
+   doet exact wat de oude "Bevestig rotatie N"-knop deed (toevoegen aan
+   locked_key/opp_locked_key + st.rerun(scope="fragment")), enkel nu ook
+   met het toevoegen aan het nieuwe locked_win_probs_key. De "Rotatie N
+   wijzigen"-knop (hierboven, ONGEWIJZIGD in structuur) is uitgebreid zodat
+   ze ook locked_win_probs_key mee terugdraait - anders zou een gewijzigde
+   rotatie een verweesde, verouderde winkans-invoer achterlaten.
+5. Voor wie toch de VOLLE lijst van tot 15 kandidaten wil zien (of een
+   optie buiten de 3 kaarten wil kiezen): een expander "Alle N combinaties
+   (geavanceerd)" met exact de oude radio+detail+"Bevestig rotatie N"-flow,
+   ONGEWIJZIGD - dus geen functionaliteit verloren, enkel het STANDAARD
+   pad is nu de 3 kaarten.
+De AI-sectie (analyze_lineup_options op candidates[:5]) blijft ONGEWIJZIGD
+werken op de volledige kandidatenlijst, niet enkel de 3 getoonde kaarten.
 """
 import itertools
 import streamlit as st
@@ -115,7 +168,6 @@ ROTATIONS_MIN = 1
 ROTATIONS_MAX = 4
 MATCHES_PER_ROTATION = 2
 MATCHES_PER_ENCOUNTER = ROTATIONS_PER_ENCOUNTER * MATCHES_PER_ROTATION
-
 _WIN_PROB_DISCLAIMER = (
     "De winkans is een logistische schatting op het verschil in speelsterkte, "
     "gekalibreerd op 44 recent gespeelde dubbels (70% van de uitslagen juist voorspeld; "
@@ -123,7 +175,6 @@ _WIN_PROB_DISCLAIMER = (
     "underdogs is de schatting nog steeds aan de voorzichtige kant, en de steekproef is "
     "klein - richtinggevend signaal dus, geen garantie."
 )
-
 # -----------------------------------------------
 # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 - zie moduledocstring.
 # -----------------------------------------------
@@ -132,30 +183,24 @@ def _n_missing_win_probs(win_probs: list) -> int:
     gebruiken om te waarschuwen dat de puntenkans-berekening deels op een
     neutrale 50%-aanname steunt."""
     return sum(1 for p in win_probs if p is None)
-
-
 def _match_outcome_point_probabilities(win_probs: list) -> dict:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: exacte kansverdeling op
     het PLOEGRESULTAAT (0/1/2 punten - Kim, bevestigd 2026-09-30) voor 1
     opstelling tegen 1 specifiek tegenstander-scenario, gegeven de
     individuele winkans per match.
-
     Puntensysteem: MEER matchen gewonnen dan de tegenstander -> 2 punten,
     EVENVEEL -> 1 punt, MINDER -> 0 punten. Bij een even aantal matchen (het
     gebruikelijke geval, bv. 4) is een gelijke stand (bv. 2-2) mogelijk en
     geeft 1 punt; bij een oneven aantal matchen kan dat niet voorkomen en is
     de kans op 1 punt dus 0.
-
     Berekent dit EXACT (geen Monte Carlo): met n individuele, onafhankelijke
     kansen zijn er 2^n mogelijke uitkomsten - voor de gebruikelijke n=4 is
     dat 16, dus dit is triviaal snel. Werkt voor elk aantal matchen (bv. 6
     bij een ander formaat), niet enkel 4.
-
     Ontbrekende winkansen (None - onvoldoende rating-data) worden voor DEZE
     berekening als 50% behandeld (neutrale muntworp), zodat de functie
     nooit crasht of None propageert. Gebruik _n_missing_win_probs() om te
     weten hoeveel dat er waren en dat eventueel apart te signaleren.
-
     Geeft {"p2": float, "p1": float, "p0": float} terug (som = 1.0)."""
     probs = [(0.5 if p is None else max(0.0, min(1.0, float(p)))) for p in win_probs]
     n = len(probs)
@@ -176,13 +221,10 @@ def _match_outcome_point_probabilities(win_probs: list) -> dict:
         else:
             p0 += prob
     return {"p2": p2, "p1": p1, "p0": p0}
-
-
 def _opponent_lineup_weight(info: dict) -> float:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: gewicht van 1
     tegenstander-scenario ("unique_opponent_lineups"-item) voor de gewogen
     puntenkans-aggregatie hieronder.
-
     Regel (dit seizoen, zie moduledocstring voor waarom): elke keer dat de
     tegenstander deze EXACTE koppelverdeling, IN DEZELFDE ROTATIE-POSITIE,
     dit seizoen effectief speelde (info["historical_count"], gezet door
@@ -190,30 +232,24 @@ def _opponent_lineup_weight(info: dict) -> float:
     vaste BASIS van 1.0 die elk scenario al krijgt (ook een zuiver
     theoretisch, nooit geobserveerd scenario telt dus nog mee, maar wel
     veel lichter dan een herhaald patroon).
-
     Voorbeeld: nooit gespeeld -> gewicht 1.0. 1x gespeeld -> gewicht 2.0.
     3x gespeeld -> gewicht 4.0 (die combinatie weegt dan 4x zo zwaar als
     een nooit geobserveerde combinatie in het gewogen gemiddelde).
-
     BEWUST de ENIGE plek die dit bepaalt: een latere uitbreiding met
     vorige-seizoenen-data (zodra die met een betrouwbare rotatiepositie
     beschikbaar is) hoeft enkel deze functie aan te passen."""
     n_seen = int(info.get("historical_count", 0) or 0)
     return 1.0 + float(n_seen)
-
-
 def _aggregate_group_point_probabilities(rows: list, weights: dict) -> dict:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: combineert de
     per-tegenstander-scenario resultaten van 1 groep (1 eigen opstelling,
     dus een lijst van matchup-dicts met een reeds berekende
     "point_probs"-veld) tot een GEWOGEN gemiddelde puntenkans over alle
     doorgerekende scenario's van die groep.
-
     `weights` is een dict {matchup_id(m): gewicht}, typisch gevuld via
     _opponent_lineup_weight() per onderliggend tegenstander-scenario - de
     aanroeper (lineup_matchup_table.py) kent de koppeling tussen elke rij en
     zijn tegenstander-scenario-sleutel, dit bestand niet.
-
     Geeft {"p2": float, "p1": float, "p0": float, "n_missing_ratings": int}
     terug. Bij een lege of ongewogen (totaalgewicht 0) invoer: alle kansen
     0.0 en n_missing_ratings 0, om de aanroeper nooit te laten crashen."""
@@ -236,6 +272,163 @@ def _aggregate_group_point_probabilities(rows: list, weights: dict) -> dict:
         "p0": p0 / totaal_gewicht,
         "n_missing_ratings": n_missing,
     }
+# -----------------------------------------------
+# PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30 - zie moduledocstring.
+# -----------------------------------------------
+_SAFE_CARD_MIN_WINPROB_GAP = 0.0  # placeholder-grens, zie _pick_safest_card (0 = gewoon de hoogste minimum-winkans)
+
+
+def _format_point_probs_short(pp: dict) -> str:
+    """Korte, leesbare weergave van een puntenkans-dict voor op een kaart.
+    Lokale kopie van dezelfde opmaak als lineup_matchup_table._format_point_probs()
+    - NIET vandaar geimporteerd, om een cirkelvormige import te vermijden
+    (lineup_matchup_table.py importeert AL van dit bestand)."""
+    if not pp:
+        return "onbekend"
+    return f"{pp.get('p2', 0.0) * 100:.0f}% 2p \u00b7 {pp.get('p1', 0.0) * 100:.0f}% 1p \u00b7 {pp.get('p0', 0.0) * 100:.0f}% 0p"
+
+
+def _candidate_pair_set_key(candidate: dict) -> frozenset:
+    """Identificeert een kandidaat op ZIJN KOPPELS (ongeacht bordvolgorde) -
+    gebruikt om de 3 kaarten van elkaar te onderscheiden op een echt ander
+    profiel, niet enkel een omgewisselde Match 1/Match 2."""
+    return frozenset(frozenset(p) for p in candidate.get("ordered_pairs", []))
+
+
+def _candidate_win_probs(candidate: dict) -> list:
+    """De 2 individuele winkansen van deze kandidaat-rotatie (None per match
+    als de tegenstander voor deze rotatie nog niet gekozen is - _generate_
+    rotation_candidates() geeft dan assignment=None terug)."""
+    assignment = candidate.get("assignment")
+    if not assignment:
+        return [None, None]
+    return [a.get("win_probability") for a in assignment]
+
+
+def _impact_point_probs_for_candidate(
+    candidate: dict, locked_win_probs: list, total_boards=None,
+) -> dict:
+    """PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: puntenkans (P2/P1/P0) voor
+    de VOLLEDIGE ontmoeting als je deze kandidaat kiest voor de eerstvolgende
+    rotatie - dus [reeds bevestigde winkansen] + [deze kandidaat] + [nog te
+    plannen rotaties, automatisch als 50/50 behandeld door
+    _match_outcome_point_probabilities()]. Bij total_boards=None (formaat
+    onbekend) wordt enkel over de tot nu toe gekende matchen gerekend -
+    correct, maar dan zonder de placeholder voor toekomstige rotaties."""
+    win_probs = list(locked_win_probs) + _candidate_win_probs(candidate)
+    if total_boards is not None:
+        ontbrekend = int(total_boards) - len(win_probs)
+        if ontbrekend > 0:
+            win_probs = win_probs + [None] * ontbrekend
+    return _match_outcome_point_probabilities(win_probs)
+
+
+def _pick_safest_card(evaluated: list, exclude_keys: set) -> dict:
+    """Kandidaat (niet in exclude_keys) met de hoogste MINIMALE winkans over
+    zijn 2 matchen - dus de kandidaat die het minst waarschijnlijk een bijna
+    zekere nederlaag op 1 match oplevert. Enkel kandidaten waarvan BEIDE
+    winkansen gekend zijn komen in aanmerking; is er geen enkele, dan wordt
+    None teruggegeven (de aanroeper valt dan terug op de volgende
+    beste-impact-kandidaat, zie _rank_and_label_candidates_for_cards)."""
+    beste = None
+    beste_min = None
+    for ev in evaluated:
+        if ev["pair_key"] in exclude_keys:
+            continue
+        wp = ev["win_probs"]
+        if any(p is None for p in wp):
+            continue
+        minimum = min(wp)
+        if beste_min is None or minimum > beste_min:
+            beste_min, beste = minimum, ev
+    return beste
+
+
+def _rank_and_label_candidates_for_cards(
+    candidates: list, locked_win_probs: list, total_boards=None, max_cards: int = 3,
+) -> list:
+    """PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: selecteert max. `max_cards`
+    kandidaten uit `candidates` (reeds gesorteerd op EBW door
+    _generate_rotation_candidates(), maar dat wordt hier NIET meer als
+    hoofdsortering gebruikt) en labelt ze als "Aanbevolen"/"Veiligst"/
+    "Alternatief". Zie moduledocstring voor de volledige toelichting.
+    Geeft een lijst van max. `max_cards` dicts terug, elk met:
+      "role", "candidate", "win_probs" (2 winkansen van DEZE rotatie),
+      "risk_notes" (2 risiconotities, via ll.risk_note_for_probability),
+      "impact" (puntenkans voor de VOLLEDIGE ontmoeting met deze keuze),
+      "pair_key" (voor dedupe/identificatie).
+    Geeft nooit meer kaarten dan er ECHT onderscheiden kandidaten zijn -
+    bij < max_cards kandidaten dus minder kaarten, nooit een lege/dubbele."""
+    if not candidates:
+        return []
+    evaluated = []
+    for cand in candidates:
+        win_probs = _candidate_win_probs(cand)
+        evaluated.append({
+            "candidate": cand,
+            "win_probs": win_probs,
+            "risk_notes": [ll.risk_note_for_probability(wp) for wp in win_probs],
+            "impact": _impact_point_probs_for_candidate(cand, locked_win_probs, total_boards),
+            "pair_key": _candidate_pair_set_key(cand),
+        })
+
+    # "Aanbevolen": hoogste impact-P(2 ploegpunten). Bij een exact gelijke
+    # impact (kan bij weinig data) blijft de oorspronkelijke EBW-volgorde
+    # van `candidates` de tiebreak (Python sort is stabiel).
+    by_impact = sorted(evaluated, key=lambda ev: ev["impact"]["p2"], reverse=True)
+    cards = []
+    gekozen_keys = set()
+
+    aanbevolen = by_impact[0]
+    cards.append({**aanbevolen, "role": "Aanbevolen"})
+    gekozen_keys.add(aanbevolen["pair_key"])
+
+    if max_cards >= 2 and len(evaluated) > 1:
+        veiligst = _pick_safest_card(evaluated, gekozen_keys)
+        if veiligst is None:
+            # Geen kandidaat met 2 gekende winkansen buiten "Aanbevolen" ->
+            # val terug op de op-1-na-beste impact (nog steeds nuttig,
+            # geen kaart weglaten enkel omdat "veiligst" strikt niet te
+            # bepalen is).
+            veiligst = next((ev for ev in by_impact if ev["pair_key"] not in gekozen_keys), None)
+        if veiligst is not None and veiligst["pair_key"] not in gekozen_keys:
+            cards.append({**veiligst, "role": "Veiligst"})
+            gekozen_keys.add(veiligst["pair_key"])
+
+    if max_cards >= 3 and len(evaluated) > len(cards):
+        alternatief = next((ev for ev in by_impact if ev["pair_key"] not in gekozen_keys), None)
+        if alternatief is not None:
+            cards.append({**alternatief, "role": "Alternatief"})
+            gekozen_keys.add(alternatief["pair_key"])
+
+    return cards[:max_cards]
+
+
+def _render_candidate_card(
+    col, card: dict, name_lookup_global: dict, key_prefix: str,
+) -> bool:
+    """Tekent 1 beslissingskaart. Geeft True terug als de "Kies deze
+    kaart"-knop deze render is aangeklikt (de aanroeper doet dan de
+    bevestiging - dit bestand tekent enkel, het vastpinnen gebeurt in
+    _render_rotation_planner(), waar de locked_*-session_state leeft)."""
+    with col:
+        with st.container(border=True):
+            st.markdown(f"**{card['role']}**")
+            cand = card["candidate"]
+            for match_idx, pair in enumerate(cand["ordered_pairs"], start=1):
+                p1, p2 = tuple(pair)
+                wp = card["win_probs"][match_idx - 1]
+                risk = card["risk_notes"][match_idx - 1]
+                wp_txt = f"{int(round(wp * 100))}% winkans ({risk})" if wp is not None else "winkans onbekend (tegenstander niet gekozen)"
+                st.write(
+                    f"Match {match_idx}: **{name_lookup_global.get(p1, p1)} / "
+                    f"{name_lookup_global.get(p2, p2)}** - {wp_txt}"
+                )
+            st.caption(f"Impact op volledige ontmoeting: {_format_point_probs_short(card['impact'])}")
+            ebw = cand.get("expected_boards_won")
+            if ebw is not None:
+                st.caption(f"(EBW deze rotatie: {ebw:.2f})")
+            return st.button("Kies deze kaart", key=f"{key_prefix}_pick", type="primary", use_container_width=True)
 
 
 # -----------------------------------------------
@@ -250,11 +443,7 @@ def _count_perfect_matchings(n: int) -> int:
         result *= k
         k -= 2
     return result
-
-
 _ROTATION_EXHAUSTIVE_LIMIT = 400
-
-
 # -----------------------------------------------
 # Rotatie-bewuste enumeratie (rotatie-veilige koppelverdeling over ALLE
 # borden van de ontmoeting)
@@ -271,8 +460,6 @@ def _all_perfect_matchings_generic(seq: list) -> list:
         for sub in _all_perfect_matchings_generic(remaining):
             out.append([frozenset({first, partner})] + sub)
     return out
-
-
 def _enumerate_rotation_aware_pairings(
     player_ids: list, required_counts: dict, call_budget: int = 300_000,
 ) -> tuple:
@@ -290,7 +477,6 @@ def _enumerate_rotation_aware_pairings(
     seen_keys = set()
     calls = [0]
     truncated = [False]
-
     def backtrack(rotation_idx, remaining, used_partner_pairs, rotations_so_far):
         calls[0] += 1
         if calls[0] > call_budget:
@@ -327,11 +513,8 @@ def _enumerate_rotation_aware_pairings(
                         remaining[p] += 1
                 if calls[0] > call_budget:
                     return
-
     backtrack(0, dict(required_counts), set(), [])
     return results, truncated[0]
-
-
 def _default_opponent_max_per_player(chosen_opp_ids: list, needed_slots: int) -> dict:
     n = len(chosen_opp_ids)
     if n == 0:
@@ -339,26 +522,18 @@ def _default_opponent_max_per_player(chosen_opp_ids: list, needed_slots: int) ->
     base = needed_slots // n
     extra = needed_slots % n
     return {pid: base + (1 if i < extra else 0) for i, pid in enumerate(chosen_opp_ids)}
-
-
 # -----------------------------------------------
 # Bordvolgorde: officiele regel + padelstat-tie-breaker
 # -----------------------------------------------
 def _pair_official_sum(pair, official_ranks: dict) -> float:
     return sum((official_ranks.get(pid) or 0) for pid in pair)
-
-
 def _pair_official_sum_safe(pair, official_ranks: dict) -> tuple:
     known = [official_ranks.get(pid) for pid in pair]
     is_compleet = all(v is not None for v in known)
     total = sum((v or 0) for v in known)
     return total, is_compleet
-
-
 def _pair_padelstat_sum(pair, padelstat_ratings: dict) -> float:
     return sum((padelstat_ratings.get(pid) or 0) for pid in pair)
-
-
 def _rank_pairs_with_padelstat_tiebreak(
     pairs: list, official_ranks: dict, padelstat_ratings: dict,
 ) -> list:
@@ -367,14 +542,10 @@ def _rank_pairs_with_padelstat_tiebreak(
         padelstat_sum = _pair_padelstat_sum(pair, padelstat_ratings)
         return (official_sum, padelstat_sum)
     return sorted(pairs, key=sort_key, reverse=True)
-
-
 def _rotation_has_missing_official_rank(duo_a, duo_b, official_ranks: dict) -> bool:
     _, complete_a = _pair_official_sum_safe(duo_a, official_ranks)
     _, complete_b = _pair_official_sum_safe(duo_b, official_ranks)
     return not (complete_a and complete_b)
-
-
 def _order_rotations_with_tiebreak(
     rotation_structure: list, official_ranks: dict, padelstat_ratings: dict, rules=None,
 ) -> dict:
@@ -403,8 +574,6 @@ def _order_rotations_with_tiebreak(
         if not valid:
             all_valid = False
     return {"ordered_pairs": ordered_pairs, "rotations": rotation_results, "all_valid": all_valid}
-
-
 def _build_opponent_boards_and_points(
     rotation_structure: list, name_by_id: dict, rank_by_id: dict, padelstat_by_id: dict,
 ) -> list:
@@ -419,8 +588,6 @@ def _build_opponent_boards_and_points(
              "ranking": (f"P{int(rank_by_id[p2])}" if rank_by_id.get(p2) is not None else None)},
         ]})
     return boards
-
-
 def _generate_theoretical_opponent_boards_with_repeats(
     chosen_opp_players: list, opponent_max_per_player: dict, opponent_official_ranks: dict,
     opponent_padelstat_ratings: dict, max_variants: int,
@@ -439,8 +606,6 @@ def _generate_theoretical_opponent_boards_with_repeats(
         "players_used": len(ids),
     }
     return all_boards, meta
-
-
 def _historical_opponent_boards_list(bundle: dict) -> list:
     out = []
     for fx_bundle in bundle.get("previous_fixtures", []) or []:
@@ -452,8 +617,6 @@ def _historical_opponent_boards_list(bundle: dict) -> list:
         label = fx.get("date_text") or "onbekende datum"
         out.append((label, sorted_boards))
     return out
-
-
 def _opponent_lineup_key(boards: list):
     pairs = []
     for b in boards:
@@ -463,8 +626,6 @@ def _opponent_lineup_key(boards: list):
     if not pairs:
         return None
     return tuple(pairs)
-
-
 def _collect_unique_opponent_lineups(historical_boards_with_labels: list, theoretical_boards: list) -> dict:
     unique: dict = {}
     for label, boards in historical_boards_with_labels:
@@ -485,8 +646,6 @@ def _collect_unique_opponent_lineups(historical_boards_with_labels: list, theore
                 "historical_labels": [], "historical_count": 0,
             }
     return unique
-
-
 # -----------------------------------------------
 # Best/worst-case variant-enumeratie
 # -----------------------------------------------
@@ -567,8 +726,6 @@ def _rotation_order_variants(
             "total_points": total_points, "valid": valid, "reason": reason,
         })
     return {"variants": variants}
-
-
 def _enumerate_own_variant_combinations(
     rotation_structure: list, official_ranks: dict, padelstat_ratings: dict,
     rules=None, include_non_compliant: bool = False,
@@ -612,8 +769,6 @@ def _enumerate_own_variant_combinations(
             "rank_data_incomplete": any_rank_data_incomplete,
         })
     return combinations
-
-
 def _compute_matchup(
     own_ordered_pairs: list, opp_boards: list,
     synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
@@ -673,8 +828,6 @@ def _compute_matchup(
         "point_probs": point_probs,
         "n_missing_win_probs": _n_missing_win_probs(win_probs_for_points),
     }
-
-
 def _expand_tied_orderings(
     results: list, official_ranks_strict: dict, padelstat_ratings: dict,
     tournament_rules_dict, excluded_pairs: set,
@@ -736,8 +889,6 @@ def _expand_tied_orderings(
                     "rotations": rotation_eval["rotations"],
                 })
     return expanded
-
-
 def _rotation_boards_for(opponent_boards, rotation_number: int):
     """PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29: geeft de tegenstander-borden voor DEZE rotatie
     terug (precies MATCHES_PER_ROTATION stuks), of None als die niet gekend
@@ -751,8 +902,6 @@ def _rotation_boards_for(opponent_boards, rotation_number: int):
     offset = (int(rotation_number) - 1) * MATCHES_PER_ROTATION
     stuk = boards[offset: offset + MATCHES_PER_ROTATION]
     return stuk if len(stuk) == MATCHES_PER_ROTATION else None
-
-
 def _generate_rotation_candidates(
     available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
@@ -761,12 +910,10 @@ def _generate_rotation_candidates(
 ):
     """PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29 (op verzoek van Kim): kiest per rotatie EXACT
     MATCHES_PER_ROTATION (=2) koppels uit de beschikbare spelers.
-
     VOORHEEN deelde deze functie ALLE geselecteerde spelers in koppels in
     (perfect matching over de hele selectie): bij 6 spelers dus 3 koppels,
     terwijl een rotatie er maar 2 heeft - en een oneven aantal spelers
     blokkeerde de planner volledig.
-
     NU: elke combinatie van 4 spelers x elke manier om die in 2 koppels te
     verdelen (3 per combinatie) is een kandidaat, zolang:
       - geen van beide koppels al in een eerdere, bevestigde rotatie speelde
@@ -780,7 +927,6 @@ def _generate_rotation_candidates(
     uit _rotation_order_variants() - dezelfde regel als in de rest van de
     app. Zijn de tegenstanders van deze rotatie gekend, dan wordt
     gerangschikt op verwacht aantal gewonnen matchen; anders op synergie.
-
     Geeft (kandidaten[:max_results], totaal_mogelijk, diagnostiek) terug -
     hetzelfde contract als voorheen, zodat de UI ongewijzigd blijft."""
     per_rot = MATCHES_PER_ROTATION
@@ -794,7 +940,6 @@ def _generate_rotation_candidates(
     rot_boards = _rotation_boards_for(opponent_boards, rotation_number)
     padelstat = player_ratings or {}
     excluded = {frozenset(str(x) for x in p) for p in (excluded_pairs or set())}
-
     results = []
     seen = set()
     total_possible = 0
@@ -859,8 +1004,6 @@ def _generate_rotation_candidates(
         "rotation_points_seen": rotation_points_seen,
     }
     return results[:max_results], total_possible, diagnostics
-
-
 def _lineup_options_for_ai(candidates: list, name_lookup: dict) -> list:
     out = []
     for cand in candidates:
@@ -877,8 +1020,6 @@ def _lineup_options_for_ai(candidates: list, name_lookup: dict) -> list:
                 assignment.append({"our_pair": (p1, p2), "synergy": 0.0, "edge": 0.0, "opponent_board": {"opponent_pair": []}})
         out.append({"total_score": cand["score"], "assignment": assignment})
     return out
-
-
 def _render_rotation_points_caption(rotations: list) -> None:
     if not rotations:
         return
@@ -890,8 +1031,6 @@ def _render_rotation_points_caption(rotations: list) -> None:
             continue
         icon = "OK" if rot.get("valid", True) else "FOUT"
         st.caption(f"{icon} Rotatie {i}: {rot.get('reason', '')}")
-
-
 def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) -> None:
     for a in assignment:
         p1, p2 = a["our_pair"]
@@ -912,8 +1051,6 @@ def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) 
             f"**{name_lookup_global.get(p1,p1)} / {name_lookup_global.get(p2,p2)}** "
             f"(synergie {a['synergy']}) - vs **{opp_names}**: {wp_txt}{rating_txt}"
         )
-
-
 @st.fragment
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
@@ -950,6 +1087,15 @@ def _render_rotation_planner(
     if opp_locked_key not in st.session_state:
         st.session_state[opp_locked_key] = []
     locked_opponents = st.session_state[opp_locked_key]
+    # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
+    # BEVESTIGDE rotaties (2 per rotatie, [None, None] als toen geen
+    # tegenstander gekozen was) - nodig om de "impact op de volledige
+    # ontmoeting" van een NIEUWE kandidaat te kunnen berekenen. Nieuw t.o.v.
+    # locked_rotations/locked_opponents; bestond nog niet.
+    win_probs_locked_key = f"rot_locked_winprobs_v1_{ploeg_id}_{'_'.join(sorted(available_ids))}"
+    if win_probs_locked_key not in st.session_state:
+        st.session_state[win_probs_locked_key] = []
+    locked_win_probs_per_rotation = st.session_state[win_probs_locked_key]
     for rot_idx, pairs in enumerate(locked_rotations, start=1):
         st.markdown(f"**Rotatie {rot_idx} (bevestigd):**")
         opp_voor_rotatie = (
@@ -967,6 +1113,9 @@ def _render_rotation_planner(
         if st.button(f"Rotatie {rot_idx} wijzigen", key=f"rot_edit_v3_{ploeg_id}_{rot_idx}"):
             st.session_state[locked_key] = locked_rotations[: rot_idx - 1]
             st.session_state[opp_locked_key] = locked_opponents[: rot_idx - 1]
+            # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: mee terugdraaien,
+            # anders blijft er een verweesde, verouderde winkans-invoer staan.
+            st.session_state[win_probs_locked_key] = locked_win_probs_per_rotation[: rot_idx - 1]
             st.rerun(scope="fragment")
         st.markdown("---")
     excluded_pairs = {p for rot in locked_rotations for p in rot}
@@ -1136,25 +1285,47 @@ def _render_rotation_planner(
     st.markdown(f"**Rotatie {next_rotation_num} - kies de effectieve/geplande combinatie:**")
     if tournament_rules_dict is not None:
         st.caption(f"{len(candidates)} van {total_possible} combinaties voldoen aan de puntengrens per rotatie.")
-    option_labels = []
-    for i, cand in enumerate(candidates):
-        parts = []
-        for match_idx, pair in enumerate(cand["ordered_pairs"], start=1):
-            p1, p2 = tuple(pair)
-            parts.append(f"M{match_idx}: {name_lookup_global.get(p1,p1)}/{name_lookup_global.get(p2,p2)}")
-        prefix = "* " if i == 0 else ""
-        ebw = cand.get("expected_boards_won")
-        ebw_txt = f" (verwacht {ebw:.2f} gewonnen matchen)" if ebw is not None else f" (score {cand['score']:.3f})"
-        option_labels.append(f"{prefix}{' | '.join(parts)}{ebw_txt}")
-    chosen_idx = st.radio(
-        "Combinaties", list(range(len(candidates))), format_func=lambda i: option_labels[i],
-        key=f"rot_choice_v3_{ploeg_id}_{next_rotation_num}", label_visibility="collapsed",
+
+    def _bevestig_rotatie(gekozen_pairs, opp_pairs_voor_log, win_probs_deze_rotatie) -> None:
+        """PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: gedeelde bevestig-
+        logica - zowel de kaart-knoppen als de "geavanceerd"-fallback
+        hieronder roepen dit aan, zodat er precies EEN plek is die de 3
+        locked_*-lijsten synchroon houdt."""
+        st.session_state[locked_key] = locked_rotations + [gekozen_pairs]
+        st.session_state[opp_locked_key] = locked_opponents + [opp_pairs_voor_log]
+        st.session_state[win_probs_locked_key] = locked_win_probs_per_rotation + [win_probs_deze_rotatie]
+        st.rerun(scope="fragment")
+
+    opp_pairs_voor_log = []
+    if rotation_opponent_boards:
+        opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
+
+    # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
+    # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op
+    # de volledige ontmoeting"-berekening per kandidaat hieronder.
+    flat_locked_win_probs = [wp for rotatie in locked_win_probs_per_rotation for wp in rotatie]
+
+    cards = _rank_and_label_candidates_for_cards(
+        candidates, flat_locked_win_probs, total_boards=total_boards, max_cards=3,
     )
-    chosen = candidates[chosen_idx]
-    _render_rotation_points_caption(chosen.get("rotations"))
-    if chosen["assignment"]:
-        with st.expander("Detail van de gekozen combinatie (winkans per match)", expanded=True):
-            _render_assignment_with_outcome(chosen["assignment"], name_lookup_global)
+    st.caption(
+        "De 3 onderstaande kaarten zijn een selectie uit de "
+        f"{len(candidates)} berekende combinaties: de kaart met de hoogste kans op 2 ploegpunten voor de "
+        "VOLLEDIGE ontmoeting ('Aanbevolen'), de veiligste keuze voor deze rotatie specifiek ('Veiligst'), "
+        "en een alternatief met een ander koppelprofiel. 'Impact op volledige ontmoeting' telt nog niet "
+        "geplande rotaties neutraal als 50/50 mee - dat wordt scherper naarmate je meer rotaties bevestigt."
+    )
+    if not cards:
+        st.info("Geen kaarten te tonen - te weinig onderscheiden combinaties.")
+    else:
+        card_cols = st.columns(len(cards))
+        for col, card in zip(card_cols, cards):
+            key_prefix = f"rot_card_v1_{ploeg_id}_{next_rotation_num}_{card['role']}"
+            if _render_candidate_card(col, card, name_lookup_global, key_prefix):
+                _bevestig_rotatie(
+                    card["candidate"]["ordered_pairs"], opp_pairs_voor_log, card["win_probs"],
+                )
+
     ai_key = f"rot_ai_v3_{ploeg_id}_{next_rotation_num}"
     if taa is not None and report_for_ai is not None:
         if st.button("AI-inzicht over deze combinaties", key=f"rot_ai_btn_v3_{ploeg_id}_{next_rotation_num}"):
@@ -1166,10 +1337,30 @@ def _render_rotation_planner(
                     st.session_state[ai_key] = f"Mislukt: {exc}"
         if st.session_state.get(ai_key):
             st.markdown(st.session_state[ai_key])
-    if st.button(f"Bevestig rotatie {next_rotation_num}", key=f"rot_confirm_v3_{ploeg_id}_{next_rotation_num}", type="primary"):
-        st.session_state[locked_key] = locked_rotations + [chosen["ordered_pairs"]]
-        opp_pairs_voor_log = []
-        if rotation_opponent_boards:
-            opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
-        st.session_state[opp_locked_key] = locked_opponents + [opp_pairs_voor_log]
-        st.rerun(scope="fragment")
+
+    # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: de volledige, oude
+    # radio+detail+bevestig-flow blijft ONGEWIJZIGD beschikbaar voor wie een
+    # combinatie buiten de 3 kaarten wil kiezen - geen functionaliteit
+    # verloren, enkel niet langer het standaard pad.
+    with st.expander(f"Alle {len(candidates)} combinaties (geavanceerd)", expanded=False):
+        option_labels = []
+        for i, cand in enumerate(candidates):
+            parts = []
+            for match_idx, pair in enumerate(cand["ordered_pairs"], start=1):
+                p1, p2 = tuple(pair)
+                parts.append(f"M{match_idx}: {name_lookup_global.get(p1,p1)}/{name_lookup_global.get(p2,p2)}")
+            prefix = "* " if i == 0 else ""
+            ebw = cand.get("expected_boards_won")
+            ebw_txt = f" (verwacht {ebw:.2f} gewonnen matchen)" if ebw is not None else f" (score {cand['score']:.3f})"
+            option_labels.append(f"{prefix}{' | '.join(parts)}{ebw_txt}")
+        chosen_idx = st.radio(
+            "Combinaties", list(range(len(candidates))), format_func=lambda i: option_labels[i],
+            key=f"rot_choice_v3_{ploeg_id}_{next_rotation_num}", label_visibility="collapsed",
+        )
+        chosen = candidates[chosen_idx]
+        _render_rotation_points_caption(chosen.get("rotations"))
+        if chosen["assignment"]:
+            with st.expander("Detail van de gekozen combinatie (winkans per match)", expanded=True):
+                _render_assignment_with_outcome(chosen["assignment"], name_lookup_global)
+        if st.button(f"Bevestig rotatie {next_rotation_num}", key=f"rot_confirm_v3_{ploeg_id}_{next_rotation_num}", type="primary"):
+            _bevestig_rotatie(chosen["ordered_pairs"], opp_pairs_voor_log, _candidate_win_probs(chosen))
