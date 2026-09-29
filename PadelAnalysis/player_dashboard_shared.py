@@ -32,6 +32,36 @@ refresh() uit player_inline_actions.py, hergebruikt i.p.v. gedupliceerd)
 die playing strength + officieel klassement synchroon ververst — SLIM: als
 de bestaande waarde nog vers is (< 14 dagen oud), gebeurt er NIETS, geen
 enkele padelstats.be-aanroep.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PROFILE_LAZY_TABS_2026-09-29 (op verzoek van Kim, na een
+MEETSESSIE met perf_timing.py - "Mijn profiel" duurde 21.6s)
+--------------------------------------------------------------------------
+GEMETEN: van de 21.6s op "Mijn profiel" ging ~19.1s naar 66 opeenvolgende
+Firestore-reads "get_player" (gemiddeld 0.29s per stuk). Die kwamen uit de
+tab "Partners": ll.get_docs_for_players() laadt daar het VOLLEDIGE
+spelersdocument van ELKE speler in de database, om de algemene winrate van
+elke partner te kunnen tonen.
+ROOT CAUSE: render_player_dashboard() gebruikte st.tabs. Streamlit voert de
+inhoud van ELKE tab uit bij elke run - ook van tabs die je niet bekijkt. Je
+betaalde die 19s dus bij het openen van de pagina, zelfs als je "Partners"
+nooit aanklikte. Exact hetzelfde patroon als eerder op Opstelling-analyse
+(PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28).
+FIX (2 delen):
+  1. st.tabs -> st.radio (horizontaal, visueel nagenoeg identiek) met
+     if-blokken. Er draait nog exact EEN sectie per render: de sectie die je
+     effectief bekijkt. Standaard "Overzicht". Inhoud van elke sectie is
+     FUNCTIONEEL ONGEWIJZIGD. De gekozen sectie wordt per speler onthouden
+     (widget-key bevat player_id), ook bij "Spelers" (page_players.py).
+  2. De partner-documenten gaan door _cached_partner_docs()
+     (@st.cache_data, 5 min - dezelfde conventie als de andere caches). Wie
+     Partners opent betaalt de reads EEN keer; daarna is het gratis, ook
+     over sessies en andere spelers heen (dezelfde lijst ids). De
+     refresh-knoppen hierboven wissen deze cache mee na een geslaagde
+     scrape.
+NOG NIET OPGELOST (volgende ronde, lineup_lab.py nodig): de EERSTE keer
+Partners openen kost nog steeds ~19s, omdat ll.get_docs_for_players() de
+documenten EEN VOOR EEN ophaalt. Een batch-read (Firestore get_all) of
+parallelle reads zouden dat naar ~1-2s brengen.
 """
 import datetime as _datetime_module
 import streamlit as st
@@ -43,6 +73,25 @@ from dashboard_common import (
     _persist_stats_if_needed, _winrate_str, _render_metrics, _summarize_opponents,
     _render_table, _period_sort_key, _scrape_progress_widget, _get_all_profiles,
 )
+
+# PADEL_ANALYSIS_PROFILE_LAZY_TABS_2026-09-29 - zie moduledocstring.
+_SECTIONS = ["Overzicht", "Match Explorer", "Partners", "Tegenstanders", "\U0001F4C8 Klassement", "Debug"]
+
+
+@st.cache_data(ttl=300, show_spinner="Partnergegevens ophalen (eenmalig)...")
+def _cached_partner_docs(player_ids: tuple):
+    """Gecachete wrapper rond ll.get_docs_for_players() voor de sectie
+    Partners. Sleutel = gesorteerde tuple van ids, zodat elke speler
+    dezelfde cache-entry deelt zolang de spelerslijst niet wijzigt."""
+    return ll.get_docs_for_players(list(player_ids))
+
+
+def clear_partner_docs_cache() -> None:
+    try:
+        _cached_partner_docs.clear()
+    except Exception:  # noqa: BLE001
+        pass
+
 def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
     """PADEL_ANALYSIS_INLINE_FULL_REFRESH_2026-09-21: zie module-docstring
     hierboven voor de volledige toelichting bij deze fix."""
@@ -71,6 +120,7 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
                 result = _scrape(str(player_id), force_full_refresh=False, save_to_firebase=True, progress_callback=cb)
                 bar.progress(1.0, text="Klaar.")
                 st.success(f"Klaar — {result.get('stats',{}).get('total_matches',0)} matches totaal.")
+                clear_partner_docs_cache()
                 st.rerun()
             except Exception as e:
                 st.error(f"Mislukt: {e}")
@@ -84,6 +134,7 @@ def _render_refresh_controls(player_id: str, profile: dict, key_prefix: str):
                     result = _scrape(str(player_id), force_full_refresh=True, save_to_firebase=True, progress_callback=cb)
                     bar.progress(1.0, text="Klaar.")
                     st.success(f"Klaar — {result.get('stats',{}).get('total_matches',0)} matches totaal.")
+                    clear_partner_docs_cache()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
@@ -139,10 +190,13 @@ def render_player_dashboard(player_id: str, profile: dict):
         )
         _persist_stats_if_needed(player_id, player_doc, live_stats)
     _render_metrics(total, wins, losses, t_count, ic_count)
-    tab_overview, tab_explorer, tab_partners, tab_opponents, tab_klassement, tab_debug = st.tabs([
-        "Overzicht", "Match Explorer", "Partners", "Tegenstanders", "📈 Klassement", "Debug"
-    ])
-    with tab_overview:
+    # PADEL_ANALYSIS_PROFILE_LAZY_TABS_2026-09-29: st.radio i.p.v. st.tabs -
+    # zie moduledocstring. Enkel de gekozen sectie wordt nog uitgevoerd.
+    section = st.radio(
+        "Sectie", _SECTIONS, horizontal=True, label_visibility="collapsed",
+        key=f"player_dashboard_section_{player_id}",
+    )
+    if section == "Overzicht":
         if df.empty:
             st.info("Geen matches beschikbaar.")
         else:
@@ -212,7 +266,7 @@ def render_player_dashboard(player_id: str, profile: dict):
                 sub_w = int(sub["won"].eq(True).sum())
                 sub_l = int(sub["won"].eq(False).sum())
                 col.metric(f"{label} ({len(sub)})", _winrate_str(sub_w, sub_l), f"{sub_w}W – {sub_l}L")
-    with tab_explorer:
+    elif section == "Match Explorer":
         if df.empty:
             st.info("Geen matches.")
         else:
@@ -323,7 +377,7 @@ def render_player_dashboard(player_id: str, profile: dict):
                             st.markdown(f"[📋 Poule/tabel ↗](https://www.tennisenpadelvlaanderen.be{row['reeks_url']})")
                         if row.get("uitslagenblad"):
                             st.markdown(f"[📄 Uitslagenblad ↗](https://www.tennisenpadelvlaanderen.be{row['uitslagenblad']})")
-    with tab_partners:
+    elif section == "Partners":
         st.markdown('<div class="section-header">Partneranalyse</div>', unsafe_allow_html=True)
         with st.expander("Uitleg partneranalyse", expanded=False):
             st.write(
@@ -340,7 +394,7 @@ def render_player_dashboard(player_id: str, profile: dict):
         )
         all_profiles_for_partners = _get_all_profiles()
         all_ids_for_partners = [str(p.get("player_id")) for p in all_profiles_for_partners if p.get("player_id")]
-        docs_for_partners = ll.get_docs_for_players(all_ids_for_partners)
+        docs_for_partners = _cached_partner_docs(tuple(sorted(all_ids_for_partners)))
         profiles_lookup_for_partners = pia.build_profile_lookup(all_profiles_for_partners)
         partner_df = lq.build_partner_analysis_df(
             player_doc, docs_for_partners,
@@ -354,7 +408,7 @@ def render_player_dashboard(player_id: str, profile: dict):
             _render_table(partner_df, "Partner")
         else:
             st.info("Nog geen partnerhistoriek gevonden voor deze speler binnen dit filter.")
-    with tab_opponents:
+    elif section == "Tegenstanders":
         st.markdown('<div class="section-header">Tegenstandersanalyse</div>', unsafe_allow_html=True)
         opp_df = _summarize_opponents(df)
         if not opp_df.empty:
@@ -362,7 +416,7 @@ def render_player_dashboard(player_id: str, profile: dict):
             if q:
                 opp_df = opp_df[opp_df["tegenstander"].str.contains(q, case=False, na=False)]
         _render_table(opp_df, "tegenstander")
-    with tab_klassement:
+    elif section == "\U0001F4C8 Klassement":
         st.markdown('<div class="section-header">📈 Klassementshistoriek</div>', unsafe_allow_html=True)
         profile_doc_for_klassement = fb.get_player_profile(player_id) or {}
         klassement_doc = (
@@ -479,7 +533,7 @@ def render_player_dashboard(player_id: str, profile: dict):
                 except Exception as e:
                     st.error(f"Mislukt: {e}")
         _render_padelstat_section(player_id)
-    with tab_debug:
+    elif section == "Debug":
         st.json(player_doc, expanded=False)
         st.write(f"**Schema:** {player_doc.get('schema_version','?')}")
         st.write(f"**Periodes gescraped:** {player_doc.get('periods_scraped',[])}")

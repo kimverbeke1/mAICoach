@@ -110,8 +110,39 @@ fixture, en de loop over alle kandidaten). Die module wordt ook door de
 nachtelijke GitHub Actions-prescan gebruikt, waar deze sessie net veel aan
 gerepareerd is - een wijziging daar riskeert die werkende prescan-logica te
 breken voor een winst die deze cache hier al volledig oplevert.
+
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29 (op verzoek van Kim, na
+een MEETSESSIE: na "Reboot app" kostte _resolve_own_ploeg_id() opnieuw
+10.08s van de 11.14s)
+--------------------------------------------------------------------------
+PROBLEEM: de @st.cache_data-cache hierboven leeft enkel in het GEHEUGEN van
+het Streamlit-proces. Na elke herstart (Reboot app, een nieuwe deploy na een
+push, of een automatische herstart door Streamlit Cloud) is die leeg en
+betaal je de volle ~10s live-scrape opnieuw. Dit was al voorzien in de
+eerste analyse ("plus het resultaat persistent wegschrijven"), maar toen
+niet gebouwd.
+FIX: tweede cache-laag in Firestore, op het player_profiles-document van
+de speler, veld OWN_TEAM_CACHE_FIELD:
+      {"sig": <sha1 van de fixtures-handtekening>, "name": <display_name>,
+       "result": <JSON van (home_ploeg_id, away_ploeg_id, matched_fx)>,
+       "saved_at": <ISO-tijdstip>}
+Volgorde binnen _cached_identify_own_ploeg_id():
+  1. geheugen-cache (Streamlit)        -> ~0s
+  2. Firestore, als sig EN naam matchen -> ~0.2s (1 profiel-read)
+  3. anders: de echte scrape (~10s), en het resultaat wegschrijven.
+Enkel een GELUKTE herkenning wordt weggeschreven (nooit (None, None, None)),
+zodat een tijdelijke scrape-fout niet blijvend onthouden wordt. Wijzigt er
+een uitslag, dan wijzigt de handtekening en is het opgeslagen resultaat
+automatisch ongeldig.
+"Ploeg opnieuw ophalen" forceert nog altijd een echte herberekening: de
+knop verhoogt een force-token in de sessie; zolang dat token > 0 is, wordt
+de Firestore-laag overgeslagen en het verse resultaat overschrijft het
+opgeslagen resultaat.
 """
 
+import datetime as _dt
+import hashlib
 import json
 
 import streamlit as st
@@ -221,35 +252,97 @@ def _fixtures_signature(fixtures: list, own_interclub_matches: list) -> str:
     return json.dumps({"f": fx_part, "m": match_part}, sort_keys=True)
 
 
+# PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29 - zie moduledocstring.
+OWN_TEAM_CACHE_FIELD = "own_team_identify_cache"
+_FORCE_TOKEN_KEY = "own_team_identify_force_token"
+
+
+def _own_team_force_token() -> int:
+    return int(st.session_state.get(_FORCE_TOKEN_KEY, 0) or 0)
+
+
+def _signature_hash(signature: str) -> str:
+    return hashlib.sha1(signature.encode("utf-8")).hexdigest()
+
+
+def _read_persisted_own_team(player_id: str, display_name: str, sig_hash: str):
+    """Geeft het opgeslagen resultaat terug als handtekening EN naam
+    overeenkomen, anders None. Faalt stil - dan wordt gewoon herberekend."""
+    try:
+        prof = fb.get_player_profile(str(player_id)) or {}
+        entry = prof.get(OWN_TEAM_CACHE_FIELD) or {}
+        if entry.get("sig") != sig_hash or (entry.get("name") or "") != (display_name or ""):
+            return None
+        result = json.loads(entry.get("result") or "null")
+        if not isinstance(result, list) or len(result) != 3:
+            return None
+        return tuple(result)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_persisted_own_team(player_id: str, display_name: str, sig_hash: str, result) -> None:
+    """Schrijft een GELUKT resultaat weg. Faalt stil - de geheugen-cache
+    werkt dan nog steeds, enkel de herstart-bescherming ontbreekt."""
+    try:
+        if not result or not any(result):
+            return
+        payload = {
+            OWN_TEAM_CACHE_FIELD: {
+                "sig": sig_hash,
+                "name": display_name or "",
+                "result": json.dumps(list(result), default=str),
+                "saved_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+        }
+        fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(payload, merge=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @st.cache_data(ttl=86400, show_spinner="Eigen ploeg bepalen (eenmalig)...")
 def _cached_identify_own_ploeg_id(
     player_id: str, display_name: str, signature: str,
-    fixtures_json: str, matches_json: str,
+    fixtures_json: str, matches_json: str, force_token: int = 0,
 ):
     """Gecachete wrapper rond ss.identify_own_ploeg_id().
 
+    Laag 1 = deze @st.cache_data (geheugen). Laag 2 = Firestore
+    (PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29), overleeft een
+    herstart van de app. Pas als beide missen, wordt echt gescrapet.
+
     `signature` doet het echte cache-werk; `fixtures_json`/`matches_json`
-    dragen de data die de onderliggende functie nodig heeft. Ze worden als
-    JSON doorgegeven zodat Streamlit ze betrouwbaar kan hashen. Faalt de
-    aanroep, dan geven we (None, None, None) terug - identiek aan het
+    dragen de data die de onderliggende functie nodig heeft. `force_token`
+    > 0 slaat de Firestore-laag over (knop "Ploeg opnieuw ophalen"). Faalt
+    de aanroep, dan geven we (None, None, None) terug - identiek aan het
     gedrag van de originele functie bij een mislukte herkenning."""
+    sig_hash = _signature_hash(signature)
+    if not force_token:
+        persisted = _read_persisted_own_team(player_id, display_name, sig_hash)
+        if persisted is not None:
+            return persisted
     try:
         fixtures = json.loads(fixtures_json)
         own_interclub_matches = json.loads(matches_json)
-        return ss.identify_own_ploeg_id(
+        result = ss.identify_own_ploeg_id(
             fixtures, own_interclub_matches, own_display_name=display_name,
         )
     except Exception:  # noqa: BLE001
         return None, None, None
+    _write_persisted_own_team(player_id, display_name, sig_hash, result)
+    return result
 
 
 def clear_identify_own_team_cache() -> None:
-    """Wist de cache van _cached_identify_own_ploeg_id(). Aangeroepen via
+    """Wist de geheugen-cache van _cached_identify_own_ploeg_id() EN
+    verhoogt het force-token, zodat de volgende aanroep ook de
+    Firestore-laag overslaat en echt herberekent. Aangeroepen via
     _clear_rank_caches(), dus ook door de knop "Ploeg opnieuw ophalen"."""
     try:
         _cached_identify_own_ploeg_id.clear()
     except Exception:  # noqa: BLE001
         pass
+    st.session_state[_FORCE_TOKEN_KEY] = _own_team_force_token() + 1
 
 
 def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_display_name=None):
@@ -269,7 +362,7 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_di
     if fixtures_json is not None and matches_json is not None:
         home_ploeg_id, away_ploeg_id, matched_fx = _cached_identify_own_ploeg_id(
             str(sel_player_id), own_display_name or "", signature,
-            fixtures_json, matches_json,
+            fixtures_json, matches_json, _own_team_force_token(),
         )
     else:
         home_ploeg_id, away_ploeg_id, matched_fx = ss.identify_own_ploeg_id(
@@ -352,6 +445,7 @@ def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
                 str(sel_player_id), sel_label or "", signature,
                 json.dumps(saved_fixtures, default=str, sort_keys=True),
                 json.dumps(own_interclub_matches, default=str, sort_keys=True),
+                _own_team_force_token(),
             )
         except Exception:
             own_ploeg_id = None

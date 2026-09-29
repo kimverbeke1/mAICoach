@@ -162,13 +162,69 @@ def _inject_css() -> None:
 # app zou geholpen hebben.
 # --------------------------------------------------------------------------- #
 _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-sync-workflow
+
+# --------------------------------------------------------------------------- #
+# MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29 (op verzoek van Kim, na een
+# MEETSESSIE met perf_timing.py: mAICoach 7.52s, waarvan 5.92s (79%) in
+# _refresh_local_data_from_storage)
+#
+# ROOT CAUSE: de 5-minuten-beperking (v3.1 hierboven) stond in
+# st.session_state. Elke F5, elke nieuwe browser-tab en elk wissel naar de
+# app vanaf een andere pagina-URL start in Streamlit een NIEUWE sessie - met
+# een lege session_state. De beperking gold dus nooit bij een verse
+# page-load, net het moment waarop Kim wacht. Gevolg: elke F5 kostte ~6s
+# GCS-downloads, terwijl de lokale bestanden er al stonden.
+#
+# FIX: de beperking staat nu op PROCES-niveau (_MIRROR_STATE hieronder,
+# gedeeld door alle sessies in hetzelfde Streamlit-proces, beschermd met
+# een lock zodat twee gelijktijdige sessies niet dubbel spiegelen). Na een
+# herstart van de app betaalt enkel de allereerste page-load de spiegeling;
+# daarna maximaal 1x per 5 minuten, ongeacht hoeveel sessies/F5's.
+# Het laatste resultaat en een eventuele GCS-waarschuwing worden ook op
+# proces-niveau bewaard en naar elke nieuwe sessie gekopieerd, zodat de
+# bestaande meldingen (fout/waarschuwing/"laatst teruggezet") in elke sessie
+# zichtbaar blijven. "Nu verversen" forceert nog steeds een echte
+# spiegeling (reset van de proces-tijdstempel).
+# --------------------------------------------------------------------------- #
+import threading as _threading
+
+_MIRROR_STATE = {
+    "last_at": None,     # time.monotonic() van de laatste spiegelpoging
+    "result": None,      # laatste mirror_all_to_local()-resultaat
+    "error": None,       # laatste exceptie-tekst, of None
+    "warning": None,     # laatste gcs_status()-dict bij stille storing, of None
+}
+_MIRROR_LOCK = _threading.Lock()
+
+
+def _reset_mirror_throttle() -> None:
+    """Forceert een nieuwe spiegeling bij de volgende run (knop "Nu
+    verversen")."""
+    with _MIRROR_LOCK:
+        _MIRROR_STATE["last_at"] = None
+
+
+def _copy_mirror_state_to_session() -> None:
+    """Zet de proces-brede status over naar de huidige sessie, zodat de
+    bestaande UI-meldingen ongewijzigd blijven werken."""
+    if _MIRROR_STATE["result"] is not None:
+        st.session_state["_last_mirror_result"] = _MIRROR_STATE["result"]
+    if _MIRROR_STATE["error"]:
+        st.session_state["data_refresh_error"] = _MIRROR_STATE["error"]
+    else:
+        st.session_state.pop("data_refresh_error", None)
+    if _MIRROR_STATE["warning"]:
+        st.session_state["data_refresh_warning"] = _MIRROR_STATE["warning"]
+    else:
+        st.session_state.pop("data_refresh_warning", None)
 def _refresh_local_data_from_storage() -> None:
     """Spiegelt history, wellness en activities van GCS terug naar lokale
     bestanden. GEEN intervals.icu-aanroep - enkel een lezing van reeds
     bestaande, door de uur-gebaseerde GitHub Actions-workflow bijgewerkte
     opslag.
-    Doet dit maximaal 1x per _MIRROR_CACHE_SECONDS per sessie (tijdstempel in
-    st.session_state), in plaats van bij elke rerun - dat verklaarde eerder de
+    Doet dit maximaal 1x per _MIRROR_CACHE_SECONDS per PROCES (sinds
+    MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29; voorheen per sessie, wat
+    bij elke F5 opnieuw ~6s kostte), in plaats van bij elke rerun - dat verklaarde eerder de
     trage paginawissels. Faalt de lezing (bv. GCS onbereikbaar), dan wordt dat
     opgevangen en blijft de app de reeds lokaal aanwezige data tonen; de
     volgende poging gebeurt bij het verstrijken van de cache-termijn.
@@ -177,30 +233,35 @@ def _refresh_local_data_from_storage() -> None:
     onderzocht via gcs_status() - zie het uitgebreide commentaarblok
     hierboven voor waarom dat nodig bleek."""
     import time
-    last_refreshed = st.session_state.get("_data_mirror_last_refreshed_at")
+    # MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29: beperking op PROCES-
+    # niveau i.p.v. per sessie - zie het commentaarblok bij _MIRROR_STATE.
     now = time.monotonic()
-    if last_refreshed is not None and now - last_refreshed < _MIRROR_CACHE_SECONDS:
-        return
-    try:
-        result = mirror_all_to_local()
-    except Exception as exc:  # noqa: BLE001
-        st.session_state["data_refresh_error"] = str(exc)
-    else:
-        st.session_state.pop("data_refresh_error", None)
-        st.session_state["_last_mirror_result"] = result
-        # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geen exceptie, maar
-        # ook helemaal niets teruggekregen? Dan is een stille GCS-storing
-        # minstens even waarschijnlijk als "gewoon nog geen nieuwe data" -
-        # dus actief nagaan i.p.v. te zwijgen.
-        if not any(result.values()):
-            status = gcs_status()
-            if status["bucket_name"] and not status["available"]:
-                st.session_state["data_refresh_warning"] = status
-            else:
-                st.session_state.pop("data_refresh_warning", None)
+    with _MIRROR_LOCK:
+        last_refreshed = _MIRROR_STATE["last_at"]
+        if last_refreshed is not None and now - last_refreshed < _MIRROR_CACHE_SECONDS:
+            _copy_mirror_state_to_session()
+            return
+        try:
+            result = mirror_all_to_local()
+        except Exception as exc:  # noqa: BLE001
+            _MIRROR_STATE["error"] = str(exc)
         else:
-            st.session_state.pop("data_refresh_warning", None)
-    st.session_state["_data_mirror_last_refreshed_at"] = now
+            _MIRROR_STATE["error"] = None
+            _MIRROR_STATE["result"] = result
+            # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geen exceptie, maar
+            # ook helemaal niets teruggekregen? Dan is een stille GCS-storing
+            # minstens even waarschijnlijk als "gewoon nog geen nieuwe data" -
+            # dus actief nagaan i.p.v. te zwijgen.
+            if not any(result.values()):
+                status = gcs_status()
+                if status["bucket_name"] and not status["available"]:
+                    _MIRROR_STATE["warning"] = status
+                else:
+                    _MIRROR_STATE["warning"] = None
+            else:
+                _MIRROR_STATE["warning"] = None
+        _MIRROR_STATE["last_at"] = now
+        _copy_mirror_state_to_session()
 def render_dashboard():
     with perf.step("AICoach: load_history"):
         df = load_history()
@@ -362,6 +423,9 @@ def render_health_app() -> None:
             # Forceert een nieuwe GCS-lezing, ook al is de 5-minuten-termijn
             # nog niet verstreken.
             st.session_state.pop("_data_mirror_last_refreshed_at", None)
+            # MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29: de beperking
+            # staat nu op proces-niveau - daar ook resetten.
+            _reset_mirror_throttle()
             st.rerun()
     tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
     comparison_active = bool(st.session_state.get("comparison_active"))
