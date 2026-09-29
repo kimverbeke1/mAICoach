@@ -139,30 +139,6 @@ automatisch ongeldig.
 knop verhoogt een force-token in de sessie; zolang dat token > 0 is, wordt
 de Firestore-laag overgeslagen en het verse resultaat overschrijft het
 opgeslagen resultaat.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29 (op verzoek van Kim, na
-meting: _merge_full_opponent_roster 3.2s en _recent_own_lineup_roster 3.6s
-eigen tijd, telkens opnieuw na F5)
---------------------------------------------------------------------------
-_scout_team_all_fixtures() en _recent_own_lineup_roster() gebruiken nu
-osc.get_shared_fetch_cache() - de PROCES-BREDE fetch-cache (zie
-opponent_scout.py) - i.p.v. een dict in st.session_state. Uitslagenbladen
-van al gespeelde wedstrijden worden dus maar 1 keer per 12u live opgehaald,
-ook over F5, nieuwe sessies en paginawissels heen.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim, koude-start-meting)
---------------------------------------------------------------------------
-GEMETEN in _render_opstelling_scenario() (page_lineup_lab.py), per eigen
-speler NA ELKAAR: 4x get_padelstat_rating (0.64s, "eigen player_ratings
-ophalen") en 3x get_player_profile via get_official_klassement_via_padelstat
-(0.58s, officieel klassement).
-FIX: prefetch_own_player_reads(player_ids) hieronder leest deze reads voor
-alle beschikbare eigen spelers in EEN parallelle batch in de gedeelde
-leescache (fb._fs_prefetch, dashboard_common.py). De bestaande functies
-blijven ongewijzigd en lezen daarna uit die cache.
-Bijkomend: TTL van de leescaches hier 5 -> 30 minuten (ook
-_load_encounter_index 10 -> 30), in lijn met de rest. "Ploeg opnieuw
-ophalen" wist ze nog altijd meteen.
 """
 
 import datetime as _dt
@@ -204,7 +180,7 @@ except Exception:  # noqa: BLE001  pragma: no cover
     manual_poule_input = None
 
 
-@st.cache_data(ttl=1800, show_spinner="Ontmoetingen ophalen...")  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 10)
+@st.cache_data(ttl=600, show_spinner="Ontmoetingen ophalen...")
 def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
@@ -418,7 +394,7 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_di
     return own_ploeg_id
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_own_full_doc(player_id: str):
     try:
         return fb.get_player(player_id)
@@ -646,8 +622,9 @@ def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, befo
         if not n:
             st.session_state[cache_key] = {}
             return {}
-        # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: proces-breed.
-        shared_cache = osc.get_shared_fetch_cache(str(ploeg_id))
+        shared_cache = st.session_state.setdefault(
+            osc.shared_fetch_cache_key(str(ploeg_id)), {}
+        )
         bundle = osc.scout_opponent(
             fixtures, team_name, str(ploeg_id), before_date,
             lookback=n, min_players=0, max_lookback=n,
@@ -677,8 +654,9 @@ def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
         # _scout_team_all_fixtures()/opponent_scout_ui - maar voor
         # consistentie en om een toekomstige duplicatie meteen te vermijden,
         # gebruikt ook dit de gedeelde cache-conventie.
-        # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: proces-breed.
-        shared_cache = osc.get_shared_fetch_cache(str(own_ploeg_id))
+        shared_cache = st.session_state.setdefault(
+            osc.shared_fetch_cache_key(str(own_ploeg_id)), {}
+        )
         own_bundle = osc.scout_opponent(
             fixtures, _own_team_name(fixtures, own_ploeg_id),
             str(own_ploeg_id), before_date, lookback=1,
@@ -694,7 +672,7 @@ def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
     return roster
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_own_player_rating(player_id: str):
     try:
         return oa.get_own_player_rating(str(player_id))[0]
@@ -702,7 +680,7 @@ def _cached_own_player_rating(player_id: str):
         return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_official_rank(player_id: str):
     try:
         snapshot = fb.get_official_klassement_via_padelstat(str(player_id)) or {}
@@ -717,29 +695,12 @@ def _cached_official_rank(player_id: str):
         return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_docs_for_players(player_ids: tuple) -> dict:
     try:
         return ll.get_docs_for_players(list(player_ids))
     except Exception:
         return {}
-
-
-_OWN_PLAYER_READS = ("get_player_profile", "get_padelstat_rating", "get_player")
-
-
-def prefetch_own_player_reads(player_ids) -> None:
-    """PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: leest de per-speler-reads voor de eigen spelers
-    parallel voor in de gedeelde leescache. Reeds gecachete spelers worden
-    overgeslagen. Faalt altijd stil."""
-    prefetch = getattr(fb, "_fs_prefetch", None)
-    ids = [str(p) for p in (player_ids or []) if p]
-    if not callable(prefetch) or not ids:
-        return
-    try:
-        prefetch(_OWN_PLAYER_READS, ids)
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _clear_rank_caches() -> None:
