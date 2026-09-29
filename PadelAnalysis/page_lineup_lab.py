@@ -83,6 +83,17 @@ Hetzelfde patroon als PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28 hierboven.
 FIX: st.radio (horizontaal) i.p.v. st.tabs. Enkel de gekozen weergave
 draait nog; standaard "Overzicht". De inhoud van beide weergaven is
 ongewijzigd, en de AI-sectie eronder blijft altijd zichtbaar.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29 (op verzoek van Kim: "in de najaarsinterclub zijn het
+dus 2 rotaties van 2 matchen")
+--------------------------------------------------------------------------
+Het invoerveld "Aantal wedstrijden deze ontmoeting" is weg. Het getal werd
+geraden uit eerdere uitslagenbladen, met 6 als terugval - fout voor de
+najaarsinterclub (4). Het formaat komt nu uit het reglement via de
+constanten in lineup_rotation.py (ROTATIONS_PER_ENCOUNTER x
+MATCHES_PER_ROTATION) en wordt als vaste tekst getoond. Wijken eerdere
+uitslagenbladen van deze tegenstander af, dan meldt een caption dat -
+zonder het formaat te wijzigen.
 """
 
 import streamlit as st
@@ -104,7 +115,11 @@ from lineup_rules import _render_tournament_rules_selector
 from lineup_opponent_history import (
     _render_previous_opponent_lineup, _render_match1_frequency_opponent,
 )
-from lineup_rotation import _render_rotation_planner, _WIN_PROB_DISCLAIMER
+from lineup_rotation import (
+    _render_rotation_planner, _WIN_PROB_DISCLAIMER,
+    ROTATIONS_PER_ENCOUNTER, MATCHES_PER_ROTATION, MATCHES_PER_ENCOUNTER,  # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29
+    _default_opponent_max_per_player,
+)
 from lineup_matchup_table import _render_all_valid_matchups
 from lineup_sandbox import _render_lineup_sandbox
 
@@ -289,21 +304,39 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         available_official_ranks=[official_ranks_for_suggestion.get(pid) for pid in available_ids],
     )
 
-    suggested_boards = max((len(fx.get("boards", [])) for fx in bundle.get("previous_fixtures", [])), default=6) or 6
-    c1, c2 = st.columns(2)
-    with c1:
-        total_boards = st.number_input("Aantal wedstrijden deze ontmoeting", min_value=1, value=int(suggested_boards), step=1)
-    with c2:
-        st.caption(f"Voorstel: {suggested_boards} wedstrijden.")
+    # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: formaat uit het reglement, niet geraden.
+    total_boards = MATCHES_PER_ENCOUNTER
+    st.caption(
+        f"Formaat volgens het reglement (najaarsinterclub): **{ROTATIONS_PER_ENCOUNTER} rotaties "
+        f"van {MATCHES_PER_ROTATION} matchen** = {total_boards} matchen per ontmoeting."
+    )
+    afwijkend = sorted({
+        len(fx.get("boards") or []) for fx in bundle.get("previous_fixtures", []) or []
+        if fx.get("boards") and len(fx.get("boards")) != total_boards
+    })
+    if afwijkend:
+        st.caption(
+            f"Let op: eerdere uitslagenbladen van deze tegenstander tonen "
+            f"{', '.join(str(n) for n in afwijkend)} matchen - die ontmoetingen worden niet als "
+            "'vorige keer'-opstelling meegenomen, omdat ze niet in dit formaat passen."
+        )
 
-    default_max = max(1, -(-2 * total_boards // len(available_ids)))
+    # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: de standaardverdeling telt nu EXACT op tot 2x het
+    # aantal matchen (vroeger ceil(2*matchen/spelers) per speler, wat bij bv.
+    # 6 spelers en 4 matchen 12 plaatsen gaf i.p.v. 8 en meteen de foutmelding
+    # hieronder toonde). Een speler staat per rotatie in hoogstens 1 match,
+    # dus maximaal ROTATIONS_PER_ENCOUNTER matchen per ontmoeting.
+    default_max_per_player = _default_opponent_max_per_player(
+        list(available_ids), 2 * int(total_boards),
+    )
     cols = st.columns(min(len(available_ids), 6) or 1)
     max_per_player = {}
     for i, pid in enumerate(available_ids):
         with cols[i % len(cols)]:
             max_per_player[pid] = st.number_input(
-                name_lookup_global.get(pid, pid), min_value=0, max_value=int(total_boards),
-                value=min(default_max, int(total_boards)), step=1, key=f"scenario_max_{pid}",
+                name_lookup_global.get(pid, pid), min_value=0, max_value=ROTATIONS_PER_ENCOUNTER,
+                value=min(default_max_per_player.get(pid, 0), ROTATIONS_PER_ENCOUNTER), step=1,
+                key=f"scenario_max_v2_{pid}",
             )
 
     total_slots = sum(max_per_player.values())

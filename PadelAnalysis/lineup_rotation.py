@@ -7,6 +7,19 @@ Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix in deze functies - dit
 bestand is functioneel ONGEWIJZIGD t.o.v. die vorige versie.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29 (op verzoek van Kim: "aantal matchen per ontmoeting in
+rotaties is gedefinieerd normaal via het reglement. die parameters zijn niet
+direct zichtbaar daar maar in de najaarsinterclub zijn het dus 2 rotaties
+van 2 matchen.")
+--------------------------------------------------------------------------
+Het formaat van een ontmoeting staat in het reglement en is NIET af te
+lezen op de TVL-pagina's die we scrapen. Tot nu toe raadde de app het
+aantal matchen uit eerdere uitslagenbladen, met 6 als terugval - fout voor
+de najaarsinterclub. De constanten hieronder zijn nu de ENIGE bron van
+waarheid; page_lineup_lab.py, lineup_sandbox.py en team_ai_advisor.py
+lezen ze hier. Bij een ander formaat (bv. een andere periode) volstaat het
+deze drie regels aan te passen.
 """
 import itertools
 import streamlit as st
@@ -18,6 +31,11 @@ from lineup_scout import (
 
 # PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: zie lineup_lab.py voor de
 # volledige toelichting bij de kalibratie van de winkans-formule.
+# PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: reglement najaarsinterclub = 2 rotaties x 2 matchen.
+ROTATIONS_PER_ENCOUNTER = 2
+MATCHES_PER_ROTATION = 2
+MATCHES_PER_ENCOUNTER = ROTATIONS_PER_ENCOUNTER * MATCHES_PER_ROTATION
+
 _WIN_PROB_DISCLAIMER = (
     "De winkans is een logistische schatting op het verschil in speelsterkte, "
     "gekalibreerd op 44 recent gespeelde dubbels (70% van de uitslagen juist voorspeld; "
@@ -72,7 +90,7 @@ def _enumerate_rotation_aware_pairings(
     rotation_sizes = []
     remaining_boards = n_boards
     while remaining_boards > 0:
-        take = min(2, remaining_boards)
+        take = min(MATCHES_PER_ROTATION, remaining_boards)  # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29
         rotation_sizes.append(take)
         remaining_boards -= take
     results: list = []

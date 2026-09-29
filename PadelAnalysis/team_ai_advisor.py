@@ -171,7 +171,12 @@ _BASE_RULES = (
     "Maak altijd een duidelijk onderscheid tussen resultaten in de huidige poule "
     "en historiek uit vorige periodes. Onthoud dat een HOGER klassementsgetal "
     "STERKER is. Als een winrate op minder dan 3 matchen berust, benoem die dan "
-    "expliciet als onbetrouwbaar. Vermeld wat onbekend is in plaats van te verzinnen."
+    "expliciet als onbetrouwbaar. Vermeld wat onbekend is in plaats van te verzinnen. "
+    # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: formaat uit het reglement, zodat de AI niet over
+    # dubbel 5/6 praat.
+    "Formaat van een ontmoeting (reglement najaarsinterclub): 2 rotaties van 2 "
+    "matchen, dus 4 matchen per ontmoeting; in elke rotatie spelen 2 dubbels "
+    "tegelijk en kan een speler maar in 1 van die 2 matchen staan."
 )
 
 
