@@ -91,6 +91,35 @@ totaal hoogstens X punten halen over hun Y resterende wedstrijden, i.p.v.
 hun rekenkundig maximum Z") - een AND/OF-vrije, maar wel altijd wiskundig
 kloppende absolute grens, in plaats van een enkel "bv."-voorbeeld dat bij
 meerdere resterende wedstrijden misleidend kan zijn.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_FETCH_CACHE_2026-09-29 (op verzoek van Kim, na
+meting: "SECTIE Rangschikking (poule_ranking)" 2.46s van 2.48s, zonder
+enige gemeten substap)
+--------------------------------------------------------------------------
+ROOT CAUSE (2 delen, beide bevestigd in de code hieronder):
+  1. fetch_poule_ranking_html() sliep standaard delay=1.0s VOOR de request.
+     Die pauze is bedoeld voor scrapers die veel pagina's na elkaar
+     ophalen (beleefd tegenover de server); hier gaat het om EEN enkele
+     request per page-load - pure wachttijd voor de gebruiker (~1s van de
+     2.46s).
+  2. Het resultaat stond ENKEL in st.session_state. Elke F5 is een nieuwe
+     sessie, dus de TVL-pagina werd bij ELKE page-load opnieuw live
+     opgehaald (~1.4s netwerk), ook al verandert de rangschikking enkel na
+     een gespeelde speeldag.
+FIX:
+  - render_poule_ranking_tab() haalt de pagina op via
+    _cached_ranking_data(url): @st.cache_data met TTL 10 minuten, gedeeld
+    over alle sessies en F5's. Enkel een GESLAAGDE ophaling wordt gecachet
+    (st.cache_data onthoudt nooit een exceptie), dus een tijdelijke fout
+    wordt bij de volgende poging gewoon opnieuw geprobeerd.
+  - delay=0 voor deze ene UI-request. De standaardwaarde van
+    fetch_poule_ranking_html() zelf blijft 1.0s, zodat eventuele andere
+    (batch-)aanroepers ongewijzigd beleefd blijven.
+  - "Opnieuw proberen" wist ook deze cache.
+  - Meetpunten "rangschikking: TVL-pagina ophalen" en "rangschikking:
+    tabel tonen" in het laadtijd-paneel, zodat de restkost zichtbaar is.
+BEPERKING: een nieuwe uitslag op TVL is hier maximaal 10 minuten later
+zichtbaar.
 """
 from __future__ import annotations
 import itertools
@@ -118,6 +147,52 @@ QUALIFYING_PLACES = 2
 # _head_to_head_winner(), ...) blijft ONGEWIJZIGD staan, klaar om later
 # gewoon terug aan te zetten door deze vlag terug op True te zetten.
 SHOW_QUALIFICATION_SCENARIOS = False
+
+# PADEL_ANALYSIS_RANKING_FETCH_CACHE_2026-09-29 - zie moduledocstring.
+RANKING_CACHE_TTL_SECONDS = 600
+
+
+def _step(label: str):
+    """Timing-stap voor het laadtijd-paneel; no-op als perf_timing
+    ontbreekt."""
+    try:
+        import perf_timing as _perf
+        return _perf.step(label)
+    except Exception:  # noqa: BLE001
+        from contextlib import nullcontext
+        return nullcontext()
+
+
+def _cached_ranking_data(url: str) -> dict:
+    """Haalt de rangschikking op en parset ze, met een cache van
+    RANKING_CACHE_TTL_SECONDS over alle sessies heen (st.cache_data).
+    Gooit een exceptie bij een mislukte ophaling - die wordt NIET gecachet.
+    Buiten Streamlit (geen st.cache_data beschikbaar) gewoon ongecachet."""
+    return _cached_ranking_data_impl(url)
+
+
+def _fetch_and_parse_ranking(url: str) -> dict:
+    html = fetch_poule_ranking_html(url, delay=0)
+    return parse_poule_ranking(html)
+
+
+try:
+    import streamlit as _st_for_cache
+    _cached_ranking_data_impl = _st_for_cache.cache_data(
+        ttl=RANKING_CACHE_TTL_SECONDS, show_spinner=False,
+    )(_fetch_and_parse_ranking)
+except Exception:  # noqa: BLE001  pragma: no cover - buiten Streamlit
+    _cached_ranking_data_impl = _fetch_and_parse_ranking
+
+
+def clear_ranking_cache() -> None:
+    """Wist de rangschikkings-cache (bv. na een bewuste verversing)."""
+    clear = getattr(_cached_ranking_data_impl, "clear", None)
+    if callable(clear):
+        try:
+            clear()
+        except Exception:  # noqa: BLE001
+            pass
 def fetch_poule_ranking_html(
     url: str,
     session: Optional[requests.Session] = None,
@@ -524,25 +599,34 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             "moet eerst geladen zijn (zie 'Volgende match' hierboven)."
         )
         return
-    cache_key = f"poule_ranking_{url}"
-    if cache_key not in st.session_state:
+    # PADEL_ANALYSIS_RANKING_FETCH_CACHE_2026-09-29: gedeelde cache over
+    # sessies heen (10 min) i.p.v. enkel st.session_state, en geen
+    # kunstmatige pauze van 1s meer voor deze ene request.
+    with _step("rangschikking: TVL-pagina ophalen"):
         with st.spinner("Rangschikking ophalen..."):
             try:
-                html = fetch_poule_ranking_html(url)
-                st.session_state[cache_key] = parse_poule_ranking(html)
+                data = _cached_ranking_data(url)
             except Exception as e:  # noqa: BLE001
-                st.session_state[cache_key] = {"error": str(e)}
-    data = st.session_state[cache_key]
+                data = {"error": str(e)}
     if data.get("error"):
         st.warning(f"Kon de rangschikking niet ophalen: {data['error']}")
         if st.button("Opnieuw proberen", key=f"retry_ranking_{url}"):
-            st.session_state.pop(cache_key, None)
+            clear_ranking_cache()
             st.rerun()
         return
     standings = data.get("standings") or []
     if not standings:
         st.info("Nog geen rangschikkingsdata gevonden voor deze poule.")
         return
+    with _step("rangschikking: tabel tonen"):
+        _render_standings_table(data, standings, own_ploeg_id)
+    _render_qualification_section(standings, fixtures, own_ploeg_id)
+
+
+def _render_standings_table(data: dict, standings: list, own_ploeg_id: str) -> None:
+    """PADEL_ANALYSIS_RANKING_FETCH_CACHE_2026-09-29: ongewijzigde inhoud,
+    enkel afgesplitst zodat het tonen apart gemeten kan worden."""
+    import streamlit as st
     meta_parts = [p for p in [data.get("season"), data.get("period"), data.get("category")] if p]
     if data.get("afdeling"):
         meta_parts.append(f"afdeling {data['afdeling']}")
@@ -581,6 +665,12 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
             [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
             use_container_width=True, hide_index=True,
         )
+
+
+def _render_qualification_section(standings: list, fixtures: list, own_ploeg_id: str) -> None:
+    """PADEL_ANALYSIS_RANKING_FETCH_CACHE_2026-09-29: ongewijzigde inhoud,
+    enkel afgesplitst van render_poule_ranking_tab()."""
+    import streamlit as st
     # PADEL_ANALYSIS_QUALIFICATION_SCENARIOS_HIDDEN_2026-09-27: sectie
     # tijdelijk verborgen op verzoek van Kim - zie de vlag hierboven bij
     # QUALIFYING_PLACES. De rangschikkingstabel hierboven blijft gewoon
