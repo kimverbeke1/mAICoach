@@ -93,6 +93,26 @@ en die is in dezelfde ronde meegepatcht. Is er ergens nog een andere
 aanroeper die een int verwacht, dan geeft int(resultaat) een TypeError in
 plaats van stil een verkeerd getal te gebruiken - dat is bewust: beter een
 zichtbare fout dan een nieuwe stille aanname.
+--------------------------------------------------------------------------
+MATCHFITAI_PARALLEL_MIRROR_2026-09-29 (op verzoek van Kim, na een
+MEETSESSIE: de eerste mAICoach-load na een herstart kostte 5.6s in
+_refresh_local_data_from_storage)
+--------------------------------------------------------------------------
+mirror_all_to_local() spiegelde history, wellness en activities NA ELKAAR,
+terwijl de drie volledig onafhankelijk zijn (andere GCS-objecten, andere
+lokale bestanden). Ze lopen nu in parallel (3 threads). De GCS-verbinding
+wordt EERST in de hoofdthread opgebouwd (gcs_available()), zodat de drie
+threads dezelfde, reeds gecachete bucket delen i.p.v. elk een eigen client
+aan te maken. Het teruggegeven dict is identiek aan voorheen. Faalt een
+van de drie, dan gedraagt die zich exact zoals voorheen (0 of exceptie),
+zonder de andere twee te beinvloeden - behalve dat een exceptie nu pas na
+afloop van alle drie doorgegeven wordt.
+Samen met MATCHFITAI_GCS_SINGLE_ROUNDTRIP_2026-09-29 (gcs_store.read_text:
+1 i.p.v. 2 netwerkrondes per object) gaat de spiegeling van 6 rondes na
+elkaar naar ~1 ronde-tijd.
+Dit raakt ENKEL de eerste load na een herstart: sinds
+MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29 (training_dashboard.py) wordt
+er daarna maximaal 1x per 5 minuten per proces gespiegeld.
 """
 from __future__ import annotations
 
@@ -379,11 +399,19 @@ def mirror_all_to_local() -> dict:
     Dit is wat de Streamlit-app bij het laden moet aanroepen: voor deze fix
     werd enkel history gespiegeld, waardoor Recovery en Activiteiten op de
     cloud leeg bleven (zie moduledocstring)."""
-    return {
-        "history": mirror_history_to_local(),
-        "wellness": mirror_wellness_to_local(),
-        "activities": mirror_activities_to_local(),
+    # MATCHFITAI_PARALLEL_MIRROR_2026-09-29: in parallel - zie moduledocstring.
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not gcs_available():  # bouwt de gedeelde bucket op in de hoofdthread
+        return {"history": 0, "wellness": 0, "activities": 0}
+    taken = {
+        "history": mirror_history_to_local,
+        "wellness": mirror_wellness_to_local,
+        "activities": mirror_activities_to_local,
     }
+    with ThreadPoolExecutor(max_workers=len(taken)) as pool:
+        futures = {naam: pool.submit(functie) for naam, functie in taken.items()}
+    return {naam: future.result() for naam, future in futures.items()}
 
 
 # --------------------------------------------------------------------------- #

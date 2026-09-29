@@ -143,6 +143,27 @@ meten levert het meeste inzicht per regel code op:
      niet-gecachete aanroeper (_get_all_profiles) wordt wel gemeten.
   3. De repo-root wordt op sys.path gezet (append), omdat perf_timing.py
      daar nu staat - zie dashboard.py.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29 (op verzoek van Kim, na een
+MEETSESSIE: hetzelfde document werd tot 4x per render gelezen)
+--------------------------------------------------------------------------
+GEMETEN (tweede F5 na Reboot, tabel "Opgeteld per stapnaam"):
+  Mijn profiel: 4x get_player (2.45s) + 4x get_player_profile (1.31s);
+  Spelers:      4x get_player_profile (1.96s) + 3x get_player (1.06s).
+Telkens HETZELFDE document, gelezen door verschillende helpers in dit
+bestand (_get_club, _official_current_rank, _virtual_rank, ...) en door
+player_dashboard_shared.render_player_dashboard().
+FIX: fb_request_cache.py (nieuw, zie dat bestand voor de volledige uitleg)
+wordt hieronder geinstalleerd, in deze volgorde:
+  1. fb_request_cache.save_raw_originals(fb) - bewaart de ONGEWIKKELDE
+     leesfuncties als fb._raw_<naam>, voor parallelle reads in threads.
+  2. de bestaande timing-omwikkeling (ongewijzigd).
+  3. fb_request_cache.install(fb) - lees-geheugen per render ROND de
+     timing-laag. Gevolg in het paneel: enkel ECHTE netwerk-reads
+     verschijnen nog als "Firestore: ..."; geheugen-treffers niet.
+De drie directe fb.db-schrijfhelpers hier (_save_poule_url, _save_club,
+_persist_stats_if_needed) wissen het geheugen voor die speler, zodat een
+wijziging meteen zichtbaar is.
 """
 import re
 import sys
@@ -175,6 +196,21 @@ try:
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
+# PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29 - zie moduledocstring.
+try:
+    import fb_request_cache as _rc
+except Exception:  # noqa: BLE001  pragma: no cover
+    _rc = None
+
+
+def _invalidate_doc_cache(player_id=None) -> None:
+    """Wist het lees-geheugen per render (fb_request_cache) - veilig als die
+    module ontbreekt."""
+    if _rc is not None:
+        try:
+            _rc.invalidate(player_id)
+        except Exception:  # noqa: BLE001
+            pass
 
 # ─────────────────────────────────────────────
 # PERF_TIMING_ROLLOUT_2026-09-29 - zie moduledocstring
@@ -206,6 +242,13 @@ _FIRESTORE_READS_TO_TIME = (
 
 
 def _instrument_firestore_reads() -> None:
+    # PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29: stap 1 - de ONGEWIKKELDE
+    # originelen bewaren, VOOR de timing-laag eromheen komt.
+    if _rc is not None:
+        try:
+            _rc.save_raw_originals(fb)
+        except Exception:  # noqa: BLE001
+            pass
     if _perf is None or getattr(fb, "_perf_instrumented", False):
         return
     for naam in _FIRESTORE_READS_TO_TIME:
@@ -223,6 +266,13 @@ def _instrument_firestore_reads() -> None:
 
 
 _instrument_firestore_reads()
+# PADEL_ANALYSIS_REQUEST_DOC_CACHE_2026-09-29: stap 3 - lees-geheugen per
+# render ROND de timing-laag (zie moduledocstring).
+if _rc is not None:
+    try:
+        _rc.install(fb)
+    except Exception:  # noqa: BLE001 - nooit de app breken op deze laag
+        pass
 # ─────────────────────────────────────────────
 # Datum-/tekst-helpers
 # ─────────────────────────────────────────────
@@ -369,6 +419,7 @@ def _persist_stats_if_needed(player_id: str, player_doc: dict, live_stats: dict)
         )
     except Exception:
         pass
+    _invalidate_doc_cache(player_id)
 def _winrate_str(wins, losses) -> str:
     known = wins + losses
     if known == 0:
@@ -580,6 +631,7 @@ def _save_poule_url(player_id: str, url: str) -> None:
         )
     except Exception:
         pass
+    _invalidate_doc_cache(player_id)
 @_timed("_get_saved_schedule")
 def _get_saved_schedule(player_id: str):
     try:
@@ -840,6 +892,7 @@ def _save_club(player_id: str, club: str) -> None:
         )
     except Exception:
         pass
+    _invalidate_doc_cache(player_id)
 def _render_club_editor(player_id: str, profile: dict, key_prefix: str) -> None:
     """PADEL_ANALYSIS_OWN_CLUB_FIELD_2026-09-20 (op verzoek van Kim: "Die
     scrape moet weten in welke ploeg ik speel. ik kan dat niet instellen. ik

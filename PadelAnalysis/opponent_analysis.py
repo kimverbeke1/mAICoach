@@ -155,6 +155,36 @@ render_overview_and_detail() ZELF blijft ONGEWIJZIGD bruikbaar (roept nu
 gewoon de 3 nieuwe functies na elkaar aan binnen zijn eigen 2-tabs-
 structuur) - poule_teams_ui.py en elke andere bestaande aanroeper werken
 dus zonder enige aanpassing verder.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29 (op verzoek van Kim, na een
+MEETSESSIE: oa.get_team_report kostte 2.5s bij elke F5)
+--------------------------------------------------------------------------
+GEMETEN: onder get_team_report stonden 7x "Firestore: get_padelstat_rating"
+en 7x "Firestore: get_player", strikt afwisselend en NA ELKAAR - EEN paar
+per tegenstander (~0.18s per read). Het patroon past bij de freshness-check
+(_underlying_data_is_fresher -> freshness_cache.get_freshness per speler):
+die cache is sessie-lokaal, en elke F5 start een nieuwe sessie. Het kan ook
+een herbouw van het rapport zijn (od.build_player_summary per speler).
+FIX (werkt voor beide gevallen, zonder freshness_cache.py of
+opponent_dossier.py te wijzigen):
+  1. VOOR de freshness-check worden get_padelstat_rating + get_player voor
+     ALLE spelers van de ploeg in EEN parallelle batch opgehaald
+     (fb_request_cache.prefetch). De aanroepen per speler die daarna volgen
+     (fb.get_...(pid)) krijgen het resultaat uit het lees-geheugen van deze
+     render: 0 netwerk. Verwacht: ~2.5s -> ~0.3s.
+  2. Meetpunten om de rest ZICHTBAAR te maken i.p.v. te raden:
+       - "team report: freshness-check"
+       - "team report: HERBOUW (reden: ...)" - enkel als het rapport
+         effectief herbouwd wordt, met de concrete reden. Staat die stap
+         bij ELKE F5 in het paneel, dan is dat een aparte bug om aan te
+         pakken (het rapport zou normaal uit Firestore herladen moeten
+         worden, niet herbouwd).
+       - "Firestore: team report laden".
+  Blijven er na deze wijziging toch nog losse "Firestore: get_..."-stappen
+  onder de freshness-check staan, dan leest freshness_cache.py Firestore
+  rechtstreeks (niet via fb.get_...), en is dat bestand de volgende stap.
+_needs_rebuild() geeft nog steeds een bool terug (achterwaarts compatibel);
+de reden komt uit de nieuwe _rebuild_reason().
 """
 from __future__ import annotations
 import re
@@ -206,6 +236,24 @@ except Exception:  # pragma: no cover
     def trigger_github_actions_scrape(**_kwargs):
         return False, "cloud_helpers ontbreekt"
 REPORTS_COLLECTION = "team_scouting_reports"
+# PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29 - zie moduledocstring.
+try:
+    import fb_request_cache as _rc
+except Exception:  # noqa: BLE001  pragma: no cover
+    _rc = None
+try:
+    import perf_timing as _perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    _perf = None
+
+
+def _step(label: str):
+    if _perf is None:
+        from contextlib import nullcontext
+        return nullcontext()
+    return _perf.step(label)
+
+
 REPORT_SCHEMA_VERSION = 10  # TVL officieel klassement is weer autoritatief; padelstat-snapshot enkel als terugval
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
 def _now_iso() -> str:
@@ -331,24 +379,36 @@ def _underlying_data_is_fresher(report: dict, bundle: dict) -> bool:
         if scraped_at and scraped_at > report_updated:
             return True
     return False
+def _rebuild_reason(
+    report: Optional[dict],
+    bundle: dict,
+    current_spelgroep_id: Optional[str] = None,
+) -> Optional[str]:
+    """PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29: dezelfde checks als
+    voorheen in _needs_rebuild(), in dezelfde volgorde, maar geeft de
+    concrete REDEN terug (of None = geen herbouw nodig), zodat die in het
+    laadtijd-paneel zichtbaar wordt."""
+    if not report:
+        return "geen opgeslagen rapport"
+    if report.get("schema_version") != REPORT_SCHEMA_VERSION:
+        return f"schema {report.get('schema_version')} != {REPORT_SCHEMA_VERSION}"
+    if str(report.get("spelgroep_id") or "") != str(current_spelgroep_id or ""):
+        return f"spelgroep {report.get('spelgroep_id')!r} != {current_spelgroep_id!r}"
+    known_ids = {str(p.get("player_id")) for p in report.get("players", []) or []}
+    bundle_ids = {str(p["user_id"]) for p in bundle.get("unique_players", []) or []}
+    if not bundle_ids.issubset(known_ids):
+        return f"{len(bundle_ids - known_ids)} nieuwe speler(s)"
+    if _underlying_data_is_fresher(report, bundle):
+        return "nieuwere padelstat/klassement-data"
+    return None
+
+
 def _needs_rebuild(
     report: Optional[dict],
     bundle: dict,
     current_spelgroep_id: Optional[str] = None,
 ) -> bool:
-    if not report:
-        return True
-    if report.get("schema_version") != REPORT_SCHEMA_VERSION:
-        return True
-    if str(report.get("spelgroep_id") or "") != str(current_spelgroep_id or ""):
-        return True
-    known_ids = {str(p.get("player_id")) for p in report.get("players", []) or []}
-    bundle_ids = {str(p["user_id"]) for p in bundle.get("unique_players", []) or []}
-    if not bundle_ids.issubset(known_ids):
-        return True
-    if _underlying_data_is_fresher(report, bundle):
-        return True
-    return False
+    return _rebuild_reason(report, bundle, current_spelgroep_id) is not None
 def get_team_report(
     bundle: dict,
     opp: dict,
@@ -363,11 +423,24 @@ def get_team_report(
     ploeg_id = opp.get("ploeg_id")
     state_key = f"{key_prefix}_report_v8_{ploeg_id}"
     if state_key not in st.session_state:
-        st.session_state[state_key] = _load_report(ploeg_id)
+        with _step("Firestore: team report laden"):
+            st.session_state[state_key] = _load_report(ploeg_id)
     report = st.session_state[state_key]
-    if _needs_rebuild(report, bundle, current_spelgroep_id):
-        report = _build_report(bundle, opp, all_docs, current_reeks_url, current_spelgroep_id, global_docs)
-        _save_report(report)
+    # PADEL_ANALYSIS_TEAM_REPORT_PARALLEL_2026-09-29: alle per-speler-reads
+    # in EEN parallelle batch, VOOR de freshness-check en een eventuele
+    # herbouw - zie moduledocstring.
+    if _rc is not None:
+        try:
+            pids = [str(p.get("user_id")) for p in bundle.get("unique_players", []) or [] if p.get("user_id")]
+            _rc.prefetch(("get_padelstat_rating", "get_player"), pids)
+        except Exception:  # noqa: BLE001 - nooit de pagina breken
+            pass
+    with _step("team report: freshness-check"):
+        reason = _rebuild_reason(report, bundle, current_spelgroep_id)
+    if reason is not None:
+        with _step(f"team report: HERBOUW (reden: {reason})"):
+            report = _build_report(bundle, opp, all_docs, current_reeks_url, current_spelgroep_id, global_docs)
+            _save_report(report)
         st.session_state[state_key] = report
     return report
 def _trigger_fresh_padelstat_for_team(bundle: dict) -> None:

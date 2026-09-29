@@ -47,6 +47,17 @@ FIX, twee nieuwe, PUUR ADDITIEVE functies (bestaand gedrag verandert niet):
 persistent_data.py roept diagnose() aan om een eerlijk "gcs_synced"-veld terug
 te geven i.p.v. het misleidende, louter-lokale recordaantal als succes te
 presenteren. Zie de toelichting daar voor de volledige keten.
+--------------------------------------------------------------------------
+MATCHFITAI_GCS_SINGLE_ROUNDTRIP_2026-09-29 (op verzoek van Kim, na een
+MEETSESSIE: de eerste mAICoach-load na een herstart kostte 5.6s, bijna
+volledig in de GCS-spiegeling)
+--------------------------------------------------------------------------
+read_text() deed per object TWEE netwerkrondes: eerst blob.exists(), dan
+blob.download_as_text(). De spiegeling leest 3 objecten (history_bulk,
+wellness, activities), dus 6 rondes waar er 3 volstaan. Nu wordt meteen
+gedownload; een onbestaand object geeft een NotFound-fout, die (net als elke
+andere fout voorheen) opgevangen wordt en None teruggeeft. Het gedrag voor de
+aanroepers is dus identiek - enkel de overbodige ronde is weg.
 """
 from __future__ import annotations
 
@@ -210,11 +221,10 @@ def read_text(path: str):
     if bucket is None:
         return None
     try:
-        blob = bucket.blob(path)
-        if not blob.exists():
-            return None
-        return blob.download_as_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001
+        # MATCHFITAI_GCS_SINGLE_ROUNDTRIP_2026-09-29: geen aparte exists()-
+        # ronde meer; een onbestaand object gooit NotFound -> None hieronder.
+        return bucket.blob(path).download_as_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 - o.a. NotFound: object bestaat niet
         return None
 
 
