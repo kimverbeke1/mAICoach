@@ -148,7 +148,37 @@ FIX:
     van de volgende match: zodra die gespeeld is, hoort er vanzelf een
     nieuwe analyse bij.
 Dit bestand blijft vrij van Streamlit-afhankelijkheden.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_UITSLAGENBLAD_FIRESTORE_CACHE_2026-09-29 (op verzoek van Kim:
+"bij opstelling analyse duurt de 1ste maal zo lang")
+--------------------------------------------------------------------------
+PROBLEEM: de proces-brede fetch-cache hierboven overleeft F5 en
+paginawissels, maar NIET een herstart van de app (Reboot, nieuwe deploy
+na een push, of Streamlit Cloud die een slapende app terug opstart). Na
+elke herstart werden alle uitslagenbladen opnieuw LIVE opgehaald: voor de
+tegenstander (_merge_full_opponent_roster, alle gespeelde wedstrijden) EN
+voor de eigen ploeg (_recent_own_lineup_roster) - samen gemeten ~3-7s,
+exact op de "eerste keer" waar Kim op wacht.
+FIX: een tweede laag onder de proces-cache, in Firestore (collectie
+UITSLAGENBLAD_CACHE_COLLECTION). Volgorde in scout_opponent():
+  1. proces-cache (fetched_cache)                 -> 0s
+  2. Firestore, alle ontbrekende bladen in EEN batch-read (get_all)
+                                                   -> ~0.2-0.4s
+  3. pas daarna: live ophalen (parallel, zoals voorheen), en elk geslaagd
+     resultaat wegschrijven.
+Veiligheid:
+  - Enkel resultaten die ook in de proces-cache mogen (geen fout, minstens
+    1 bord - _cacheable_fetch_result) worden bewaard. Een leeg of mislukt
+    blad wordt nooit onthouden.
+  - De sleutel bevat de ploeg-id: hetzelfde uitslagenblad levert voor de
+    ene ploeg andere "opponent"-spelers op dan voor de andere.
+  - TTL 30 dagen als vangnet; een GESPEELDE uitslag wijzigt in de praktijk
+    niet meer.
+  - Elke Firestore-fout valt stil terug op live ophalen (oud gedrag).
+  - Wordt ook gebruikt als de scrapers in GitHub Actions scout_opponent()
+    aanroepen: die vullen de cache dan mee, wat de app enkel sneller maakt.
 """
+import hashlib
 import re
 import sys
 import threading
@@ -180,6 +210,10 @@ _shared_fetch_store: dict[str, tuple[float, dict]] = {}
 _shared_fetch_lock = threading.Lock()
 
 SCOUT_BUNDLES_COLLECTION = "scout_bundles"
+# PADEL_ANALYSIS_UITSLAGENBLAD_FIRESTORE_CACHE_2026-09-29 - zie moduledocstring
+UITSLAGENBLAD_CACHE_COLLECTION = "uitslagenblad_cache"
+UITSLAGENBLAD_CACHE_VERSION = 1
+UITSLAGENBLAD_CACHE_TTL_SECONDS = 30 * 24 * 3600
 SCOUT_BUNDLE_TTL_SECONDS = 7 * 24 * 3600
 _scout_bundle_store: dict[str, tuple[float, dict]] = {}
 _scout_bundle_lock = threading.Lock()
@@ -209,6 +243,68 @@ def clear_shared_fetch_cache(opponent_ploeg_id: Optional[str] = None) -> None:
 def _cacheable_fetch_result(result: dict) -> bool:
     """Enkel een geslaagd uitslagenblad MET borden mag onthouden worden."""
     return bool(result) and not result.get("error") and bool(result.get("boards"))
+
+
+def _blad_doc_id(opponent_ploeg_id: str, fixture_key: str) -> str:
+    raw = f"{opponent_ploeg_id}|{fixture_key}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _load_persisted_fetches(opponent_ploeg_id: str, fixture_keys: list) -> dict:
+    """Leest de gevraagde uitslagenbladen voor deze ploeg in EEN batch uit
+    Firestore. Geeft {fixture_key: resultaat} terug voor geldige, bruikbare
+    entries. Faalt altijd stil ({})."""
+    keys = [k for k in dict.fromkeys(fixture_keys) if k and not str(k).startswith("__no_url__")]
+    if not keys:
+        return {}
+    try:
+        col = fb.db.collection(UITSLAGENBLAD_CACHE_COLLECTION)
+        refs = [col.document(_blad_doc_id(opponent_ploeg_id, k)) for k in keys]
+        gezocht = set(keys)
+        now = time.time()
+        out = {}
+        for snap in fb.db.get_all(refs):
+            if not getattr(snap, "exists", False):
+                continue
+            data = snap.to_dict() or {}
+            if data.get("version") != UITSLAGENBLAD_CACHE_VERSION:
+                continue
+            if str(data.get("ploeg_id")) != str(opponent_ploeg_id):
+                continue
+            if now - float(data.get("saved_at_epoch") or 0) > UITSLAGENBLAD_CACHE_TTL_SECONDS:
+                continue
+            key = data.get("fixture_key")
+            result = data.get("result")
+            if key in gezocht and isinstance(result, dict) and _cacheable_fetch_result(result):
+                out[key] = result
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_persisted_fetches(opponent_ploeg_id: str, results: dict) -> None:
+    """Schrijft geslaagde uitslagenbladen weg (1 batch). Faalt altijd stil."""
+    te_bewaren = {
+        k: r for k, r in (results or {}).items()
+        if k and not str(k).startswith("__no_url__") and _cacheable_fetch_result(r)
+    }
+    if not te_bewaren:
+        return
+    try:
+        col = fb.db.collection(UITSLAGENBLAD_CACHE_COLLECTION)
+        batch = fb.db.batch()
+        now = time.time()
+        for key, result in te_bewaren.items():
+            batch.set(col.document(_blad_doc_id(opponent_ploeg_id, key)), {
+                "version": UITSLAGENBLAD_CACHE_VERSION,
+                "ploeg_id": str(opponent_ploeg_id),
+                "fixture_key": key,
+                "saved_at_epoch": now,
+                "result": fb.sanitize_for_firestore(result),
+            })
+        batch.commit()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _bundle_doc_id(bundle_key: str) -> str:
@@ -511,7 +607,15 @@ def scout_opponent(
             if _fixture_key(fx) not in fetched_cache and _fixture_key(fx) not in local_uncached
         ]
         if to_fetch:
+            # PADEL_ANALYSIS_UITSLAGENBLAD_FIRESTORE_CACHE_2026-09-29: eerst in
+            # EEN batch uit Firestore; enkel wat daar ontbreekt, live ophalen.
+            bewaard = _load_persisted_fetches(opponent_ploeg_id, [_fixture_key(fx) for fx in to_fetch])
+            if bewaard:
+                fetched_cache.update(bewaard)
+                to_fetch = [fx for fx in to_fetch if _fixture_key(fx) not in bewaard]
+        if to_fetch:
             nieuw = _fetch_fixtures_parallel(to_fetch, opponent_name, opponent_ploeg_id, max_workers=max_workers)
+            _save_persisted_fetches(opponent_ploeg_id, nieuw)
             # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: enkel
             # geslaagde bladen met borden in de (gedeelde) cache; fouten en
             # lege bladen enkel lokaal, binnen deze ene aanroep.

@@ -185,6 +185,38 @@ INVALIDATIE (geen verouderde data na een eigen wijziging):
 BEPERKING: wat de GitHub Actions-scrapers op de achtergrond wegschrijven, is
 hier maximaal 5 minuten later zichtbaar - identiek aan freshness_cache.
 Via clear_firestore_read_cache() kan elke knop dit ook expliciet forceren.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29 (op verzoek van Kim: "bij
+opstelling analyse duurt de 1ste maal zo lang")
+--------------------------------------------------------------------------
+Twee aanvullingen op de gedeelde leescache hierboven - GEEN tweede cache.
+(Een eerdere, parallel ontwikkelde per-render-cache in fb_request_cache.py
+werd nooit geactiveerd en is nu teruggebracht tot een kleine helper; deze
+leescache is de enige.)
+  1. BUGFIX: een Firestore-read die een UITZONDERING gaf (bv. een tijdelijke
+     netwerkfout of time-out), zette die leesfunctie voorgoed op
+     _FS_UNCACHEABLE - tot de volgende herstart van de app. Een enkele
+     netwerk-hapering schakelde de cache dus stil uit voor bv. ALLE
+     get_player-reads, met terug trage pagina's zonder zichtbare oorzaak.
+     Nu wordt een functie enkel nog uitgesloten bij een echte
+     SERIALISATIE-fout (het resultaat kan niet gecachet worden); bij elke
+     andere fout wordt enkel DIE ene aanroep rechtstreeks herhaald.
+  2. PARALLEL VOOROPHALEN: fb._fs_prefetch(namen, player_ids) leest alle
+     nog niet gecachete (functie, speler)-paren TEGELIJK (threads) i.p.v.
+     een voor een, en zet ze in deze cache. Daarna kosten de gewone
+     fb.get_...(pid)-aanroepen van de aanroeper 0 netwerk. Bedoeld voor
+     plekken die per tegenstander-speler 2-3 reads NA ELKAAR deden
+     (opponent_scout_ui._data_completeness, _is_known,
+     opponent_analysis.get_team_report).
+     - De threads gebruiken de ONGEWIKKELDE originelen (fb._raw_<naam>,
+       bewaard VOOR de timing- en cachelaag): Streamlit-state en
+       st.cache_data horen niet in worker-threads.
+     - Het resultaat komt pas in de hoofdthread in de cache (via
+       _fs_cached_read), dus exact dezelfde cache, TTL en invalidatie.
+     - Een mislukte read in een thread wordt NIET in de cache gezet; de
+       gewone aanroep probeert die speler later zelf opnieuw.
+     - Beschikbaar als fb._fs_prefetch, zodat modules die dit bestand niet
+       kunnen importeren (circulair) het toch kunnen gebruiken.
 """
 import re
 import sys
@@ -247,6 +279,22 @@ _FIRESTORE_READS_TO_TIME = (
 )
 
 
+def _save_raw_firestore_reads() -> None:
+    """PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29: bewaart de ONGEWIKKELDE
+    leesfuncties als fb._raw_<naam>, VOOR de timing- en cachelaag. Enkel
+    deze zijn veilig in worker-threads. Idempotent."""
+    for naam in _FIRESTORE_READS_TO_TIME:
+        raw_naam = f"_raw_{naam}"
+        if getattr(fb, raw_naam, None) is None and callable(getattr(fb, naam, None)):
+            try:
+                setattr(fb, raw_naam, getattr(fb, naam))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_save_raw_firestore_reads()
+
+
 def _instrument_firestore_reads() -> None:
     if _perf is None or getattr(fb, "_perf_instrumented", False):
         return
@@ -288,11 +336,38 @@ _FIRESTORE_WRITE_PREFIXES = (
 _FS_ORIGINALS: dict = {}
 # functies waarvoor cachen onmogelijk bleek (niet-serialiseerbaar resultaat)
 _FS_UNCACHEABLE: set = set()
+# PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29 - zie moduledocstring.
+import threading as _threading
+import time as _time
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+_FS_PREFETCH_MAX_WORKERS = 16
+_FS_PREFILL: dict = {}        # (naam, key) -> parallel voorgelezen waarde
+_FS_FETCHED_AT: dict = {}     # (naam, key) -> tijdstip van de laatste echte read
+_FS_PREFILL_LOCK = _threading.Lock()
+
+
+def _is_serialization_error(exc: Exception) -> bool:
+    """True enkel als st.cache_data het resultaat niet kon bewaren - NIET
+    bij een netwerk- of Firestore-fout tijdens de read zelf."""
+    import pickle
+    if isinstance(exc, (pickle.PicklingError, TypeError)) and "pickle" in str(exc).lower():
+        return True
+    return "unserializable" in type(exc).__name__.lower()
 
 
 @st.cache_data(ttl=_FS_CACHE_TTL_SECONDS, show_spinner=False, max_entries=5000)
 def _fs_cached_read(naam: str, key: str):
-    return _FS_ORIGINALS[naam](key)
+    # PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29: een parallel voorgelezen
+    # waarde wordt hier (in de hoofdthread) de cache in gezet, zonder
+    # opnieuw naar Firestore te gaan.
+    with _FS_PREFILL_LOCK:
+        if (naam, key) in _FS_PREFILL:
+            waarde = _FS_PREFILL.pop((naam, key))
+            _FS_FETCHED_AT[(naam, key)] = _time.time()
+            return waarde
+    waarde = _FS_ORIGINALS[naam](key)
+    _FS_FETCHED_AT[(naam, key)] = _time.time()
+    return waarde
 
 
 def _make_cached_reader(naam: str, origineel):
@@ -304,8 +379,12 @@ def _make_cached_reader(naam: str, origineel):
         ):
             try:
                 return _fs_cached_read(naam, str(args[0]))
-            except Exception:  # noqa: BLE001 - cache mag nooit de app breken
-                _FS_UNCACHEABLE.add(naam)
+            except Exception as exc:  # noqa: BLE001 - cache mag nooit de app breken
+                # PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29: enkel bij een
+                # serialisatie-fout de cache voorgoed uitschakelen voor deze
+                # functie; een netwerkfout geldt enkel voor DEZE aanroep.
+                if _is_serialization_error(exc):
+                    _FS_UNCACHEABLE.add(naam)
         return origineel(*args, **kwargs)
 
     _reader.__name__ = getattr(origineel, "__name__", naam)
@@ -318,6 +397,67 @@ def _clear_fs_cache_local() -> None:
     try:
         _fs_cached_read.clear()
     except Exception:  # noqa: BLE001
+        pass
+    # PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29
+    with _FS_PREFILL_LOCK:
+        _FS_PREFILL.clear()
+        _FS_FETCHED_AT.clear()
+
+
+def prefetch_firestore_reads(namen, player_ids) -> None:
+    """PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29: leest alle nog niet
+    gecachete (functie, speler)-paren PARALLEL en zet ze in de gedeelde
+    leescache. Zie moduledocstring. Faalt altijd stil."""
+    try:
+        pids = list(dict.fromkeys(str(p) for p in (player_ids or []) if p))
+        if not pids:
+            return
+        grens = _time.time() - (_FS_CACHE_TTL_SECONDS - 15)
+        taken = []
+        for naam in namen:
+            raw = getattr(fb, f"_raw_{naam}", None)
+            if not callable(raw) or naam not in _FS_ORIGINALS or naam in _FS_UNCACHEABLE:
+                continue
+            for pid in pids:
+                if _FS_FETCHED_AT.get((naam, pid), 0) < grens:
+                    taken.append((naam, pid, raw))
+        if not taken:
+            return
+
+        def _lees(taak):
+            naam, pid, raw = taak
+            try:
+                return naam, pid, True, raw(pid)
+            except Exception:  # noqa: BLE001 - deze speler later gewoon opnieuw
+                return naam, pid, False, None
+
+        stap = _perf.step(f"Firestore: parallel voorophalen ({len(taken)} reads)") if _perf else None
+        if stap is not None:
+            stap.__enter__()
+        try:
+            with _ThreadPoolExecutor(max_workers=min(_FS_PREFETCH_MAX_WORKERS, len(taken))) as pool:
+                resultaten = list(pool.map(_lees, taken))
+            gelukt = [(naam, pid) for naam, pid, ok, _ in resultaten if ok]
+            with _FS_PREFILL_LOCK:
+                for naam, pid, ok, waarde in resultaten:
+                    if ok:
+                        _FS_PREFILL[(naam, pid)] = waarde
+            # In de hoofdthread de cache vullen; bij een cache-hit wordt de
+            # body niet uitgevoerd en blijft de prefill-entry liggen - die
+            # wordt hieronder opgeruimd.
+            for naam, pid in gelukt:
+                try:
+                    _fs_cached_read(naam, pid)
+                except Exception as exc:  # noqa: BLE001
+                    if _is_serialization_error(exc):
+                        _FS_UNCACHEABLE.add(naam)
+            with _FS_PREFILL_LOCK:
+                for sleutel in gelukt:
+                    _FS_PREFILL.pop(sleutel, None)
+        finally:
+            if stap is not None:
+                stap.__exit__(None, None, None)
+    except Exception:  # noqa: BLE001 - voorophalen mag nooit een pagina breken
         pass
 
 
@@ -380,6 +520,7 @@ def _install_firestore_read_cache() -> None:
         pass
     try:
         fb._fs_cache_clear = _clear_fs_cache_local
+        fb._fs_prefetch = prefetch_firestore_reads  # PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29
         fb._fs_cache_installed = True
     except Exception:  # noqa: BLE001
         pass

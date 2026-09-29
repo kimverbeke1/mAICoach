@@ -70,6 +70,25 @@ FIX:
     osc.get_shared_fetch_cache() i.p.v. een sessie-dict.
   - Een caption toont wanneer de getoonde analyse uit het geheugen komt;
     "Tegenstander analyseren" blijft beschikbaar om bewust te herberekenen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCOUT_HEADER_PREFETCH_2026-09-29 (op verzoek van Kim: "bij
+opstelling analyse duurt de 1ste maal zo lang"; meting: render_scout_header
+5.4-5.7s bij een koude start, OOK na de proces-brede scout-cache hierboven)
+--------------------------------------------------------------------------
+Zodra er een (teruggezette) analyse is, doen twee plekken per
+tegenstander-speler Firestore-reads NA ELKAAR:
+  - _render_unified_team_sync_trigger() -> _data_completeness(pid):
+    get_player + get_player_profile + get_padelstat_rating per speler;
+  - prepare_team_docs() -> _unknown_players() -> _cached_is_known(pid):
+    get_player_profile (+ get_player) per speler.
+Bij een ploeg van ~10 spelers zijn dat ~30 reads van ~0.2s na elkaar.
+FIX: net voor die checks worden deze drie reads voor ALLE spelers van de
+ploeg in EEN parallelle batch in de gedeelde leescache gezet
+(fb._fs_prefetch, zie dashboard_common.py). De checks zelf zijn
+ONGEWIJZIGD; ze lezen daarna uit de cache.
+ZICHTBAARHEID: render_scout_header() krijgt eigen meetpunten
+("scout: ..."), zodat de volgende meting toont welk deel van de "eigen
+tijd" van render_scout_header echt overblijft - i.p.v. te raden.
 """
 from __future__ import annotations
 import time
@@ -106,6 +125,36 @@ try:
 except Exception:  # pragma: no cover
     pss = None
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
+
+# PADEL_ANALYSIS_SCOUT_HEADER_PREFETCH_2026-09-29 - zie moduledocstring.
+try:
+    import perf_timing as _perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    _perf = None
+
+_ROSTER_READS = ("get_player", "get_player_profile", "get_padelstat_rating")
+
+
+def _step(label: str):
+    if _perf is None:
+        from contextlib import nullcontext
+        return nullcontext()
+    return _perf.step(label)
+
+
+def _prefetch_roster_reads(unique_players: list) -> None:
+    """Leest de per-speler-Firestore-reads van deze ploeg parallel voor in
+    de gedeelde leescache. Doet niets als die niet geinstalleerd is."""
+    functie = getattr(fb, "_fs_prefetch", None)
+    if not callable(functie):
+        return
+    pids = [str(p.get("user_id")) for p in (unique_players or []) if p.get("user_id")]
+    if not pids:
+        return
+    try:
+        functie(_ROSTER_READS, pids)
+    except Exception:  # noqa: BLE001 - voorophalen mag nooit de pagina breken
+        pass
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -617,7 +666,8 @@ def render_scout_header(
     # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: na F5/nieuwe
     # sessie het eerder bewaarde resultaat terugzetten i.p.v. te verdwijnen.
     if scout_key not in st.session_state:
-        restored = osc.get_saved_scout_bundle(scout_key)
+        with _step("scout: opgeslagen analyse laden"):
+            restored = osc.get_saved_scout_bundle(scout_key)
         if restored:
             st.session_state[scout_key] = restored
             st.session_state[f"{scout_key}_restored"] = True
@@ -656,11 +706,17 @@ def render_scout_header(
                     status.update(label="Volledige ploeg ververst", state="complete")
                 _load_all_player_docs.clear()
     st.divider()
+    if bundle and bundle.get("unique_players"):
+        # PADEL_ANALYSIS_SCOUT_HEADER_PREFETCH_2026-09-29: alle per-speler-
+        # reads in EEN parallelle batch, VOOR de checks hieronder en in
+        # prepare_team_docs() - zie moduledocstring.
+        _prefetch_roster_reads(bundle["unique_players"])
     if bundle:
         if not can_scrape and bundle.get("unique_players"):
-            _render_unified_team_sync_trigger(
-                bundle["unique_players"], key_prefix=f"scout_{sel_player_id}", team_name=opp.get("name"),
-            )
+            with _step("scout: volledigheidscheck + sync-knop"):
+                _render_unified_team_sync_trigger(
+                    bundle["unique_players"], key_prefix=f"scout_{sel_player_id}", team_name=opp.get("name"),
+                )
     if not bundle or not bundle.get("unique_players"):
         return (bundle, opp) if bundle else None
     return bundle, opp
