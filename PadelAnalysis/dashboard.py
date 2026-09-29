@@ -61,6 +61,30 @@ hele app)
   - Draait dit bestand standalone (zonder streamlit_app.py), dan doen
     perf.reset()/perf.render_panel() hieronder het werk zelf; via
     streamlit_app.py zijn het automatisch no-ops.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PAGE_IN_URL_2026-09-29 (op verzoek van Kim: "F5 springt terug
+naar Mijn profiel")
+--------------------------------------------------------------------------
+ROOT CAUSE: de gekozen pagina stond ENKEL in st.session_state["page"]. Een
+F5 start in Streamlit een NIEUWE sessie met een lege session_state, dus viel
+de navigatie telkens terug op PAGES[0] ("Mijn profiel"). Extra vervelend
+tijdens het meten van laadtijden: elke F5 op Opstelling-analyse vergde
+eerst een klik terug naar die pagina.
+FIX: de gekozen pagina staat nu OOK in de URL, als ?p=<slug>
+(st.query_params). Die overleeft F5, een bladwijzer en een gedeelde link.
+  - Bij de EERSTE run van een sessie (F5, nieuwe tab) wordt de pagina uit
+    de URL gelezen. Onbekende of ontbrekende waarde -> "Mijn profiel",
+    zoals voorheen.
+  - Binnen een lopende sessie blijft session_state de bron van waarheid;
+    de URL wordt bij ELKE run gelijkgezet met de huidige pagina. Zo volgt
+    ook een sprong via dashboard_common._go_to_player() (die enkel
+    session_state["page"] zet) automatisch in de URL.
+  - De slugs zijn korte ASCII-namen zonder emoji (PAGE_SLUGS hieronder),
+    zodat de URL leesbaar blijft.
+Via streamlit_app.py (st.navigation) wordt de URL dan bv.
+    .../dashboard?p=opstelling
+Wisselen naar mAICoach en terug start deze pagina zonder ?p=, dus weer op
+"Mijn profiel" - dat is het bestaande gedrag van st.navigation.
 """
 import sys
 from pathlib import Path
@@ -142,16 +166,51 @@ st.markdown("""
 # Navigation
 # ─────────────────────────────────────────────
 PAGES = ["👤 Mijn profiel", "🔍 Spelers", "➕ Speler toevoegen", "🧩 Opstelling-analyse"]
-if "page" not in st.session_state:
-    st.session_state["page"] = PAGES[0]
+# PADEL_ANALYSIS_PAGE_IN_URL_2026-09-29: korte URL-namen per pagina (?p=...).
+PAGE_SLUGS = {
+    "👤 Mijn profiel": "profiel",
+    "🔍 Spelers": "spelers",
+    "➕ Speler toevoegen": "toevoegen",
+    "🧩 Opstelling-analyse": "opstelling",
+}
+_SLUG_TO_PAGE = {slug: naam for naam, slug in PAGE_SLUGS.items()}
+
+
+def _page_from_url() -> str:
+    """Pagina uit ?p=<slug>, of PAGES[0] als die ontbreekt/onbekend is."""
+    try:
+        slug = st.query_params.get("p")
+    except Exception:  # noqa: BLE001 - URL mag de navigatie nooit breken
+        slug = None
+    return _SLUG_TO_PAGE.get(str(slug or "").strip().lower(), PAGES[0])
+
+
+def _sync_page_to_url(page_name: str) -> None:
+    """Zet ?p=<slug> gelijk aan de huidige pagina (enkel als die afwijkt)."""
+    slug = PAGE_SLUGS.get(page_name)
+    if not slug:
+        return
+    try:
+        if st.query_params.get("p") != slug:
+            st.query_params["p"] = slug
+    except Exception:  # noqa: BLE001
+        pass
+
+
+if "page" not in st.session_state or st.session_state["page"] not in PAGES:
+    # Eerste run van deze sessie (bv. na F5): pagina uit de URL.
+    st.session_state["page"] = _page_from_url()
 nav_col = st.columns(len(PAGES))
 for i, p in enumerate(PAGES):
     if nav_col[i].button(p, use_container_width=True,
                           type="primary" if st.session_state["page"] == p else "secondary"):
         st.session_state["page"] = p
+        _sync_page_to_url(p)
         st.rerun()
 st.divider()
 page = st.session_state["page"]
+# Ook sprongen via session_state (bv. _go_to_player) komen zo in de URL.
+_sync_page_to_url(page)
 
 # ─────────────────────────────────────────────
 # RENDER
