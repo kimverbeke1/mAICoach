@@ -89,6 +89,19 @@ ONGEWIJZIGD; ze lezen daarna uit de cache.
 ZICHTBAARHEID: render_scout_header() krijgt eigen meetpunten
 ("scout: ..."), zodat de volgende meting toont welk deel van de "eigen
 tijd" van render_scout_header echt overblijft - i.p.v. te raden.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim, koude-start-meting)
+--------------------------------------------------------------------------
+  1. prepare_team_docs() deed nog 3x "Firestore: get_player_profile" NA
+     ELKAAR (~0.6s): de voorophaal-stap in render_scout_header() kende enkel
+     de spelers van de laatste wedstrijd(en), niet de extra spelers die
+     page_lineup_lab._merge_full_opponent_roster() daarna toevoegt. Nu
+     wordt aan het begin van prepare_team_docs() opnieuw voorgelezen, voor
+     de VOLLEDIGE roster. Reeds gecachete spelers worden overgeslagen, dus
+     dit kost enkel iets voor de extra spelers.
+  2. TTL van _load_all_player_docs, _cached_is_known, _data_completeness en
+     _cached_docs_for_players: 5 -> 30 minuten. De bestaande
+     verversknoppen wissen deze caches nog altijd meteen.
 """
 from __future__ import annotations
 import time
@@ -157,7 +170,7 @@ def _prefetch_roster_reads(unique_players: list) -> None:
         pass
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _load_all_player_docs() -> dict:
     try:
         docs = fb.db.collection(fb.PLAYERS_COLLECTION).stream()
@@ -183,7 +196,7 @@ def _is_known(player_id: str) -> bool:
         return False
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _cached_is_known(player_id: str) -> bool:
     return _is_known(player_id)
 
@@ -203,7 +216,7 @@ def _unknown_players(bundle: dict) -> list[dict]:
     ]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _data_completeness(player_id: str) -> dict:
     doc, doc_ok = {}, True
     try:
@@ -722,7 +735,7 @@ def render_scout_header(
     return bundle, opp
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _cached_docs_for_players(player_ids: tuple) -> dict:
     try:
         return ll.get_docs_for_players(list(player_ids))
@@ -743,6 +756,9 @@ def prepare_team_docs(
     unique_players = bundle.get("unique_players", []) or []
     if not unique_players:
         return {}, {}
+    # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: volledige roster (incl. spelers die
+    # _merge_full_opponent_roster net toevoegde) in 1 parallelle batch.
+    _prefetch_roster_reads(unique_players)
     unknown_ids = {player["user_id"] for player in _unknown_players(bundle)}
     all_docs = _cached_docs_for_players(tuple(sorted(str(p["user_id"]) for p in unique_players)))
     if unknown_ids:

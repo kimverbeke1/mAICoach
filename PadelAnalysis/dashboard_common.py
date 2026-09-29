@@ -217,6 +217,26 @@ leescache is de enige.)
        gewone aanroep probeert die speler later zelf opnieuw.
      - Beschikbaar als fb._fs_prefetch, zodat modules die dit bestand niet
        kunnen importeren (circulair) het toch kunnen gebruiken.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim: "TTL van 30 minuten is ok")
+--------------------------------------------------------------------------
+GEMETEN (koude start, export 2026-09-29T18-12): de caches hadden een TTL van
+5 minuten. Wie de app 5 minuten niet gebruikte, betaalde de koude reads dus
+opnieuw - dat voelde als "de eerste keer is altijd traag".
+FIX:
+  1. TTL van de gedeelde leescache en van _get_all_profiles_cached: 5 -> 30
+     minuten (_FS_CACHE_TTL_SECONDS = 1800). Zelfde TTL in de andere
+     leescaches van de Opstelling-analyse/Profiel-keten
+     (opponent_scout_ui.py, lineup_scout.py, opponent_scout.py,
+     player_dashboard_shared.py).
+     Wat NIET verandert: elke eigen schrijfactie en elke verversknop wist
+     de cache nog altijd meteen. Enkel wat de GitHub Actions-scrapers op de
+     achtergrond wegschrijven, is tot 30 minuten later zichtbaar (voorheen
+     5) - door Kim bewust aanvaard.
+  2. fb.get_app_settings() (zonder argumenten, ~0.17s bij ELKE page-load)
+     zit nu ook in de cache (_fs_cached_app_settings). Wordt mee gewist door
+     clear_firestore_read_cache() en door elke schrijf-functie (o.a.
+     save_app_settings), dus een gewijzigde thuisspeler is meteen zichtbaar.
 """
 import re
 import sys
@@ -318,7 +338,7 @@ _instrument_firestore_reads()
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29 - zie moduledocstring
 # ─────────────────────────────────────────────
-_FS_CACHE_TTL_SECONDS = 300
+_FS_CACHE_TTL_SECONDS = 1800  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 
 _FIRESTORE_READS_TO_CACHE = (
     "get_player_profile",
@@ -393,9 +413,38 @@ def _make_cached_reader(naam: str, origineel):
     return _reader
 
 
+# PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: get_app_settings() heeft geen argumenten en viel dus buiten
+# _make_cached_reader (enkel 1-argument-aanroepen). Aparte, kleine cache.
+_FS_SETTINGS_ORIGINAL: dict = {}
+
+
+@st.cache_data(ttl=_FS_CACHE_TTL_SECONDS, show_spinner=False)
+def _fs_cached_app_settings():
+    return _FS_SETTINGS_ORIGINAL["fn"]()
+
+
+def _make_cached_settings_reader(origineel):
+    def _reader(*args, **kwargs):
+        if not args and not kwargs and "fn" in _FS_SETTINGS_ORIGINAL:
+            try:
+                return _fs_cached_app_settings()
+            except Exception:  # noqa: BLE001 - cache mag nooit de app breken
+                pass
+        return origineel(*args, **kwargs)
+
+    _reader.__name__ = getattr(origineel, "__name__", "get_app_settings")
+    _reader.__doc__ = getattr(origineel, "__doc__", None)
+    _reader._fs_cached = True
+    return _reader
+
+
 def _clear_fs_cache_local() -> None:
     try:
         _fs_cached_read.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _fs_cached_app_settings.clear()  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29
     except Exception:  # noqa: BLE001
         pass
     # PADEL_ANALYSIS_FS_CACHE_PREFETCH_2026-09-29
@@ -497,6 +546,14 @@ def _install_firestore_read_cache() -> None:
             setattr(fb, naam, _make_cached_reader(naam, origineel))
         except Exception:  # noqa: BLE001
             _FS_ORIGINALS.pop(naam, None)
+    # 1b) PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: get_app_settings() (zonder argumenten)
+    settings_fn = getattr(fb, "get_app_settings", None)
+    if callable(settings_fn) and not getattr(settings_fn, "_fs_cached", False):
+        try:
+            _FS_SETTINGS_ORIGINAL["fn"] = settings_fn
+            fb.get_app_settings = _make_cached_settings_reader(settings_fn)
+        except Exception:  # noqa: BLE001
+            _FS_SETTINGS_ORIGINAL.pop("fn", None)
     # 2) schrijf-functies laten invalideren
     for naam in dir(fb):
         if not naam.startswith(_FIRESTORE_WRITE_PREFIXES):
@@ -841,7 +898,7 @@ def _clean_name(text: Optional[str]) -> str:
 # "Ploeg opnieuw ophalen"-knop in page_lineup_lab.py deze cache mee legen,
 # zodat een net toegevoegde/ontdekte speler niet tot 5 minuten onzichtbaar
 # blijft na een expliciete ververs-actie.
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _get_all_profiles_cached() -> list:
     try:
         docs = fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).stream()

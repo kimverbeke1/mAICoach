@@ -177,6 +177,18 @@ Veiligheid:
   - Elke Firestore-fout valt stil terug op live ophalen (oud gedrag).
   - Wordt ook gebruikt als de scrapers in GitHub Actions scout_opponent()
     aanroepen: die vullen de cache dan mee, wat de app enkel sneller maakt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim, koude-start-meting)
+--------------------------------------------------------------------------
+GEMETEN: _merge_full_opponent_roster en _recent_own_lineup_roster deden elk
+3x "Firestore: get_player" NA ELKAAR (samen ~1.9s). Dat is
+_known_matches_total() hieronder, EEN keer per nieuw gevonden speler.
+FIX: vlak voor die lus worden de ontbrekende get_player-reads in EEN
+parallelle batch in de gedeelde leescache van de app gezet
+(fb._fs_prefetch, dashboard_common.py). De lus zelf is ongewijzigd en leest
+daarna uit die cache. Buiten de app (GitHub Actions) bestaat
+fb._fs_prefetch niet en gebeurt er niets - exact het oude gedrag.
+Bijkomend: _KNOWN_MATCHES_CACHE_TTL 5 -> 30 minuten, in lijn met de rest.
 """
 import hashlib
 import re
@@ -199,7 +211,7 @@ import schedule_scraper as ss  # noqa: E402
 MIN_PLAYERS_DEFAULT = 4
 MAX_LOOKBACK_DEFAULT = 4
 SCOUT_FETCH_MAX_WORKERS_DEFAULT = 4
-_KNOWN_MATCHES_CACHE_TTL = 300
+_KNOWN_MATCHES_CACHE_TTL = 1800  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 _known_matches_cache: dict[str, tuple[float, int]] = {}
 _known_matches_cache_lock = threading.Lock()
 
@@ -417,6 +429,30 @@ def _known_matches_total(player_id: str) -> int:
     with _known_matches_cache_lock:
         _known_matches_cache[player_id] = (now, result)
     return result
+
+
+def _prefetch_known_matches(player_ids: list) -> None:
+    """PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: leest get_player parallel voor voor de spelers waarvoor
+    _known_matches_total() nog geen geldige waarde heeft. Enkel actief in de
+    Streamlit-app (fb._fs_prefetch); faalt altijd stil."""
+    prefetch = getattr(fb, "_fs_prefetch", None)
+    if not callable(prefetch) or not player_ids:
+        return
+    now = time.time()
+    with _known_matches_cache_lock:
+        ontbrekend = [
+            pid for pid in player_ids
+            if not (
+                (entry := _known_matches_cache.get(pid)) is not None
+                and (now - entry[0]) < _KNOWN_MATCHES_CACHE_TTL
+            )
+        ]
+    if not ontbrekend:
+        return
+    try:
+        prefetch(("get_player",), ontbrekend)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def clear_known_matches_cache() -> None:
@@ -664,6 +700,7 @@ def scout_opponent(
 
     appearances = agg.get("appearances", {})
     names = agg.get("names", {})
+    _prefetch_known_matches(list(names))  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29
     unique_players = []
     for uid, naam in names.items():
         unique_players.append({

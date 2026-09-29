@@ -62,6 +62,14 @@ NOG NIET OPGELOST (volgende ronde, lineup_lab.py nodig): de EERSTE keer
 Partners openen kost nog steeds ~19s, omdat ll.get_docs_for_players() de
 documenten EEN VOOR EEN ophaalt. Een batch-read (Firestore get_all) of
 parallelle reads zouden dat naar ~1-2s brengen.
+(Intussen opgelost: lineup_lab.get_docs_for_players() leest parallel -
+gemeten 3.2s voor 64 spelers bij een koude start.)
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim: "TTL van 30 minuten is ok")
+--------------------------------------------------------------------------
+_cached_partner_docs: TTL 5 -> 30 minuten. De eerste keer Partners openen
+(3.2s) wordt dus pas na 30 minuten inactiviteit opnieuw betaald i.p.v. na 5.
+De refresh-knoppen hierboven wissen deze cache nog altijd meteen.
 """
 import datetime as _datetime_module
 import streamlit as st
@@ -78,7 +86,7 @@ from dashboard_common import (
 _SECTIONS = ["Overzicht", "Match Explorer", "Partners", "Tegenstanders", "\U0001F4C8 Klassement", "Debug"]
 
 
-@st.cache_data(ttl=300, show_spinner="Partnergegevens ophalen (eenmalig)...")
+@st.cache_data(ttl=1800, show_spinner="Partnergegevens ophalen (eenmalig)...")  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
 def _cached_partner_docs(player_ids: tuple):
     """Gecachete wrapper rond ll.get_docs_for_players() voor de sectie
     Partners. Sleutel = gesorteerde tuple van ids, zodat elke speler

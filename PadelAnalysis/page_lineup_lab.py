@@ -64,6 +64,14 @@ Bijkomend, in dezelfde lijn:
      lineup_scout.py (PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28).
   3. De "Ploeg opnieuw ophalen"-knop wist nu ook die memo, zodat een
      bewuste verversing overal doorwerkt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim, koude-start-meting)
+--------------------------------------------------------------------------
+_render_opstelling_scenario() leest nu, zodra de beschikbare eigen spelers
+gekend zijn, hun profiel/playing strength/spelersdocument in EEN
+parallelle batch voor (lineup_scout.prefetch_own_player_reads), VOOR het
+officieel klassement en de player_ratings. Meetpunt: "eigen spelers:
+parallel voorophalen". Gemeten winst verwacht: ~1s bij een koude start.
 """
 
 import streamlit as st
@@ -79,6 +87,7 @@ from lineup_scout import (
     _opponent_padelstat_ratings, _cached_docs_for_players,
     _cached_own_player_rating, _clear_rank_caches, _load_encounter_index,
     _known_ranking_context, clear_known_ranking_context_cache,
+    prefetch_own_player_reads,  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29
 )
 from lineup_rules import _render_tournament_rules_selector
 from lineup_opponent_history import (
@@ -258,6 +267,10 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         return
 
     available_ids = [own_label_to_id[lbl] for lbl in available_labels]
+
+    # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: alle per-speler-reads in 1 parallelle batch.
+    with perf.step("eigen spelers: parallel voorophalen"):
+        prefetch_own_player_reads(available_ids)
 
     official_ranks_for_suggestion = _build_own_official_ranks_strict(available_ids)
     tournament_rules_dict, rules_label = _render_tournament_rules_selector(
