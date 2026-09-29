@@ -50,6 +50,26 @@ osc.shared_fetch_cache_key(ploeg_id) - EXACT dezelfde sleutel die
 lineup_scout._scout_team_all_fixtures() nu ook gebruikt (zie dat bestand),
 zodat beide aanroepen voor dezelfde tegenploeg hun opgehaalde fixtures
 DELEN i.p.v. dubbel te fetchen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29 (op verzoek van Kim:
+"opstelling analyse zou wel moeten blijven staan als je wisselt van pagina",
+en meting: render_scout_header 5.3-5.8s eigen tijd)
+--------------------------------------------------------------------------
+ROOT CAUSE: het scout-resultaat stond ENKEL in st.session_state[scout_key].
+Na F5 of een nieuwe sessie was het weg: de analyse verdween en na een nieuwe
+klik werden alle uitslagenbladen opnieuw live opgehaald.
+FIX:
+  - render_scout_header() haalt een ontbrekend resultaat eerst op via
+    osc.get_saved_scout_bundle(scout_key) (proces-geheugen, anders
+    Firestore). De analyse staat dus meteen terug, zonder klik en zonder
+    live fetch. Er wordt dan ook GEEN padelstat-workflow gestart - dat
+    gebeurt enkel bij een bewuste klik op "Tegenstander analyseren".
+  - Na een klik wordt het nieuwe resultaat met osc.save_scout_bundle()
+    bewaard.
+  - _run_scout_and_scrape() gebruikt de proces-brede fetch-cache
+    osc.get_shared_fetch_cache() i.p.v. een sessie-dict.
+  - Een caption toont wanneer de getoonde analyse uit het geheugen komt;
+    "Tegenstander analyseren" blijft beschikbaar om bewust te herberekenen.
 """
 from __future__ import annotations
 import time
@@ -346,9 +366,8 @@ def _run_scout_and_scrape(
     hergebruiken i.p.v. ze opnieuw te fetchen."""
     with st.status("Tegenstander analyseren...", expanded=True) as status:
         st.write("Vorige wedstrijd(en) van de tegenstander opzoeken...")
-        shared_cache = st.session_state.setdefault(
-            osc.shared_fetch_cache_key(str(opp["ploeg_id"])), {}
-        )
+        # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: proces-breed.
+        shared_cache = osc.get_shared_fetch_cache(str(opp["ploeg_id"]))
         bundle = osc.scout_opponent(
             fixtures,
             opp["name"],
@@ -593,7 +612,21 @@ def render_scout_header(
                 fixtures, opp, next_match, lookback,
                 auto_scrape=can_scrape, fetch_klassement=fetch_klassement,
             )
+            st.session_state.pop(f"{scout_key}_restored", None)
+            osc.save_scout_bundle(scout_key, st.session_state[scout_key])
+    # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: na F5/nieuwe
+    # sessie het eerder bewaarde resultaat terugzetten i.p.v. te verdwijnen.
+    if scout_key not in st.session_state:
+        restored = osc.get_saved_scout_bundle(scout_key)
+        if restored:
+            st.session_state[scout_key] = restored
+            st.session_state[f"{scout_key}_restored"] = True
     bundle = st.session_state.get(scout_key)
+    if bundle and st.session_state.get(f"{scout_key}_restored"):
+        st.caption(
+            "ℹ️ Eerder berekende analyse voor deze match teruggezet. Klik op "
+            "'🔍 Tegenstander analyseren' om ze opnieuw te berekenen."
+        )
     with col_refresh:
         if bundle and bundle.get("unique_players") and can_scrape:
             if st.button(

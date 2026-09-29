@@ -120,6 +120,34 @@ lineup_scout.py) gebruiken om in st.session_state naar DEZELFDE gedeelde
 cache-dict te verwijzen - hier centraal gedefinieerd (i.p.v. de sleutel-
 string op 2 plekken te dupliceren) om een mismatch/tikfout tussen beide
 aanroepers onmogelijk te maken.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29 (op verzoek van Kim, na
+meting: "osu.render_scout_header" 5.3-5.8s eigen tijd, "_merge_full_
+opponent_roster" 3.2s, "_recent_own_lineup_roster" 3.6s - telkens opnieuw
+na F5 of een nieuwe sessie)
+--------------------------------------------------------------------------
+ROOT CAUSE: de gedeelde fetch-cache van hierboven leefde in st.session_state
+- dus PER SESSIE. Een F5 of een nieuw tabblad is voor Streamlit een nieuwe
+sessie: alle uitslagenbladen werden dan opnieuw live opgehaald (~1-2s per
+blad), voor de tegenploeg EN voor de eigen ploeg. Die bladen gaan over al
+GESPEELDE wedstrijden en veranderen in de praktijk niet meer.
+FIX:
+  - get_shared_fetch_cache(ploeg_id): een PROCES-BREDE cache (module-
+    niveau, net als _known_matches_cache), die over sessies, F5 en
+    paginawissels heen blijft bestaan tot een herstart van de app. TTL 12u
+    per ploeg.
+  - scout_opponent() bewaart in die cache ENKEL geslaagde resultaten met
+    minstens 1 bord. Een fout of een (nog) leeg uitslagenblad wordt dus
+    NIET onthouden en bij de volgende poging gewoon opnieuw opgehaald.
+  - get_saved_scout_bundle()/save_scout_bundle(): het volledige
+    scout-resultaat (de tegenstander-analyse) wordt proces-breed onthouden
+    en daarnaast in Firestore (collectie SCOUT_BUNDLES_COLLECTION)
+    weggeschreven. Zo blijft de analyse staan na F5, na een paginawissel en
+    zelfs na een herstart/deploy van de app - zonder opnieuw op
+    "Tegenstander analyseren" te moeten klikken. De sleutel bevat de datum
+    van de volgende match: zodra die gespeeld is, hoort er vanzelf een
+    nieuwe analyse bij.
+Dit bestand blijft vrij van Streamlit-afhankelijkheden.
 """
 import re
 import sys
@@ -144,6 +172,100 @@ SCOUT_FETCH_MAX_WORKERS_DEFAULT = 4
 _KNOWN_MATCHES_CACHE_TTL = 300
 _known_matches_cache: dict[str, tuple[float, int]] = {}
 _known_matches_cache_lock = threading.Lock()
+
+
+# PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29 - zie moduledocstring
+SHARED_FETCH_TTL_SECONDS = 12 * 3600
+_shared_fetch_store: dict[str, tuple[float, dict]] = {}
+_shared_fetch_lock = threading.Lock()
+
+SCOUT_BUNDLES_COLLECTION = "scout_bundles"
+SCOUT_BUNDLE_TTL_SECONDS = 7 * 24 * 3600
+_scout_bundle_store: dict[str, tuple[float, dict]] = {}
+_scout_bundle_lock = threading.Lock()
+
+
+def get_shared_fetch_cache(opponent_ploeg_id: str) -> dict:
+    """Proces-brede fetch-cache voor 1 ploeg (zie moduledocstring). Geeft
+    altijd hetzelfde dict-object terug zolang de TTL niet verlopen is."""
+    key = str(opponent_ploeg_id)
+    now = time.time()
+    with _shared_fetch_lock:
+        entry = _shared_fetch_store.get(key)
+        if entry is None or (now - entry[0]) > SHARED_FETCH_TTL_SECONDS:
+            entry = (now, {})
+            _shared_fetch_store[key] = entry
+        return entry[1]
+
+
+def clear_shared_fetch_cache(opponent_ploeg_id: Optional[str] = None) -> None:
+    with _shared_fetch_lock:
+        if opponent_ploeg_id is None:
+            _shared_fetch_store.clear()
+        else:
+            _shared_fetch_store.pop(str(opponent_ploeg_id), None)
+
+
+def _cacheable_fetch_result(result: dict) -> bool:
+    """Enkel een geslaagd uitslagenblad MET borden mag onthouden worden."""
+    return bool(result) and not result.get("error") and bool(result.get("boards"))
+
+
+def _bundle_doc_id(bundle_key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(bundle_key))[:500]
+
+
+def get_saved_scout_bundle(bundle_key: str) -> Optional[dict]:
+    """Geeft een eerder bewaard scout-resultaat terug: eerst uit het
+    proces-geheugen, anders uit Firestore. None als niets (geldigs) gekend
+    is. Faalt altijd stil."""
+    now = time.time()
+    with _scout_bundle_lock:
+        entry = _scout_bundle_store.get(bundle_key)
+    if entry is not None and (now - entry[0]) <= SCOUT_BUNDLE_TTL_SECONDS:
+        return entry[1]
+    try:
+        doc = fb.db.collection(SCOUT_BUNDLES_COLLECTION).document(_bundle_doc_id(bundle_key)).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        saved_at = float(data.get("saved_at_epoch") or 0)
+        bundle = data.get("bundle")
+        if not isinstance(bundle, dict) or (now - saved_at) > SCOUT_BUNDLE_TTL_SECONDS:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    with _scout_bundle_lock:
+        _scout_bundle_store[bundle_key] = (saved_at, bundle)
+    return bundle
+
+
+def save_scout_bundle(bundle_key: str, bundle: Optional[dict]) -> None:
+    """Bewaart een scout-resultaat proces-breed EN in Firestore. Enkel een
+    resultaat met minstens 1 speler wordt bewaard. Faalt altijd stil."""
+    if not bundle or not bundle.get("unique_players"):
+        return
+    now = time.time()
+    with _scout_bundle_lock:
+        _scout_bundle_store[bundle_key] = (now, bundle)
+    try:
+        payload = {
+            "bundle_key": str(bundle_key),
+            "saved_at_epoch": now,
+            "bundle": fb.sanitize_for_firestore(bundle),
+        }
+        fb.db.collection(SCOUT_BUNDLES_COLLECTION).document(_bundle_doc_id(bundle_key)).set(payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def clear_saved_scout_bundle(bundle_key: str) -> None:
+    with _scout_bundle_lock:
+        _scout_bundle_store.pop(bundle_key, None)
+    try:
+        fb.db.collection(SCOUT_BUNDLES_COLLECTION).document(_bundle_doc_id(bundle_key)).delete()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def shared_fetch_cache_key(opponent_ploeg_id: str) -> str:
@@ -376,6 +498,7 @@ def scout_opponent(
     fixtures die een eerdere aanroep al ophaalde, NIET meer opnieuw fetcht.
     """
     fetched_cache = fetched_cache if fetched_cache is not None else {}
+    local_uncached: dict = {}
 
     def _scout_with_lookback(current_lookback: int):
         prev_fixtures = get_opponent_previous_fixtures(
@@ -383,12 +506,26 @@ def scout_opponent(
         )
         if not prev_fixtures:
             return prev_fixtures, [], {}
-        to_fetch = [fx for fx in prev_fixtures if _fixture_key(fx) not in fetched_cache]
+        to_fetch = [
+            fx for fx in prev_fixtures
+            if _fixture_key(fx) not in fetched_cache and _fixture_key(fx) not in local_uncached
+        ]
         if to_fetch:
-            fetched_cache.update(
-                _fetch_fixtures_parallel(to_fetch, opponent_name, opponent_ploeg_id, max_workers=max_workers)
-            )
-        results = [fetched_cache[_fixture_key(fx)] for fx in prev_fixtures]
+            nieuw = _fetch_fixtures_parallel(to_fetch, opponent_name, opponent_ploeg_id, max_workers=max_workers)
+            # PADEL_ANALYSIS_PROCESS_WIDE_SCOUT_CACHE_2026-09-29: enkel
+            # geslaagde bladen met borden in de (gedeelde) cache; fouten en
+            # lege bladen enkel lokaal, binnen deze ene aanroep.
+            for key, res in nieuw.items():
+                if _cacheable_fetch_result(res):
+                    fetched_cache[key] = res
+                else:
+                    local_uncached[key] = res
+        results = [
+            fetched_cache.get(_fixture_key(fx)) or local_uncached.get(_fixture_key(fx)) or {
+                "fixture": fx, "players": [], "boards": [], "error": "Niet opgehaald.",
+            }
+            for fx in prev_fixtures
+        ]
         appearances: dict[str, int] = {}
         names: dict[str, str] = {}
         for extracted in results:
