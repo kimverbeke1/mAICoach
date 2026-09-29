@@ -821,3 +821,22 @@ def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
         f"puntengrens per rotatie (**{lo}-{hi}**). De berekende punten per rotatie voor deze "
         f"spelers/dit scenario lagen tussen **{pmin:.0f}** en **{pmax:.0f}**."
     )
+
+
+# PADEL_ANALYSIS_HOTFIX_2026-09-29: ontbrekende functie toegevoegd, app lag plat
+# (ImportError: cannot import name 'prefetch_own_player_reads' from lineup_scout).
+_OWN_PLAYER_READS = ("get_player_profile", "get_padelstat_rating", "get_player")
+
+
+def prefetch_own_player_reads(player_ids) -> None:
+    """Leest de per-speler-reads voor de eigen spelers parallel voor in de
+    gedeelde leescache. Reeds gecachete spelers worden overgeslagen. Faalt
+    altijd stil."""
+    prefetch = getattr(fb, "_fs_prefetch", None)
+    ids = [str(p) for p in (player_ids or []) if p]
+    if not callable(prefetch) or not ids:
+        return
+    try:
+        prefetch(_OWN_PLAYER_READS, ids)
+    except Exception:  # noqa: BLE001
+        pass
