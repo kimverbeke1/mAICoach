@@ -174,9 +174,11 @@ _BASE_RULES = (
     "expliciet als onbetrouwbaar. Vermeld wat onbekend is in plaats van te verzinnen. "
     # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: formaat uit het reglement, zodat de AI niet over
     # dubbel 5/6 praat.
-    "Formaat van een ontmoeting (reglement najaarsinterclub): 2 rotaties van 2 "
-    "matchen, dus 4 matchen per ontmoeting; in elke rotatie spelen 2 dubbels "
-    "tegelijk en kan een speler maar in 1 van die 2 matchen staan."
+    # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: aantal rotaties verschilt per periode.
+    "Formaat van een ontmoeting (reglement): per rotatie spelen 2 dubbels "
+    "tegelijk en kan een speler maar in 1 van die 2 matchen staan; het aantal "
+    "rotaties hangt af van de periode (najaar 2, voorjaar 3). Leid het aantal "
+    "rotaties af uit het aantal matchen in de gegeven opties."
 )
 
 

@@ -20,6 +20,24 @@ de najaarsinterclub. De constanten hieronder zijn nu de ENIGE bron van
 waarheid; page_lineup_lab.py, lineup_sandbox.py en team_ai_advisor.py
 lezen ze hier. Bij een ander formaat (bv. een andere periode) volstaat het
 deze drie regels aan te passen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29 (op verzoek van Kim: "zorg dat je bij de opstelling
+aantal rotaties kan instellen. zal handig zijn voor in voorjaar waar het dan
+3 rotaties is")
+--------------------------------------------------------------------------
+ROTATIONS_PER_ENCOUNTER is nu enkel de STANDAARDWAARDE (najaar: 2). Het
+effectieve aantal rotaties wordt op de Opstelling-analyse-pagina gekozen
+(page_lineup_lab.py) en doorgegeven aan de matchup-tabel, de
+rotatieplanner en de sandbox. MATCHES_PER_ROTATION (2 matchen tegelijk per
+rotatie) blijft vast.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29 (op verzoek van Kim)
+--------------------------------------------------------------------------
+De rotatieplanner kiest per rotatie nu EXACT 2 koppels uit de beschikbare
+spelers, i.p.v. alle geselecteerde spelers in koppels te verdelen. Zie
+_generate_rotation_candidates() voor de details. De oude hulpfuncties
+(_count_perfect_matchings, _expand_tied_orderings) blijven staan maar
+worden door de planner niet meer gebruikt.
 """
 import itertools
 import streamlit as st
@@ -32,7 +50,10 @@ from lineup_scout import (
 # PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: zie lineup_lab.py voor de
 # volledige toelichting bij de kalibratie van de winkans-formule.
 # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: reglement najaarsinterclub = 2 rotaties x 2 matchen.
+# PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: standaardwaarde; instelbaar op de pagina (voorjaar: 3).
 ROTATIONS_PER_ENCOUNTER = 2
+ROTATIONS_MIN = 1
+ROTATIONS_MAX = 4
 MATCHES_PER_ROTATION = 2
 MATCHES_PER_ENCOUNTER = ROTATIONS_PER_ENCOUNTER * MATCHES_PER_ROTATION
 
@@ -534,71 +555,125 @@ def _expand_tied_orderings(
     return expanded
 
 
+def _rotation_boards_for(opponent_boards, rotation_number: int):
+    """PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29: geeft de tegenstander-borden voor DEZE rotatie
+    terug (precies MATCHES_PER_ROTATION stuks), of None als die niet gekend
+    zijn. Accepteert zowel enkel de borden van deze rotatie als de borden van
+    de volledige ontmoeting (dan wordt het juiste stuk eruit gesneden)."""
+    if not opponent_boards:
+        return None
+    boards = list(opponent_boards)
+    if len(boards) == MATCHES_PER_ROTATION:
+        return boards
+    offset = (int(rotation_number) - 1) * MATCHES_PER_ROTATION
+    stuk = boards[offset: offset + MATCHES_PER_ROTATION]
+    return stuk if len(stuk) == MATCHES_PER_ROTATION else None
+
+
 def _generate_rotation_candidates(
     available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
     max_results=10, tournament_rules_dict=None,
+    rotation_number: int = 1, player_budget: dict = None,
 ):
-    n = len(available_ids)
-    if n < 2 or n % 2 != 0:
+    """PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29 (op verzoek van Kim): kiest per rotatie EXACT
+    MATCHES_PER_ROTATION (=2) koppels uit de beschikbare spelers.
+
+    VOORHEEN deelde deze functie ALLE geselecteerde spelers in koppels in
+    (perfect matching over de hele selectie): bij 6 spelers dus 3 koppels,
+    terwijl een rotatie er maar 2 heeft - en een oneven aantal spelers
+    blokkeerde de planner volledig.
+
+    NU: elke combinatie van 4 spelers x elke manier om die in 2 koppels te
+    verdelen (3 per combinatie) is een kandidaat, zolang:
+      - geen van beide koppels al in een eerdere, bevestigde rotatie speelde
+        (excluded_pairs - reglement: een koppel speelt maar 1 keer samen);
+      - elke speler nog 'budget' heeft (player_budget: resterend aantal
+        matchen per speler, uit 'max. matchen per speler' min wat al
+        bevestigd is; None = geen beperking);
+      - de puntengrens van de gekozen afdeling gerespecteerd wordt.
+    De bordvolgorde (art. 6.6, sterkste duo op match 1, padelstat als
+    tiebreak, beide volgordes bij gelijkspel of onvolledig klassement) komt
+    uit _rotation_order_variants() - dezelfde regel als in de rest van de
+    app. Zijn de tegenstanders van deze rotatie gekend, dan wordt
+    gerangschikt op verwacht aantal gewonnen matchen; anders op synergie.
+
+    Geeft (kandidaten[:max_results], totaal_mogelijk, diagnostiek) terug -
+    hetzelfde contract als voorheen, zodat de UI ongewijzigd blijft."""
+    per_rot = MATCHES_PER_ROTATION
+    need = per_rot * 2
+    eligible = sorted({
+        str(p) for p in available_ids
+        if player_budget is None or (player_budget.get(str(p), 0) or 0) > 0
+    })
+    if len(eligible) < need:
         return [], 0, None
-    total_possible = _count_perfect_matchings(n)
-    top_n = min(max(total_possible, 1), _ROTATION_EXHAUSTIVE_LIMIT)
-    required = {pid: 1 for pid in available_ids}
+    rot_boards = _rotation_boards_for(opponent_boards, rotation_number)
+    padelstat = player_ratings or {}
+    excluded = {frozenset(str(x) for x in p) for p in (excluded_pairs or set())}
+
     results = []
-    diagnostics = None
-    if opponent_boards and player_ratings is not None:
-        raw, truncated, diagnostics = ll.optimize_lineup_vs_scenario(
-            available_ids, required, synergy_fn, opponent_boards, player_ratings,
-            player_official_ranks=official_ranks_strict, opponent_ratings=opponent_ratings,
-            top_n=top_n, candidate_pool=_ROTATION_EXHAUSTIVE_LIMIT,
-            tournament_rules_dict=tournament_rules_dict,
-        )
-        for option in raw:
-            pairs = [frozenset(a["our_pair"]) for a in option["assignment"]]
-            if any(p in excluded_pairs for p in pairs):
+    seen = set()
+    total_possible = 0
+    excluded_by_rules = 0
+    rotation_points_seen = []
+    for combo in itertools.combinations(eligible, need):
+        for matching in _all_perfect_matchings_generic(list(combo)):
+            if any(pair in excluded for pair in matching):
                 continue
-            results.append({
-                "expected_boards_won": option["expected_boards_won"],
-                "score": option["total_score"],
-                "ordered_pairs": pairs,
-                "assignment": option["assignment"],
-                "rotations": option.get("rotations"),
-            })
-    else:
-        raw, truncated = ll.optimize_lineup(available_ids, required, synergy_fn, top_n=top_n)
-        rotation_points_seen = []
-        excluded_by_rules = 0
-        for score, pairs in raw:
-            pairs_fs = [frozenset(p) for p in pairs]
-            if any(p in excluded_pairs for p in pairs_fs):
+            total_possible += 1
+            duo_a, duo_b = matching[0], matching[1]
+            variants = _rotation_order_variants(
+                duo_a, duo_b, official_ranks_strict, padelstat, rules=tournament_rules_dict,
+            )["variants"]
+            variants = [v for v in variants if v["is_regulation_compliant"] is not False]
+            if not variants:
                 continue
-            rotation_eval = ll.filter_and_order_lineup_by_rotations(pairs_fs, official_ranks_strict, rules=tournament_rules_dict)
-            for rot in rotation_eval["rotations"]:
-                if rot.get("total_points") is not None:
-                    rotation_points_seen.append(rot["total_points"])
-            if tournament_rules_dict is not None and not rotation_eval["all_valid"]:
+            if variants[0].get("total_points") is not None:
+                rotation_points_seen.append(variants[0]["total_points"])
+            if tournament_rules_dict is not None and not variants[0]["valid"]:
                 excluded_by_rules += 1
                 continue
-            results.append({
-                "expected_boards_won": None, "score": score,
-                "ordered_pairs": rotation_eval["ordered_pairs"], "assignment": None,
-                "rotations": rotation_eval["rotations"],
-            })
-        diagnostics = {
-            "candidates_total": len(raw),
-            "candidates_excluded_by_rules": excluded_by_rules,
-            "rotation_points_seen": rotation_points_seen,
-        }
-    padelstat_for_tiebreak = player_ratings or {}
-    results = _expand_tied_orderings(
-        results, official_ranks_strict, padelstat_for_tiebreak, tournament_rules_dict,
-        excluded_pairs, opponent_boards=opponent_boards, synergy_fn=synergy_fn,
-        player_ratings=player_ratings, opponent_ratings=opponent_ratings,
-    )
-    if len(results) > total_possible:
-        total_possible = len(results)
-    results.sort(key=lambda r: (-(r["expected_boards_won"] if r["expected_boards_won"] is not None else -1), -r["score"]))
+            for v in variants:
+                pairs = [frozenset(p) for p in v["ordered_pairs"]]
+                key = tuple(pairs)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rot_info = [{
+                    "total_points": v["total_points"], "valid": v["valid"],
+                    "reason": v["reason"], "swap_label": v.get("swap_label", ""),
+                    "is_regulation_compliant": v["is_regulation_compliant"],
+                    "rank_data_incomplete": v.get("rank_data_incomplete", False),
+                }]
+                if rot_boards and player_ratings is not None:
+                    computed = _compute_matchup(
+                        pairs, rot_boards, synergy_fn, player_ratings,
+                        official_ranks_strict, opponent_ratings or {},
+                    )
+                    results.append({
+                        "expected_boards_won": computed["expected_boards_won"],
+                        "score": computed["total_score"],
+                        "ordered_pairs": pairs,
+                        "assignment": computed["assignment"],
+                        "rotations": rot_info,
+                    })
+                else:
+                    score = sum(synergy_fn(*tuple(p)) for p in pairs)
+                    results.append({
+                        "expected_boards_won": None, "score": round(score, 3),
+                        "ordered_pairs": pairs, "assignment": None,
+                        "rotations": rot_info,
+                    })
+    results.sort(key=lambda r: (
+        -(r["expected_boards_won"] if r["expected_boards_won"] is not None else -1),
+        -r["score"],
+    ))
+    diagnostics = {
+        "candidates_total": total_possible,
+        "candidates_excluded_by_rules": excluded_by_rules,
+        "rotation_points_seen": rotation_points_seen,
+    }
     return results[:max_results], total_possible, diagnostics
 
 
@@ -660,7 +735,7 @@ def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
     report_for_ai=None, tournament_rules_dict=None, rules_label=None,
-    bundle=None, total_boards=None,
+    bundle=None, total_boards=None, max_per_player=None,
 ):
     """PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26: @st.fragment isoleert
     deze functie van een volledige pagina-rerun. Zie de oorspronkelijke
@@ -677,8 +752,10 @@ def _render_rotation_planner(
     )
     st.caption(_WIN_PROB_DISCLAIMER)
     _render_official_rank_warning(available_ids, official_ranks_strict, name_lookup_global)
-    if len(available_ids) < 2 or len(available_ids) % 2 != 0:
-        st.info("Selecteer een even aantal spelers om de rotatieplanner te gebruiken.")
+    # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29: per rotatie 2 koppels = 4 spelers nodig; een oneven
+    # aantal geselecteerde spelers is geen probleem meer.
+    if len(available_ids) < 2 * MATCHES_PER_ROTATION:
+        st.info(f"Selecteer minstens {2 * MATCHES_PER_ROTATION} spelers om de rotatieplanner te gebruiken.")
         return
     ploeg_id = opp["ploeg_id"]
     locked_key = f"rot_locked_v3_{ploeg_id}_{'_'.join(sorted(available_ids))}"
@@ -710,6 +787,28 @@ def _render_rotation_planner(
         st.markdown("---")
     excluded_pairs = {p for rot in locked_rotations for p in rot}
     next_rotation_num = len(locked_rotations) + 1
+    # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29: resterend aantal matchen per speler = 'max. matchen
+    # per speler' (instelling hierboven op de pagina) min wat al bevestigd is.
+    player_budget = None
+    if max_per_player:
+        gebruikt = {}
+        for rot in locked_rotations:
+            for pair in rot:
+                for pid in pair:
+                    gebruikt[str(pid)] = gebruikt.get(str(pid), 0) + 1
+        player_budget = {
+            str(pid): int(max_per_player.get(pid, 0) or 0) - gebruikt.get(str(pid), 0)
+            for pid in available_ids
+        }
+        opgebruikt = [
+            name_lookup_global.get(pid, pid) for pid in available_ids
+            if player_budget.get(str(pid), 0) <= 0
+        ]
+        if opgebruikt and locked_rotations:
+            st.caption(
+                "Niet meer beschikbaar in deze rotatie (max. aantal matchen bereikt): "
+                + ", ".join(opgebruikt) + "."
+            )
     borden_bevestigd = sum(len(rot) for rot in locked_rotations)
     if total_boards is not None and borden_bevestigd >= int(total_boards):
         st.success(
@@ -816,8 +915,8 @@ def _render_rotation_planner(
             elif gekozen_paren[0] or gekozen_paren[1]:
                 st.caption("Kies ook een koppel voor de andere match om de winkansen te herberekenen.")
     effective_opponent_boards = rotation_opponent_boards or opponent_boards
-    rot_cache_key = f"rot_candidates_v1_{ploeg_id}_{next_rotation_num}"
-    rot_sig_key = f"rot_candidates_sig_v1_{ploeg_id}_{next_rotation_num}"
+    rot_cache_key = f"rot_candidates_v2_{ploeg_id}_{next_rotation_num}"
+    rot_sig_key = f"rot_candidates_sig_v2_{ploeg_id}_{next_rotation_num}"
     rot_signature = (
         tuple(sorted(available_ids)),
         tuple(sorted(tuple(sorted(p)) for p in excluded_pairs)) if excluded_pairs else (),
@@ -829,6 +928,7 @@ def _render_rotation_planner(
             for b in (effective_opponent_boards or [])
         ),
         tuple(sorted(tournament_rules_dict.items())) if tournament_rules_dict else None,
+        tuple(sorted(player_budget.items())) if player_budget else None,
     )
     if st.session_state.get(rot_sig_key) != rot_signature:
         st.session_state[rot_cache_key] = _generate_rotation_candidates(
@@ -836,6 +936,7 @@ def _render_rotation_planner(
             opponent_boards=effective_opponent_boards, player_ratings=player_ratings,
             opponent_ratings=opponent_ratings, max_results=15,
             tournament_rules_dict=tournament_rules_dict,
+            rotation_number=next_rotation_num, player_budget=player_budget,
         )
         st.session_state[rot_sig_key] = rot_signature
     candidates, total_possible, rotation_diagnostics = st.session_state[rot_cache_key]

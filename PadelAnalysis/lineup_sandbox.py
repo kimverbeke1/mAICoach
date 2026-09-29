@@ -7,6 +7,9 @@ Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD.
 PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: het invoerveld "Aantal rotaties in de sandbox" is weg; het
 aantal rotaties komt uit het reglement (lineup_rotation.ROTATIONS_PER_ENCOUNTER).
+PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: het aantal rotaties komt nu van de instelling op de
+Opstelling-analyse-pagina (parameter n_rotations); zonder die parameter
+geldt de standaard ROTATIONS_PER_ENCOUNTER.
 """
 import streamlit as st
 from dashboard_common import ll, _parse_match_date
@@ -101,7 +104,7 @@ def _smart_prefill_sandbox_defaults(
 def _render_lineup_sandbox(
     bundle, opp, available_ids, name_lookup_global,
     player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
-    profiles=None, sel_player_id=None,
+    profiles=None, sel_player_id=None, n_rotations=None,
 ) -> None:
     """PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26: @st.fragment isoleert
     deze functie van een volledige pagina-rerun. Zie de oorspronkelijke
@@ -147,8 +150,8 @@ def _render_lineup_sandbox(
     opp_labels = [_opp_label(p) for p in unique_players]
     opp_label_to_player = {_opp_label(p): p for p in unique_players}
     ploeg_key = opp["ploeg_id"]
-    # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: vast volgens het reglement.
-    n_rotations = ROTATIONS_PER_ENCOUNTER
+    # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: van de pagina-instelling, anders de standaard.
+    n_rotations = int(n_rotations or ROTATIONS_PER_ENCOUNTER)
     _smart_prefill_sandbox_defaults(
         ploeg_key, available_ids, official_ranks_strict, name_lookup_global,
         n_rotations, label_fn=_speler_label,

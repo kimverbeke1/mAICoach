@@ -94,6 +94,17 @@ constanten in lineup_rotation.py (ROTATIONS_PER_ENCOUNTER x
 MATCHES_PER_ROTATION) en wordt als vaste tekst getoond. Wijken eerdere
 uitslagenbladen van deze tegenstander af, dan meldt een caption dat -
 zonder het formaat te wijzigen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29 (op verzoek van Kim: "zorg dat je bij de opstelling
+aantal rotaties kan instellen. zal handig zijn voor in voorjaar waar het dan
+3 rotaties is")
+--------------------------------------------------------------------------
+Het aantal rotaties is instelbaar (standaard ROTATIONS_PER_ENCOUNTER = 2,
+najaar; voorjaar = 3). De keuze wordt per sessie onthouden en geldt voor de
+matchup-tabel, de rotatieplanner en de sandbox. Het aantal matchen per
+rotatie blijft vast op 2. 'Max. matchen per speler' is begrensd op het
+aantal rotaties (een speler speelt per rotatie hoogstens 1 match) en wordt
+ook aan de rotatieplanner doorgegeven.
 """
 
 import streamlit as st
@@ -119,6 +130,7 @@ from lineup_rotation import (
     _render_rotation_planner, _WIN_PROB_DISCLAIMER,
     ROTATIONS_PER_ENCOUNTER, MATCHES_PER_ROTATION, MATCHES_PER_ENCOUNTER,  # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29
     _default_opponent_max_per_player,
+    ROTATIONS_MIN, ROTATIONS_MAX,  # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29
 )
 from lineup_matchup_table import _render_all_valid_matchups
 from lineup_sandbox import _render_lineup_sandbox
@@ -305,11 +317,21 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     )
 
     # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: formaat uit het reglement, niet geraden.
-    total_boards = MATCHES_PER_ENCOUNTER
-    st.caption(
-        f"Formaat volgens het reglement (najaarsinterclub): **{ROTATIONS_PER_ENCOUNTER} rotaties "
-        f"van {MATCHES_PER_ROTATION} matchen** = {total_boards} matchen per ontmoeting."
-    )
+    # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: aantal rotaties instelbaar (najaar 2, voorjaar 3).
+    c_rot, c_info = st.columns([1, 3])
+    with c_rot:
+        n_rotations = int(st.number_input(
+            "Aantal rotaties", min_value=ROTATIONS_MIN, max_value=ROTATIONS_MAX,
+            value=ROTATIONS_PER_ENCOUNTER, step=1, key="encounter_n_rotations",
+            help="Volgens het reglement: najaarsinterclub 2 rotaties, voorjaarsinterclub 3. "
+                 "Per rotatie worden altijd 2 matchen tegelijk gespeeld.",
+        ))
+    total_boards = n_rotations * MATCHES_PER_ROTATION
+    with c_info:
+        st.caption(
+            f"**{n_rotations} rotaties van {MATCHES_PER_ROTATION} matchen** = {total_boards} "
+            f"matchen per ontmoeting (standaard najaar: {ROTATIONS_PER_ENCOUNTER} rotaties)."
+        )
     afwijkend = sorted({
         len(fx.get("boards") or []) for fx in bundle.get("previous_fixtures", []) or []
         if fx.get("boards") and len(fx.get("boards")) != total_boards
@@ -321,6 +343,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "'vorige keer'-opstelling meegenomen, omdat ze niet in dit formaat passen."
         )
 
+    # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29: max. per speler = aantal rotaties.
     # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: de standaardverdeling telt nu EXACT op tot 2x het
     # aantal matchen (vroeger ceil(2*matchen/spelers) per speler, wat bij bv.
     # 6 spelers en 4 matchen 12 plaatsen gaf i.p.v. 8 en meteen de foutmelding
@@ -334,9 +357,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     for i, pid in enumerate(available_ids):
         with cols[i % len(cols)]:
             max_per_player[pid] = st.number_input(
-                name_lookup_global.get(pid, pid), min_value=0, max_value=ROTATIONS_PER_ENCOUNTER,
-                value=min(default_max_per_player.get(pid, 0), ROTATIONS_PER_ENCOUNTER), step=1,
-                key=f"scenario_max_v2_{pid}",
+                name_lookup_global.get(pid, pid), min_value=0, max_value=n_rotations,
+                value=min(default_max_per_player.get(pid, 0), n_rotations), step=1,
+                key=f"scenario_max_v3_{n_rotations}_{pid}",
             )
 
     total_slots = sum(max_per_player.values())
@@ -379,6 +402,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             opponent_ratings=opponent_ratings, report_for_ai=report,
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
             bundle=bundle, total_boards=total_boards,
+            max_per_player=max_per_player,  # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29
         )
 
     st.divider()
@@ -387,6 +411,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             bundle, opp, available_ids, name_lookup_global,
             player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
             profiles=profiles, sel_player_id=sel_player_id,
+            n_rotations=n_rotations,  # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29
         )
 
 
