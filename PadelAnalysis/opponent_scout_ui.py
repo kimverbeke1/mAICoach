@@ -90,18 +90,31 @@ ZICHTBAARHEID: render_scout_header() krijgt eigen meetpunten
 ("scout: ..."), zodat de volgende meting toont welk deel van de "eigen
 tijd" van render_scout_header echt overblijft - i.p.v. te raden.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29 (op verzoek van Kim, koude-start-meting)
+PADEL_ANALYSIS_LAZY_GLOBAL_DOCS_2026-09-29 (op verzoek van Kim: "bij
+opstelling analyse duurt de 1ste maal zo lang"; meting 2026-09-29T18-50:
+render 8.87s, zwaarste eigen tijd osu.prepare_team_docs 2.02s)
 --------------------------------------------------------------------------
-  1. prepare_team_docs() deed nog 3x "Firestore: get_player_profile" NA
-     ELKAAR (~0.6s): de voorophaal-stap in render_scout_header() kende enkel
-     de spelers van de laatste wedstrijd(en), niet de extra spelers die
-     page_lineup_lab._merge_full_opponent_roster() daarna toevoegt. Nu
-     wordt aan het begin van prepare_team_docs() opnieuw voorgelezen, voor
-     de VOLLEDIGE roster. Reeds gecachete spelers worden overgeslagen, dus
-     dit kost enkel iets voor de extra spelers.
-  2. TTL van _load_all_player_docs, _cached_is_known, _data_completeness en
-     _cached_docs_for_players: 5 -> 30 minuten. De bestaande
-     verversknoppen wissen deze caches nog altijd meteen.
+GEMETEN: prepare_team_docs() kostte 2.37s, waarvan maar 0.35s in de
+gemeten Firestore-reads. De overige 2.02s "eigen tijd" is
+_load_all_player_docs(): een stream van de VOLLEDIGE spelerscollectie
+(alle spelers, met al hun matchen) - niet via fb.get_..., dus onzichtbaar
+als aparte Firestore-stap. Gecachet voor 5 min, dus vooral de eerste load.
+ROOT CAUSE: die volledige collectie (global_docs) wordt ALTIJD geladen,
+maar enkel gebruikt bij een HERBOUW van het team-rapport
+(opponent_dossier.build_player_summary -> _current_rank_fallback, en dan
+nog enkel voor spelers zonder klassement). In dezelfde meting werd het
+rapport NIET herbouwd (geen "team report: HERBOUW"-stap): de 2s werden dus
+volledig voor niets betaald.
+FIX: prepare_team_docs() geeft global_docs nu terug als _LazyAllPlayerDocs:
+een alleen-lezen Mapping die de collectie pas laadt bij het EERSTE echte
+gebruik (lezen, itereren, len, bool, ...). Wordt het rapport niet
+herbouwd, dan wordt de collectie nooit geladen. Wordt het wel gebruikt,
+dan is het gedrag identiek aan voorheen - ook "if global_docs" laadt eerst,
+zodat een lege collectie nog altijd terugvalt op all_docs. Het laden zelf
+verschijnt nu als aparte stap "Firestore: alle spelersdocumenten
+(global_docs)" in het laadtijd-paneel.
+Hashing/pickling (bv. als het ooit aan een @st.cache_data-functie wordt
+meegegeven) levert een gewone, volledig geladen dict op.
 """
 from __future__ import annotations
 import time
@@ -170,7 +183,7 @@ def _prefetch_roster_reads(unique_players: list) -> None:
         pass
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _load_all_player_docs() -> dict:
     try:
         docs = fb.db.collection(fb.PLAYERS_COLLECTION).stream()
@@ -181,6 +194,60 @@ def _load_all_player_docs() -> dict:
 
 def load_all_player_docs() -> dict:
     return _load_all_player_docs()
+
+
+# PADEL_ANALYSIS_LAZY_GLOBAL_DOCS_2026-09-29 - zie moduledocstring.
+from collections.abc import Mapping as _Mapping
+
+
+class _LazyAllPlayerDocs(_Mapping):
+    """Alleen-lezen Mapping rond _load_all_player_docs(), die pas laadt bij
+    het eerste echte gebruik. Elke lees-operatie gaat via _data()."""
+
+    __slots__ = ("_cache",)
+
+    def __init__(self) -> None:
+        self._cache = None
+
+    def _data(self) -> dict:
+        if self._cache is None:
+            with _step("Firestore: alle spelersdocumenten (global_docs)"):
+                self._cache = _load_all_player_docs() or {}
+        return self._cache
+
+    def __getitem__(self, key):
+        return self._data()[key]
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def __bool__(self) -> bool:
+        return bool(self._data())
+
+    def __contains__(self, key) -> bool:
+        return key in self._data()
+
+    def get(self, key, default=None):
+        return self._data().get(key, default)
+
+    def keys(self):
+        return self._data().keys()
+
+    def values(self):
+        return self._data().values()
+
+    def items(self):
+        return self._data().items()
+
+    def __reduce__(self):
+        return (dict, (dict(self._data()),))
+
+    def __repr__(self) -> str:
+        status = "niet geladen" if self._cache is None else f"{len(self._cache)} spelers"
+        return f"<_LazyAllPlayerDocs {status}>"
 
 
 def _is_known(player_id: str) -> bool:
@@ -196,7 +263,7 @@ def _is_known(player_id: str) -> bool:
         return False
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_is_known(player_id: str) -> bool:
     return _is_known(player_id)
 
@@ -216,7 +283,7 @@ def _unknown_players(bundle: dict) -> list[dict]:
     ]
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _data_completeness(player_id: str) -> dict:
     doc, doc_ok = {}, True
     try:
@@ -735,7 +802,7 @@ def render_scout_header(
     return bundle, opp
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: 30 min (was 5)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_docs_for_players(player_ids: tuple) -> dict:
     try:
         return ll.get_docs_for_players(list(player_ids))
@@ -756,9 +823,6 @@ def prepare_team_docs(
     unique_players = bundle.get("unique_players", []) or []
     if not unique_players:
         return {}, {}
-    # PADEL_ANALYSIS_TTL30_PREFETCH_2026-09-29: volledige roster (incl. spelers die
-    # _merge_full_opponent_roster net toevoegde) in 1 parallelle batch.
-    _prefetch_roster_reads(unique_players)
     unknown_ids = {player["user_id"] for player in _unknown_players(bundle)}
     all_docs = _cached_docs_for_players(tuple(sorted(str(p["user_id"]) for p in unique_players)))
     if unknown_ids:
@@ -767,7 +831,9 @@ def prepare_team_docs(
             "knop '🔄 Ontbrekende gegevens ophalen' hierboven om dit (samen met klassement en "
             "playing strength) in 1 klik aan te vullen."
         )
-    global_docs = _load_all_player_docs()
+    # PADEL_ANALYSIS_LAZY_GLOBAL_DOCS_2026-09-29: pas laden bij echt gebruik
+    # (enkel bij een herbouw van het team-rapport) - zie moduledocstring.
+    global_docs = _LazyAllPlayerDocs()
     return all_docs, global_docs
 
 
