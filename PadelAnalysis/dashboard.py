@@ -45,6 +45,22 @@ kleine duplicatie (dashboard_common.py behoudt zijn EIGEN kopie voor het
 geval een ander bestand dashboard_common rechtstreeks importeert zonder
 via dashboard.py te lopen) - maar noodzakelijk om het kip-en-ei-probleem op
 te lossen.
+
+--------------------------------------------------------------------------
+PERF_TIMING_ROLLOUT_2026-09-29 (op verzoek van Kim: laadtijd-meting over de
+hele app)
+--------------------------------------------------------------------------
+  - De repo-root (mAICoach/) wordt nu OOK op sys.path gezet: perf_timing.py
+    is daarheen verhuisd, zodat mAICoach en PadelAnalysis dezelfde helper
+    delen. Via streamlit_app.py staat de root er al; dit is nodig voor
+    standalone `streamlit run PadelAnalysis/dashboard.py`.
+  - Gemeten stappen (zichtbaar onder "pagina: Padel Analysis" in het
+    paneel): de imports van dashboard_common + pagina-modules (duur enkel
+    bij de EERSTE run na een herstart - daarna zitten ze in sys.modules),
+    en de gekozen pagina als geheel ("Padel: <pagina>").
+  - Draait dit bestand standalone (zonder streamlit_app.py), dan doen
+    perf.reset()/perf.render_panel() hieronder het werk zelf; via
+    streamlit_app.py zijn het automatisch no-ops.
 """
 import sys
 from pathlib import Path
@@ -55,14 +71,42 @@ _ROOT = Path(__file__).parent
 for _p in [str(_ROOT), str(_ROOT / "scraper")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
+# PERF_TIMING_ROLLOUT_2026-09-29: repo-root ACHTERAAN toevoegen (append, niet
+# insert), zodat een module in PadelAnalysis/ nooit door een gelijknamige in
+# de root overschaduwd wordt. Enkel perf_timing.py staat bewust in de root.
+if str(_ROOT.parent) not in sys.path:
+    sys.path.append(str(_ROOT.parent))
 
 import streamlit as st
 
-import dashboard_common as dc  # zorgt (nogmaals, onschadelijk) voor dezelfde path-setup + alle gedeelde imports
-from page_add_player import page_add_player
-from page_lineup_lab import page_lineup_lab
-from page_my_profile import page_my_profile
-from page_players import page_players
+try:
+    import perf_timing as perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    class _PerfNoop:
+        @staticmethod
+        def reset():
+            pass
+
+        @staticmethod
+        def render_panel(**_kwargs):
+            pass
+
+        @staticmethod
+        def step(_label):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    perf = _PerfNoop()
+
+# No-op via streamlit_app.py (centraal beheerd); actief bij standalone gebruik.
+perf.reset()
+
+with perf.step("Padel: imports (dashboard_common + pagina-modules)"):
+    import dashboard_common as dc  # zorgt (nogmaals, onschadelijk) voor dezelfde path-setup + alle gedeelde imports
+    from page_add_player import page_add_player
+    from page_lineup_lab import page_lineup_lab
+    from page_my_profile import page_my_profile
+    from page_players import page_players
 
 try:
     st.set_page_config(page_title="Padel Analysis", page_icon="🎾", layout="wide", initial_sidebar_state="collapsed")
@@ -112,11 +156,15 @@ page = st.session_state["page"]
 # ─────────────────────────────────────────────
 # RENDER
 # ─────────────────────────────────────────────
-if page == "➕ Speler toevoegen":
-    page_add_player()
-elif page == "🧩 Opstelling-analyse":
-    page_lineup_lab()
-elif page == "👤 Mijn profiel":
-    page_my_profile()
-else:
-    page_players()
+with perf.step(f"Padel: {page}"):
+    if page == "➕ Speler toevoegen":
+        page_add_player()
+    elif page == "🧩 Opstelling-analyse":
+        page_lineup_lab()
+    elif page == "👤 Mijn profiel":
+        page_my_profile()
+    else:
+        page_players()
+
+# PERF_TIMING_ROLLOUT_2026-09-29: enkel actief bij standalone gebruik.
+perf.render_panel()

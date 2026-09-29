@@ -116,6 +116,33 @@ FIX, twee onderdelen:
      had (nooit een reeds bestaande, mogelijk bewust andere club
      overschrijven) - net als de analoge club-override-logica in
      refresh_padelstat_only.py/enrich_opponents.py.
+
+--------------------------------------------------------------------------
+PERF_TIMING_ROLLOUT_2026-09-29 (op verzoek van Kim: laadtijd-meting over de
+hele app)
+--------------------------------------------------------------------------
+Dit bestand is de gedeelde laag onder ALLE PadelAnalysis-pagina's, dus hier
+meten levert het meeste inzicht per regel code op:
+  1. FIRESTORE-AANROEPEN (belangrijkste): de lees-functies van
+     firebase_service (get_player_profile, get_player, get_app_settings, ...)
+     worden EEN keer, bij de import van deze module, omwikkeld met een
+     timing-stap "Firestore: <naam>". In het paneel verschijnt zo in de
+     tabel "Opgeteld per stapnaam" hoe VAAK elke Firestore-read per render
+     gebeurt en hoeveel tijd dat samen kost - ongeacht vanuit welke pagina
+     of module de aanroep komt. Aanleiding: in de eerste meting kostten
+     _get_saved_schedule() en _get_saved_poule_url() elk ~0.2s, terwijl ze
+     allebei hetzelfde profieldocument lezen.
+     Veiligheid: enkel binnen het Streamlit-proces (de scrapers in GitHub
+     Actions importeren dit bestand niet), idempotent (dubbel omwikkelen
+     wordt voorkomen), en een fout bij het omwikkelen laat de originele
+     functie gewoon staan.
+  2. De gedeelde helpers die zelf Firestore lezen of zwaar renderen krijgen
+     @_timed(...). BEWUST NIET op @st.cache_data-functies (bv.
+     _load_poule_fixtures, _get_all_profiles_cached): elders wordt daar
+     .clear() op aangeroepen, en een wrapper zou die verbergen. De
+     niet-gecachete aanroeper (_get_all_profiles) wordt wel gemeten.
+  3. De repo-root wordt op sys.path gezet (append), omdat perf_timing.py
+     daar nu staat - zie dashboard.py.
 """
 import re
 import sys
@@ -130,6 +157,10 @@ _ROOT = Path(__file__).parent
 for _p in [str(_ROOT), str(_ROOT / "scraper")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
+# PERF_TIMING_ROLLOUT_2026-09-29: repo-root achteraan (append) voor
+# perf_timing.py - zie dashboard.py voor de reden van append i.p.v. insert.
+if str(_ROOT.parent) not in sys.path:
+    sys.path.append(str(_ROOT.parent))
 import firebase_service as fb
 import lineup_lab as ll
 import schedule_scraper as ss
@@ -144,6 +175,54 @@ try:
 except Exception:  # pragma: no cover - AI-veld is optioneel, rest blijft werken
     taa = None
 from cloud_helpers import is_scraping_available, render_cloud_scrape_trigger
+
+# ─────────────────────────────────────────────
+# PERF_TIMING_ROLLOUT_2026-09-29 - zie moduledocstring
+# ─────────────────────────────────────────────
+try:
+    import perf_timing as _perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    _perf = None
+
+
+def _timed(label: str):
+    """Decorator die veilig terugvalt op 'niets doen' als perf_timing
+    ontbreekt. NIET gebruiken op @st.cache_data-functies (zie docstring)."""
+    if _perf is None:
+        return lambda fn: fn
+    return _perf.timed(label)
+
+
+# Lees-functies van firebase_service die per render herhaaldelijk kunnen
+# lopen. Namen die niet bestaan worden stil overgeslagen.
+_FIRESTORE_READS_TO_TIME = (
+    "get_player_profile",
+    "get_player",
+    "get_app_settings",
+    "get_padelstat_rating",
+    "get_official_klassement_via_padelstat",
+    "list_lineup_analyses",
+)
+
+
+def _instrument_firestore_reads() -> None:
+    if _perf is None or getattr(fb, "_perf_instrumented", False):
+        return
+    for naam in _FIRESTORE_READS_TO_TIME:
+        origineel = getattr(fb, naam, None)
+        if not callable(origineel):
+            continue
+        try:
+            setattr(fb, naam, _perf.timed(f"Firestore: {naam}")(origineel))
+        except Exception:  # noqa: BLE001 - timing mag nooit de app breken
+            pass
+    try:
+        fb._perf_instrumented = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_instrument_firestore_reads()
 # ─────────────────────────────────────────────
 # Datum-/tekst-helpers
 # ─────────────────────────────────────────────
@@ -324,6 +403,7 @@ def _summarize_opponents(df: pd.DataFrame) -> pd.DataFrame:
     g["_wr_num"] = g["wins"] / known.replace(0, 1)
     result = g.sort_values(["_wr_num", "matches"], ascending=[False, False]).drop(columns=["_wr_num"])
     return result
+@_timed("_render_table (tabel + speleracties)")
 def _render_table(df: pd.DataFrame, name_col: str, height=400):
     if df.empty:
         st.info("Geen data beschikbaar.")
@@ -377,6 +457,7 @@ def _load_poule_fixtures(reeks_url: str):
         return fixtures, None
     except Exception as e:
         return [], str(e)
+@_timed("_load_poule_schedule_robust")
 def _load_poule_schedule_robust(player_id: str, reeks_url: str):
     """PADEL_ANALYSIS_LINEUP_LOAD_PERSIST_FIX_2026-09-16.
     Robuuste, persisterende manier om het wedstrijdschema van een speler op
@@ -464,6 +545,7 @@ def _get_all_profiles_cached() -> list:
         return []
 
 
+@_timed("_get_all_profiles")
 def _get_all_profiles() -> list:
     """PADEL_ANALYSIS_GHOST_PROFILE_FILTER_2026-09-12:
     Filtert documenten zonder display_name/player_id uit de Spelers-lijst.
@@ -484,6 +566,7 @@ def clear_all_profiles_cache() -> None:
         _get_all_profiles_cached.clear()
     except Exception:
         pass
+@_timed("_get_saved_poule_url")
 def _get_saved_poule_url(player_id: str) -> Optional[str]:
     try:
         prof = fb.get_player_profile(player_id) or {}
@@ -497,6 +580,7 @@ def _save_poule_url(player_id: str, url: str) -> None:
         )
     except Exception:
         pass
+@_timed("_get_saved_schedule")
 def _get_saved_schedule(player_id: str):
     try:
         prof = fb.get_player_profile(player_id) or {}
@@ -568,6 +652,7 @@ def _official_rank_from_padelstat_snapshot(player_id) -> Optional[float]:
             pass
     return None
 
+@_timed("_official_current_rank")
 def _official_current_rank(player_id: str) -> Optional[float]:
     """PADEL_ANALYSIS_MATCH1_STRONGEST_RULE_2026-09-14:
     Geeft het OFFICIËLE, HUIDIGE TVL-klassement terug voor een eigen speler -
@@ -613,6 +698,7 @@ def _official_current_rank(player_id: str) -> Optional[float]:
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_HISTORY_SNAPSHOT_ALIGN_2026-09-24
 # ─────────────────────────────────────────────
+@_timed("_virtual_rank")
 def _virtual_rank(player_id: str, official: Optional[float]) -> Optional[int]:
     """Het VIRTUELE klassement van deze speler: TVL's voorspelling voor de
     eerstvolgende officiele berekening.
@@ -656,6 +742,7 @@ def _virtual_rank(player_id: str, official: Optional[float]) -> Optional[int]:
         return int(virtueel)
     return None
 
+@_timed("_render_player_ranking_summary")
 def _render_player_ranking_summary(player_id: str) -> None:
     """PADEL_ANALYSIS_PLAYER_RANKING_SUMMARY_2026-09-16 (op verzoek van Kim):
     Toont het officiële TVL-klassement en de padelstats.be playing strength
@@ -734,6 +821,7 @@ def _strip_team_letter_suffix(text: str) -> str:
     EIGEN speler) - bewust hier gedupliceerd i.p.v. geïmporteerd, zodat dit
     UI-bestand geen afhankelijkheid van de Playwright-scraper-map krijgt."""
     return _TEAM_LETTER_SUFFIX_RE.sub("", (text or "").strip()).strip()
+@_timed("_get_club")
 def _get_club(player_id: str) -> Optional[str]:
     """Geeft de huidige, opgeslagen club/ploeg van deze speler terug (of
     None als nog niet ingesteld)."""

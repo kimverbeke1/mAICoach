@@ -24,6 +24,45 @@ from AICoach.dashboard.ui_helpers import (
 )
 from AICoach.persistent_data import gcs_status, mirror_all_to_local
 from AICoach.saved_insights import render_saved_insights, save_insight
+
+# --------------------------------------------------------------------------- #
+# PERF_TIMING_ROLLOUT_2026-09-29 (op verzoek van Kim: laadtijd-meting over de
+# hele app, ook mAICoach)
+#
+# perf_timing.py staat in de repo-root (PROJECT_ROOT hierboven staat al op
+# sys.path) en wordt gedeeld met PadelAnalysis. Gemeten stappen verschijnen
+# in het paneel "Laadtijd-analyse (debug)" onderaan de pagina, onder
+# "pagina: mAICoach".
+#
+# BELANGRIJK om de cijfers te lezen: render_health_app() gebruikt st.tabs.
+# Streamlit voert de inhoud van ELKE tab uit bij elke run - ook van tabs die
+# je niet bekijkt. Elke tab heeft hieronder dus een eigen stap
+# ("AICoach tab: ..."): zo zie je precies wat onzichtbare tabs kosten. Dat is
+# hetzelfde patroon dat bij PadelAnalysis (Opstelling-analyse) een groot
+# deel van de laadtijd bleek te zijn.
+#
+# build_context() wordt zowel in render_health_app() als in
+# render_dashboard() aangeroepen, onder DEZELFDE stapnaam - de tabel
+# "Opgeteld per stapnaam" laat zien of die dubbele aanroep iets kost.
+# --------------------------------------------------------------------------- #
+try:
+    import perf_timing as perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    class _PerfNoop:
+        @staticmethod
+        def reset():
+            pass
+
+        @staticmethod
+        def render_panel(**_kwargs):
+            pass
+
+        @staticmethod
+        def step(_label):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    perf = _PerfNoop()
 def _inject_css() -> None:
     st.markdown(
         """
@@ -163,9 +202,12 @@ def _refresh_local_data_from_storage() -> None:
             st.session_state.pop("data_refresh_warning", None)
     st.session_state["_data_mirror_last_refreshed_at"] = now
 def render_dashboard():
-    df = load_history()
-    context = build_context()
-    render_daily_update()
+    with perf.step("AICoach: load_history"):
+        df = load_history()
+    with perf.step("AICoach: build_context"):
+        context = build_context()
+    with perf.step("AICoach: render_daily_update"):
+        render_daily_update()
     st.divider()
     if df.empty:
         st.warning("Geen trainingshistoriek gevonden.")
@@ -184,27 +226,29 @@ def render_dashboard():
         st.session_state.dashboard_selected_date = latest_date
     selected_row = nearest_row(view, selected_date)
     render_selected_values(selected_row, ["fitness", "fatigue", "form", "training_load", "resting_hr"])
-    event = render_time_chart(
-        view,
-        ["fitness", "fatigue", "form"],
-        key="dashboard_fitness_chart",
-        selected_date=selected_date,
-        title="Fitness, Fatigue en Form",
-        default_granularity="Dag",
-    )
+    with perf.step("AICoach: grafiek fitness/fatigue/form"):
+        event = render_time_chart(
+            view,
+            ["fitness", "fatigue", "form"],
+            key="dashboard_fitness_chart",
+            selected_date=selected_date,
+            title="Fitness, Fatigue en Form",
+            default_granularity="Dag",
+        )
     event_date = selected_date_from_event(event)
     if event_date is not None and event_date != selected_date:
         st.session_state.dashboard_selected_date = event_date
         st.rerun()
     if has_data(view, "training_load"):
-        render_time_chart(
-            view,
-            ["training_load"],
-            key="dashboard_load_chart",
-            selected_date=selected_date,
-            title="Training load",
-            default_granularity="Maand",
-        )
+        with perf.step("AICoach: grafiek training load"):
+            render_time_chart(
+                view,
+                ["training_load"],
+                key="dashboard_load_chart",
+                selected_date=selected_date,
+                title="Training load",
+                default_granularity="Maand",
+            )
 def render_chat():
     st.subheader("mAICoach")
     if "chat_history" not in st.session_state:
@@ -230,7 +274,8 @@ def render_chat():
             st.markdown(question)
         with st.chat_message("assistant"):
             with st.spinner("mAICoach analyseert je gegevens..."):
-                answer = handle_message(question)
+                with perf.step("AICoach: handle_message (AI-antwoord)"):
+                    answer = handle_message(question)
             render_assistant_answer(answer)
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
@@ -248,14 +293,19 @@ def render_health_app() -> None:
     voor waarom dit nodig was ("Laat AI meedenken..."-knop deed voorheen
     niets)."""
     reset_widget_key_counters()
+    # PERF_TIMING_ROLLOUT_2026-09-29: no-op via streamlit_app.py (daar wordt
+    # centraal gereset); actief bij standalone `streamlit run`.
+    perf.reset()
     try:
         st.set_page_config(page_title="mAICoach", page_icon="\U0001F3C3", layout="wide")
     except Exception:
         pass
     _inject_css()
     st.title("\U0001F3C3 mAICoach")
-    _refresh_local_data_from_storage()
-    context = build_context()
+    with perf.step("AICoach: GCS-spiegel (_refresh_local_data_from_storage)"):
+        _refresh_local_data_from_storage()
+    with perf.step("AICoach: build_context"):
+        context = build_context()
     st.caption(
         f"Actuele wellness: {context.get('current_date') or 'onbekend'} | "
         f"Laatste activiteit: {context.get('latest_activity', {}).get('date') or 'onbekend'}"
@@ -319,22 +369,33 @@ def render_health_app() -> None:
         tab_labels.append("Vergelijking")
     tabs = st.tabs(tab_labels)
     with tabs[0]:
-        render_dashboard()
+        with perf.step("AICoach tab: Dashboard"):
+            render_dashboard()
     with tabs[1]:
-        render_chat()
+        with perf.step("AICoach tab: AI Coach"):
+            render_chat()
     with tabs[2]:
-        render_recovery()
+        with perf.step("AICoach tab: Recovery"):
+            render_recovery()
     with tabs[3]:
-        render_knowledge()
-        st.divider()
-        render_saved_insights()
+        with perf.step("AICoach tab: Athlete Knowledge"):
+            render_knowledge()
+            st.divider()
+            render_saved_insights()
     with tabs[4]:
-        render_best_results()
+        with perf.step("AICoach tab: Beste resultaten"):
+            render_best_results()
     with tabs[5]:
-        render_activities()
+        with perf.step("AICoach tab: Activiteiten"):
+            render_activities()
     if comparison_active:
         with tabs[6]:
-            render_comparison_tab()
+            with perf.step("AICoach tab: Vergelijking"):
+                render_comparison_tab()
+
+    # PERF_TIMING_ROLLOUT_2026-09-29: no-op via streamlit_app.py (daar wordt
+    # het paneel centraal getekend); actief bij standalone `streamlit run`.
+    perf.render_panel()
 # Bouwt de pagina ALLEEN op wanneer dit bestand rechtstreeks wordt uitgevoerd
 # (bv. `streamlit run AICoach/dashboard/training_dashboard.py`). Bij een
 # `import` vanuit app.py (de gecombineerde app) blijft __name__ gelijk aan de
