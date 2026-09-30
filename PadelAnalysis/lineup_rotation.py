@@ -253,6 +253,30 @@ blijven ONGEWIJZIGD werken.
 Beide bouwstenen staan in een eigen "Snelkeuzes" / "Zelf samenstellen"-
 expander, VOOR de bestaande 3 kaarten - kiest de gebruiker niets in een van
 beide, dan werken de kaarten en de "geavanceerd"-lijst exact zoals voorheen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30 (op verzoek van Kim:
+"snelkeuze geeft TypeError [...] on_confirm(ordered_pairs, win_probs)" in
+_render_rotation_quick_presets() regel 740)
+--------------------------------------------------------------------------
+ECHTE BUG, bevestigd: `_bevestig_rotatie()` (in _render_rotation_planner())
+verwacht 3 argumenten (gekozen_pairs, opp_pairs_voor_log,
+win_probs_deze_rotatie). De kaarten-knop riep ze correct met 3 argumenten
+aan; de nieuwe _render_rotation_quick_presets() EN _render_custom_click_
+builder() riepen `on_confirm(ordered_pairs, win_probs)` aan met slechts 2 -
+`opp_pairs_voor_log` ontbrak, wat een TypeError gaf zodra een gebruiker een
+preset of een custom-combinatie effectief bevestigde. Een render zonder
+klik op "Kies"/"Bevestig" faalde niet, vandaar dat dit niet meteen opviel.
+FIX: `_render_rotation_planner()` geeft nu een kleine wrapper-closure
+`_on_confirm_2arg(ordered_pairs, win_probs)` door aan zowel
+_render_rotation_quick_presets() als _render_custom_click_builder() in
+plaats van rechtstreeks `_bevestig_rotatie` - deze wrapper vult
+`opp_pairs_voor_log` (al berekend, identiek aan wat de kaarten-knop
+gebruikt) automatisch aan en roept dan `_bevestig_rotatie()` met alle 3 de
+argumenten aan. De kaarten-knop blijft ONGEWIJZIGD rechtstreeks
+`_bevestig_rotatie()` met 3 argumenten aanroepen (die had immers al de
+juiste arity). Getest: beide nieuwe paden bevestigen nu zonder
+TypeError, met exact dezelfde locked_rotations/locked_opponents/locked_
+win_probs-boekhouding als de kaarten.
 """
 import itertools
 import streamlit as st
@@ -586,8 +610,6 @@ def _own_previous_encounters_as_presets(profiles: list, sel_player_id) -> list:
         return out
     except Exception:  # noqa: BLE001
         return []
-
-
 def _strongest_available_pairing(
     available_ids: list, player_ratings: dict, official_ranks_strict: dict, player_budget,
 ) -> list:
@@ -603,21 +625,15 @@ def _strongest_available_pairing(
     ]
     if len(eligible) < 4:
         return []
-
     def _sterkte(pid: str):
         if player_ratings and player_ratings.get(pid) is not None:
             return player_ratings[pid]
         return official_ranks_strict.get(pid) or 0
-
     eligible_sorted = sorted(eligible, key=_sterkte, reverse=True)
     top4 = eligible_sorted[:4]
     return [frozenset(top4[0:2]), frozenset(top4[2:4])]
-
-
 def _rotation_matches_format(rotation: list) -> bool:
     return len(rotation) == MATCHES_PER_ROTATION and all(len(p) == 2 for p in rotation)
-
-
 def _eligible_presets(
     raw_presets: list, available_ids: list, excluded_pairs: set, player_budget,
 ) -> tuple:
@@ -650,8 +666,6 @@ def _eligible_presets(
             continue
         geldig.append(preset)
     return geldig, overgeslagen
-
-
 def _render_rotation_quick_presets(
     profiles, sel_player_id, available_ids, synergy_fn, official_ranks_strict,
     player_ratings, opponent_ratings, effective_opponent_boards, excluded_pairs,
@@ -659,7 +673,9 @@ def _render_rotation_quick_presets(
 ) -> None:
     """PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 - zie
     moduledocstring. `on_confirm(ordered_pairs, win_probs)` is de
-    _bevestig_rotatie()-closure uit _render_rotation_planner()."""
+    2-argumenten-wrapper rond _bevestig_rotatie() uit
+    _render_rotation_planner() - zie PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_
+    FIX_2026-09-30."""
     raw_presets = []
     if profiles is not None and sel_player_id is not None:
         for encounter in _own_previous_encounters_as_presets(profiles, sel_player_id):
@@ -674,13 +690,10 @@ def _render_rotation_quick_presets(
     )
     if sterkste:
         raw_presets.append({"label": "Sterkste beschikbare (Elo)", "rotation": sterkste})
-
     if not raw_presets:
         st.caption("Nog geen snelkeuzes beschikbaar (geen eerdere eigen ontmoetingen gekend).")
         return
-
     geldig, overgeslagen = _eligible_presets(raw_presets, available_ids, excluded_pairs, player_budget)
-
     # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30: elke geldige
     # preset gaat nog door DEZELFDE reglement-check (sterkste-eerst +
     # puntengrens) als de rest van dit bestand - een preset die de
@@ -700,21 +713,18 @@ def _render_rotation_quick_presets(
             continue
         ordered = variants[0]["ordered_pairs"]
         bruikbaar.append({"label": preset["label"], "ordered_pairs": ordered})
-
     if not bruikbaar:
         st.info(
             "Geen enkele snelkeuze is momenteel bruikbaar (spelers niet beschikbaar, budget op, "
             "koppel al gebruikt, of de puntengrens van de gekozen afdeling laat het niet toe)."
         )
         return
-
     totaal_genegeerd = overgeslagen + afgewezen_door_regels
     if totaal_genegeerd:
         st.caption(
             f"{totaal_genegeerd} snelkeuze(s) niet getoond (speler niet beschikbaar/budget op/"
             "koppel al gebruikt/puntengrens)."
         )
-
     for i, preset in enumerate(bruikbaar):
         ordered_pairs = preset["ordered_pairs"]
         rot_boards = _rotation_boards_for(effective_opponent_boards, next_rotation_num)
@@ -738,8 +748,6 @@ def _render_rotation_quick_presets(
             use_container_width=True,
         ):
             on_confirm(ordered_pairs, win_probs)
-
-
 def _match1_eligible_players(candidates: list) -> list:
     """Alle speler-id's die in minstens 1 candidate als lid van
     ordered_pairs[0] (Match 1) voorkomen - dus: kan volgens de reeds
@@ -749,8 +757,6 @@ def _match1_eligible_players(candidates: list) -> list:
         if cand.get("ordered_pairs"):
             spelers |= set(cand["ordered_pairs"][0])
     return sorted(spelers)
-
-
 def _match1_partners_for(candidates: list, player_id: str) -> list:
     """Partners waarmee `player_id` SAMEN als ordered_pairs[0] (Match 1)
     voorkomt in minstens 1 candidate."""
@@ -762,8 +768,6 @@ def _match1_partners_for(candidates: list, player_id: str) -> list:
         if player_id in duo_a:
             partners |= (set(duo_a) - {player_id})
     return sorted(partners)
-
-
 def _match2_options_for_duo_a(candidates: list, duo_a: frozenset) -> list:
     """Unieke ordered_pairs[1]-koppels (Match 2) over alle candidates
     waarvan ordered_pairs[0] EXACT `duo_a` is."""
@@ -780,8 +784,6 @@ def _match2_options_for_duo_a(candidates: list, duo_a: frozenset) -> list:
         gezien.add(duo_b)
         opties.append(duo_b)
     return opties
-
-
 def _find_matching_candidate(candidates: list, duo_a: frozenset, duo_b: frozenset):
     """De candidate waarvan (ordered_pairs[0], ordered_pairs[1]) exact
     (duo_a, duo_b) is. Geeft None terug als er (onverwacht) geen match is -
@@ -795,19 +797,17 @@ def _find_matching_candidate(candidates: list, duo_a: frozenset, duo_b: frozense
         ):
             return cand
     return None
-
-
 def _render_custom_click_builder(
     candidates: list, name_lookup_global: dict, ploeg_id, next_rotation_num, on_confirm,
 ) -> None:
     """PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 - zie
     moduledocstring voor de volledige toelichting. Bouwt EEN rotatie op uit
     de reeds berekende, gevalideerde `candidates`-lijst, klik voor klik.
-    `on_confirm(ordered_pairs, win_probs)` is de _bevestig_rotatie()-
-    closure uit _render_rotation_planner()."""
+    `on_confirm(ordered_pairs, win_probs)` is de 2-argumenten-wrapper rond
+    _bevestig_rotatie() uit _render_rotation_planner() - zie
+    PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30."""
     geen_keuze = "- Kies -"
     kp = f"custom_{ploeg_id}_{next_rotation_num}"
-
     m1_opties = [geen_keuze] + [
         name_lookup_global.get(pid, pid) for pid in _match1_eligible_players(candidates)
     ]
@@ -819,7 +819,6 @@ def _render_custom_click_builder(
             st.session_state[key_m1p1] = geen_keuze
         lbl_m1p1 = st.selectbox("Match 1 - speler 1", m1_opties, key=key_m1p1)
     m1p1_id = label_to_id.get(lbl_m1p1) if lbl_m1p1 != geen_keuze else None
-
     with col2:
         if m1p1_id is not None:
             partner_ids = _match1_partners_for(candidates, m1p1_id)
@@ -833,9 +832,7 @@ def _render_custom_click_builder(
             st.session_state[key_m1p2] = geen_keuze
         lbl_m1p2 = st.selectbox("Match 1 - speler 2", m1p2_opties, key=key_m1p2)
     m1p2_id = partner_label_to_id.get(lbl_m1p2) if lbl_m1p2 != geen_keuze else None
-
     duo_a = frozenset({m1p1_id, m1p2_id}) if (m1p1_id and m1p2_id) else None
-
     col3, col4 = st.columns(2)
     duo_b_opties = _match2_options_for_duo_a(candidates, duo_a) if duo_a else []
     m2_spelers = sorted({pid for duo_b in duo_b_opties for pid in duo_b})
@@ -851,7 +848,6 @@ def _render_custom_click_builder(
             st.session_state[key_m2p1] = geen_keuze
         lbl_m2p1 = st.selectbox("Match 2 - speler 1", m2p1_opties, key=key_m2p1)
     m2p1_id = m2p1_label_to_id.get(lbl_m2p1) if lbl_m2p1 != geen_keuze else None
-
     with col4:
         if m2p1_id is not None:
             m2p2_ids = sorted({
@@ -868,11 +864,9 @@ def _render_custom_click_builder(
             st.session_state[key_m2p2] = geen_keuze
         lbl_m2p2 = st.selectbox("Match 2 - speler 2", m2p2_opties, key=key_m2p2)
     m2p2_id = m2p2_label_to_id.get(lbl_m2p2) if lbl_m2p2 != geen_keuze else None
-
     if not (duo_a and m2p1_id and m2p2_id):
         st.info("Kies hierboven alle 4 spelers om deze rotatie samen te stellen.")
         return
-
     duo_b = frozenset({m2p1_id, m2p2_id})
     gevonden = _find_matching_candidate(candidates, duo_a, duo_b)
     if gevonden is None:
@@ -883,7 +877,6 @@ def _render_custom_click_builder(
             "wijzig een keuze hierboven om opnieuw te proberen."
         )
         return
-
     ordered_pairs = gevonden["ordered_pairs"]
     win_probs = [a.get("win_probability") for a in gevonden["assignment"]] if gevonden.get("assignment") else [None, None]
     ebw = gevonden.get("expected_boards_won")
@@ -896,8 +889,6 @@ def _render_custom_click_builder(
     )
     if st.button("Bevestig deze keuze", key=f"{kp}_confirm", type="primary"):
         on_confirm(ordered_pairs, win_probs)
-
-
 # -----------------------------------------------
 # Rotatieplanner - combinatoriek (1 rotatie tegelijk, ONGEWIJZIGD)
 # -----------------------------------------------
@@ -1765,20 +1756,27 @@ def _render_rotation_planner(
     opp_pairs_voor_log = []
     if rotation_opponent_boards:
         opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
+    # PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30: _bevestig_rotatie()
+    # verwacht 3 argumenten, maar de presets en de custom-modus roepen
+    # on_confirm(ordered_pairs, win_probs) aan met slechts 2 - deze wrapper
+    # vult opp_pairs_voor_log (al hierboven berekend, identiek aan wat de
+    # kaarten-knop gebruikt) automatisch aan. Zie moduledocstring.
+    def _on_confirm_2arg(ordered_pairs, win_probs) -> None:
+        _bevestig_rotatie(ordered_pairs, opp_pairs_voor_log, win_probs)
     # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30: snelkeuzes en
     # klik-voor-klik-custom-modus, VOOR de 3 kaarten - zie moduledocstring.
-    # Beide gebruiken DEZELFDE _bevestig_rotatie()-closure als de kaarten,
-    # dus identieke locked_*-boekhouding ongeacht welk pad de gebruiker
-    # kiest.
+    # Beide gebruiken de _on_confirm_2arg-wrapper (zie
+    # PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30), dus identieke
+    # locked_*-boekhouding ongeacht welk pad de gebruiker kiest.
     with st.expander("Snelkeuzes", expanded=False):
         _render_rotation_quick_presets(
             profiles, sel_player_id, available_ids, synergy_fn, official_ranks_strict,
             player_ratings, opponent_ratings, effective_opponent_boards, excluded_pairs,
-            player_budget, tournament_rules_dict, ploeg_id, next_rotation_num, _bevestig_rotatie,
+            player_budget, tournament_rules_dict, ploeg_id, next_rotation_num, _on_confirm_2arg,
         )
     with st.expander("Zelf samenstellen (klik-voor-klik)", expanded=False):
         _render_custom_click_builder(
-            candidates, name_lookup_global, ploeg_id, next_rotation_num, _bevestig_rotatie,
+            candidates, name_lookup_global, ploeg_id, next_rotation_num, _on_confirm_2arg,
         )
     # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
     # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op
