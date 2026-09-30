@@ -101,11 +101,9 @@ De rotatieplanner toonde tot nu toe een st.radio met ALLE (tot 15)
 kandidaten als platte tekstregels, gerangschikt op EBW - exact het
 "6+ bijna-identieke rijen"-probleem dat PADEL_ANALYSIS_POINT_PROBABILITY_
 2026-09-30 hierboven al voor de matchup-tabel oploste, maar hier nog niet.
-
 FIX, hergebruikt VOLLEDIG de bestaande punten-kans-infrastructuur
 hierboven (_match_outcome_point_probabilities, _n_missing_win_probs) -
 geen nieuwe kansberekening, enkel een nieuwe TOEPASSING ervan:
-
 1. "Impact op het totale ploegresultaat" (niet enkel deze ene rotatie):
    _rank_and_label_candidates_for_cards() bouwt per kandidaat de volledige
    winkans-lijst van de ontmoeting: [reeds BEVESTIGDE rotaties se
@@ -151,6 +149,25 @@ geen nieuwe kansberekening, enkel een nieuwe TOEPASSING ervan:
    pad is nu de 3 kaarten.
 De AI-sectie (analyze_lineup_options op candidates[:5]) blijft ONGEWIJZIGD
 werken op de volledige kandidatenlijst, niet enkel de 3 getoonde kaarten.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30 (op verzoek van Kim,
+na het testen van de vorige versie: "31% 2p 38% 1p 31% 0p" zag er verdacht
+uniform uit op alle 3 kaarten)
+--------------------------------------------------------------------------
+BEVESTIGD, geen bug: bij 4 matchen die elk nog volledig onbekend zijn
+(geen enkele rotatie bevestigd, geen enkele winkans gekend), valt
+_match_outcome_point_probabilities() voor elke ontbrekende match terug op
+50% - het WISKUNDIG CORRECTE resultaat is dan exact C(4,2) x 0.5^4 = 37.5%
+kans op 1 punt en symmetrisch 31.25%/31.25% voor 2/0 punten, ONGEACHT welke
+kandidaat je bekijkt (elke kandidaat is dan even "onbekend"). Het getal was
+dus niet fout, maar MISLEIDEND: het oogt als een onderscheidend resultaat
+terwijl het in werkelijkheid "nog niets zinvols bekend" betekent.
+FIX: _format_point_probs_short() en de kaart-caption in
+_render_candidate_card() tonen nu expliciet "(nog neutraal - tegenstander
+onbekend)" zodra de impact-berekening op ENKEL placeholders/onbekende
+winkansen steunt (gedetecteerd via een nieuwe `is_neutral`-vlag op de
+kaart, gezet in _rank_and_label_candidates_for_cards()) - i.p.v. de kansen
+zonder context te tonen alsof ze al onderscheidend zijn.
 """
 import itertools
 import streamlit as st
@@ -276,25 +293,29 @@ def _aggregate_group_point_probabilities(rows: list, weights: dict) -> dict:
 # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30 - zie moduledocstring.
 # -----------------------------------------------
 _SAFE_CARD_MIN_WINPROB_GAP = 0.0  # placeholder-grens, zie _pick_safest_card (0 = gewoon de hoogste minimum-winkans)
-
-
-def _format_point_probs_short(pp: dict) -> str:
+def _format_point_probs_short(pp: dict, is_neutral: bool = False) -> str:
     """Korte, leesbare weergave van een puntenkans-dict voor op een kaart.
     Lokale kopie van dezelfde opmaak als lineup_matchup_table._format_point_probs()
     - NIET vandaar geimporteerd, om een cirkelvormige import te vermijden
-    (lineup_matchup_table.py importeert AL van dit bestand)."""
+    (lineup_matchup_table.py importeert AL van dit bestand).
+    PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30: `is_neutral`
+    voegt een expliciete waarschuwing toe zodra de kansen volledig op de
+    50%-placeholder-aanname steunen (nog geen enkele echte winkans gekend)
+    - zie moduledocstring voor waarom dit anders misleidend oogt."""
     if not pp:
         return "onbekend"
-    return f"{pp.get('p2', 0.0) * 100:.0f}% 2p \u00b7 {pp.get('p1', 0.0) * 100:.0f}% 1p \u00b7 {pp.get('p0', 0.0) * 100:.0f}% 0p"
-
-
+    basis = (
+        f"{pp.get('p2', 0.0) * 100:.0f}% 2p \u00b7 {pp.get('p1', 0.0) * 100:.0f}% 1p \u00b7 "
+        f"{pp.get('p0', 0.0) * 100:.0f}% 0p"
+    )
+    if is_neutral:
+        return basis + " (nog neutraal - tegenstander onbekend)"
+    return basis
 def _candidate_pair_set_key(candidate: dict) -> frozenset:
     """Identificeert een kandidaat op ZIJN KOPPELS (ongeacht bordvolgorde) -
     gebruikt om de 3 kaarten van elkaar te onderscheiden op een echt ander
     profiel, niet enkel een omgewisselde Match 1/Match 2."""
     return frozenset(frozenset(p) for p in candidate.get("ordered_pairs", []))
-
-
 def _candidate_win_probs(candidate: dict) -> list:
     """De 2 individuele winkansen van deze kandidaat-rotatie (None per match
     als de tegenstander voor deze rotatie nog niet gekozen is - _generate_
@@ -303,8 +324,6 @@ def _candidate_win_probs(candidate: dict) -> list:
     if not assignment:
         return [None, None]
     return [a.get("win_probability") for a in assignment]
-
-
 def _impact_point_probs_for_candidate(
     candidate: dict, locked_win_probs: list, total_boards=None,
 ) -> dict:
@@ -321,8 +340,16 @@ def _impact_point_probs_for_candidate(
         if ontbrekend > 0:
             win_probs = win_probs + [None] * ontbrekend
     return _match_outcome_point_probabilities(win_probs)
-
-
+def _impact_is_fully_neutral(candidate: dict, locked_win_probs: list, total_boards=None) -> bool:
+    """PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30: True zodra
+    GEEN ENKELE van de winkansen die de impact-berekening voedt gekend is
+    (dus: geen bevestigde rotaties MET gekende winkans, en de tegenstander
+    van deze kandidaat-rotatie ook nog niet gekozen) - in dat geval is de
+    getoonde 31/38/31-achtige verdeling wiskundig correct maar betekenisloos
+    (identiek voor elke kandidaat), en moet de UI dat expliciet zeggen i.p.v.
+    de indruk te wekken dat de kaarten al onderscheidend zijn."""
+    alle_gekend = list(locked_win_probs) + _candidate_win_probs(candidate)
+    return len(alle_gekend) > 0 and all(p is None for p in alle_gekend)
 def _pick_safest_card(evaluated: list, exclude_keys: set) -> dict:
     """Kandidaat (niet in exclude_keys) met de hoogste MINIMALE winkans over
     zijn 2 matchen - dus de kandidaat die het minst waarschijnlijk een bijna
@@ -342,8 +369,6 @@ def _pick_safest_card(evaluated: list, exclude_keys: set) -> dict:
         if beste_min is None or minimum > beste_min:
             beste_min, beste = minimum, ev
     return beste
-
-
 def _rank_and_label_candidates_for_cards(
     candidates: list, locked_win_probs: list, total_boards=None, max_cards: int = 3,
 ) -> list:
@@ -356,6 +381,8 @@ def _rank_and_label_candidates_for_cards(
       "role", "candidate", "win_probs" (2 winkansen van DEZE rotatie),
       "risk_notes" (2 risiconotities, via ll.risk_note_for_probability),
       "impact" (puntenkans voor de VOLLEDIGE ontmoeting met deze keuze),
+      "is_neutral" (PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30:
+      True als "impact" volledig op de 50%-placeholder-aanname steunt),
       "pair_key" (voor dedupe/identificatie).
     Geeft nooit meer kaarten dan er ECHT onderscheiden kandidaten zijn -
     bij < max_cards kandidaten dus minder kaarten, nooit een lege/dubbele."""
@@ -369,20 +396,18 @@ def _rank_and_label_candidates_for_cards(
             "win_probs": win_probs,
             "risk_notes": [ll.risk_note_for_probability(wp) for wp in win_probs],
             "impact": _impact_point_probs_for_candidate(cand, locked_win_probs, total_boards),
+            "is_neutral": _impact_is_fully_neutral(cand, locked_win_probs, total_boards),
             "pair_key": _candidate_pair_set_key(cand),
         })
-
     # "Aanbevolen": hoogste impact-P(2 ploegpunten). Bij een exact gelijke
     # impact (kan bij weinig data) blijft de oorspronkelijke EBW-volgorde
     # van `candidates` de tiebreak (Python sort is stabiel).
     by_impact = sorted(evaluated, key=lambda ev: ev["impact"]["p2"], reverse=True)
     cards = []
     gekozen_keys = set()
-
     aanbevolen = by_impact[0]
     cards.append({**aanbevolen, "role": "Aanbevolen"})
     gekozen_keys.add(aanbevolen["pair_key"])
-
     if max_cards >= 2 and len(evaluated) > 1:
         veiligst = _pick_safest_card(evaluated, gekozen_keys)
         if veiligst is None:
@@ -394,16 +419,12 @@ def _rank_and_label_candidates_for_cards(
         if veiligst is not None and veiligst["pair_key"] not in gekozen_keys:
             cards.append({**veiligst, "role": "Veiligst"})
             gekozen_keys.add(veiligst["pair_key"])
-
     if max_cards >= 3 and len(evaluated) > len(cards):
         alternatief = next((ev for ev in by_impact if ev["pair_key"] not in gekozen_keys), None)
         if alternatief is not None:
             cards.append({**alternatief, "role": "Alternatief"})
             gekozen_keys.add(alternatief["pair_key"])
-
     return cards[:max_cards]
-
-
 def _render_candidate_card(
     col, card: dict, name_lookup_global: dict, key_prefix: str,
 ) -> bool:
@@ -424,13 +445,24 @@ def _render_candidate_card(
                     f"Match {match_idx}: **{name_lookup_global.get(p1, p1)} / "
                     f"{name_lookup_global.get(p2, p2)}** - {wp_txt}"
                 )
-            st.caption(f"Impact op volledige ontmoeting: {_format_point_probs_short(card['impact'])}")
+            # PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30: is_neutral
+            # doorgegeven aan _format_point_probs_short() i.p.v. de kansen
+            # zonder context te tonen.
+            st.caption(
+                f"Impact op volledige ontmoeting: "
+                f"{_format_point_probs_short(card['impact'], card.get('is_neutral', False))}"
+            )
+            if card.get("is_neutral"):
+                st.caption(
+                    "Deze kaarten zijn nu nog gelijkwaardig omdat er nog geen enkele winkans gekend is "
+                    "(tegenstander nog niet gekozen, geen rotatie bevestigd). Kies hieronder de "
+                    "combinatie die je tactisch het beste lijkt - de impact-cijfers worden pas "
+                    "onderscheidend zodra de tegenstander gekend is of een rotatie bevestigd wordt."
+                )
             ebw = cand.get("expected_boards_won")
             if ebw is not None:
                 st.caption(f"(EBW deze rotatie: {ebw:.2f})")
             return st.button("Kies deze kaart", key=f"{key_prefix}_pick", type="primary", use_container_width=True)
-
-
 # -----------------------------------------------
 # Rotatieplanner - combinatoriek (1 rotatie tegelijk, ONGEWIJZIGD)
 # -----------------------------------------------
@@ -1285,7 +1317,6 @@ def _render_rotation_planner(
     st.markdown(f"**Rotatie {next_rotation_num} - kies de effectieve/geplande combinatie:**")
     if tournament_rules_dict is not None:
         st.caption(f"{len(candidates)} van {total_possible} combinaties voldoen aan de puntengrens per rotatie.")
-
     def _bevestig_rotatie(gekozen_pairs, opp_pairs_voor_log, win_probs_deze_rotatie) -> None:
         """PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: gedeelde bevestig-
         logica - zowel de kaart-knoppen als de "geavanceerd"-fallback
@@ -1295,16 +1326,13 @@ def _render_rotation_planner(
         st.session_state[opp_locked_key] = locked_opponents + [opp_pairs_voor_log]
         st.session_state[win_probs_locked_key] = locked_win_probs_per_rotation + [win_probs_deze_rotatie]
         st.rerun(scope="fragment")
-
     opp_pairs_voor_log = []
     if rotation_opponent_boards:
         opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
-
     # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
     # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op
     # de volledige ontmoeting"-berekening per kandidaat hieronder.
     flat_locked_win_probs = [wp for rotatie in locked_win_probs_per_rotation for wp in rotatie]
-
     cards = _rank_and_label_candidates_for_cards(
         candidates, flat_locked_win_probs, total_boards=total_boards, max_cards=3,
     )
@@ -1325,7 +1353,6 @@ def _render_rotation_planner(
                 _bevestig_rotatie(
                     card["candidate"]["ordered_pairs"], opp_pairs_voor_log, card["win_probs"],
                 )
-
     ai_key = f"rot_ai_v3_{ploeg_id}_{next_rotation_num}"
     if taa is not None and report_for_ai is not None:
         if st.button("AI-inzicht over deze combinaties", key=f"rot_ai_btn_v3_{ploeg_id}_{next_rotation_num}"):
@@ -1337,7 +1364,6 @@ def _render_rotation_planner(
                     st.session_state[ai_key] = f"Mislukt: {exc}"
         if st.session_state.get(ai_key):
             st.markdown(st.session_state[ai_key])
-
     # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: de volledige, oude
     # radio+detail+bevestig-flow blijft ONGEWIJZIGD beschikbaar voor wie een
     # combinatie buiten de 3 kaarten wil kiezen - geen functionaliteit

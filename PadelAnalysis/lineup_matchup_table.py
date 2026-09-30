@@ -2,12 +2,10 @@
 lineup_matchup_table.py - Opbouw en weergave van de volledige
 "Opstelling-scenario's"-tabel: alle geldige matchups (eigen koppelverdeling
 x tegenstander-opstelling), gegroepeerd, gesorteerd en met AI-doorvraag.
-
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD,
 behalve de fixes hieronder.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27 (op verzoek van Kim:
 "die knop analyse opslaan staat nergens of is althans niet zichtbaar")
@@ -27,7 +25,6 @@ tegenstander (zonder historische ontmoetingen) is stap 3 foutgevoelig en
 onopvallend - een kleine afronding/wijziging in de multiselect kan de som
 laten mismatchen, waardoor de hele verdere pijplijn (en dus de knop) nooit
 bereikt wordt, zonder duidelijke melding waarom.
-
 FIX: de "Analyse opslaan"-knop (en de bijhorende payload-opbouw) is
 VERPLAATST naar direct na de regel "X geldige matchup(s) gevonden" -
 dus zodra all_matchups niet leeg is, VOOR de zware rendering van
@@ -38,7 +35,6 @@ niet langer vereist dat je eerst door de volledige resultatensectie
 scrolt. Stap 3 hierboven (de som-mismatch) blijft een aandachtspunt maar
 is nu tenminste geen extra drempel meer BOVENOP een compleet verscholen
 knop.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29 (op verzoek van Kim: "niet toegelaten opstellingen zijn
 nutteloos. verwijder deze optie.")
@@ -47,7 +43,6 @@ De checkbox "Toon ook bewust omgedraaide, NIET-reglementaire varianten" is
 weg. Enkel reglementaire bordvolgordes (art. 6.6) worden nog berekend; bij
 een gelijk officieel klassement blijven beide (toegelaten) volgordes staan.
 De badge "onzeker" (onvolledig officieel klassement) blijft bestaan.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29 (op verzoek van Kim: "Er zijn meer dan 800 geldige
 matchups gevonden - enkel de eerste 800 zijn meegenomen [...] dit is ook
@@ -60,7 +55,6 @@ combinaties) werden zo enkel de eerste ~3 eigen opstellingen volledig
 doorgerekend; alle andere ontbraken stil in de tabel, de groepen en
 "Beste opstelling voor...". De melding "verklein de spelersselectie" was
 dus misleidend: het probleem was de afkapping, niet de selectie.
-
 FIX: ELKE eigen opstelling wordt tegen ELKE tegenstander-opstelling
 doorgerekend (veiligheidsgrens _MAX_COMPUTED_MATCHUPS). Om geheugen en
 weergave beheersbaar te houden, wordt per eigen opstelling een SAMENVATTING
@@ -72,7 +66,36 @@ set, niet op de bewaarde rijen. De groepenlijst toont standaard de beste
 _GROUPS_DISPLAY_DEFAULT eigen opstellingen (rest via een vinkje).
 Opslaan bewaart de beste _SAVE_MAX_MATCHUPS matchups, zodat het
 Firestore-document onder de limiet van 1 MB blijft.
-
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30 (op verzoek van Kim,
+na het testen van de vorige versie: "Puntenkans apart tonen, niet in de
+lange titel-string" - "30% · 2p 40% · 1p 30% · 0p · OK - R1M1 ... is
+inderdaad te veel in een regel")
+--------------------------------------------------------------------------
+De expander-titel combineerde de puntenkans-tekst, de reglement-badge EN
+de volledige koppellijst in EEN lange string - moeilijk te scannen over
+meerdere groepen heen, en Streamlit-expander-labels ondersteunen geen
+opmaak (geen kleur, geen vetgedrukt, geen losse elementen).
+FIX: de puntenkans (2p/1p/0p) staat nu als 3 aparte st.metric()-elementen
+BOVEN elke expander, in een rij van 3 kolommen - dus zichtbaar zonder te
+hoeven openklikken, en visueel losstaand van de koppel-tekst. De expander-
+titel zelf bevat nu enkel nog de reglement-badge + de korte koppellijst
+(bv. "OK - R1M1 Kim/Nico · R1M2 Joris/Carl"), niet langer de puntenkans.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30 (op verzoek
+van Kim: "Puntenkans ook bij 'Beste opstelling voor mezelf' - nu toont die
+tabel enkel persoonlijke winkans. Ik voeg de kans op 2/1/0 punten voor de
+HELE ploeg toe bij diezelfde opstelling, zodat je meteen ziet: 'goed voor
+mij persoonlijk, en dit is wat het voor het team betekent.'")
+--------------------------------------------------------------------------
+_render_best_for_selected_player() toonde tot nu toe enkel de persoonlijke
+winkans/EBW van de geselecteerde speler, zonder te tonen wat diezelfde
+ploegopstelling betekent voor de PLOEGKANS (2/1/0 punten). FIX: 3 nieuwe
+kolommen "Team Kans 2p/1p/0p %" - dezelfde gewogen puntenkans (g["point_
+probs"]) die ook in de groepen hierboven getoond wordt, nu ook hier naast
+de persoonlijke cijfers. Blijft ONGEWIJZIGD gesorteerd op de persoonlijke
+gemiddelde winkans (een persoonlijke, geen ploegmaatstaf) - de puntenkans
+is hier enkel INFORMATIEF, geen nieuwe sorteervolgorde.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 (op verzoek van Kim, na
 brainstorm over de matchup-analyse: "dat leert me niets wat de beste
@@ -85,7 +108,6 @@ ROOT CAUSE (bevestigd door Kim's eigen voorbeeld: 3 groepen met Best 2.05 /
 tegenstander-scenario is (alles werd gelijk geteld), noch (b) zegt wat het
 ECHT uitmaakt: hoeveel COMPETITIEPUNTEN de ploeg haalt (0/1/2 - Kim,
 bevestigd 2026-09-30: 2 bij winst, 1 bij gelijke stand/2-2, 0 bij verlies).
-
 FIX, twee delen (rekenkern in lineup_rotation.py, dit bestand toont enkel):
   1. _compute_matchup() (lineup_rotation.py) berekent nu ook, per matchup,
      een EXACTE kansverdeling op 2/1/0 punten (point_probs) - zie
@@ -101,7 +123,6 @@ FIX, twee delen (rekenkern in lineup_rotation.py, dit bestand toont enkel):
      opponent-lineup-key)-matchup vastgelegd in _build_all_valid_matchups()
      en aan lineup_rotation._aggregate_group_point_probabilities()
      meegegeven om het gewogen gemiddelde puntenkans per groep te bouwen.
-
 WEERGAVE: het NIEUWE hoofdgetal per groep (in
 _render_own_lineup_groups_with_opponents()) is nu "68% kans op 2 punten ·
 24% op 1 · 8% op 0" (gewogen gemiddelde over ALLE doorgerekende
@@ -112,7 +133,6 @@ GESORTEERD op deze gewogen 2-punten-kans (was: best-case EBW).
 "Beste opstelling voor..." blijft ONGEWIJZIGD werken op EBW/winkans per
 speler - dat is een persoonlijke, geen ploegmaatstaf, en verandert dus niet
 mee met deze fix.
-
 BEPERKING (bewust, zie lineup_rotation.py-moduledocstring): de weging
 gebruikt uitsluitend DIT SEIZOEN (bundle.previous_fixtures) - de app heeft
 op dit moment geen betrouwbare rotatiepositie-informatie over vorige
@@ -139,13 +159,9 @@ _KEEP_PER_GROUP = 25               # bewaarde beste rijen per eigen opstelling
 _GROUPS_DISPLAY_DEFAULT = 20       # standaard getoonde eigen opstellingen
 _SAVE_MAX_MATCHUPS = 150           # Firestore-document < 1 MB
 _MAX_TOTAL_MATCHUPS = _MAX_COMPUTED_MATCHUPS  # oude naam, voor compatibiliteit
-
-
 def _sort_val(m) -> float:
     ebw = m.get("expected_boards_won")
     return ebw if ebw is not None else m.get("total_score", 0.0)
-
-
 def _new_group_summary(assignment: list) -> dict:
     return {
         "n": 0, "ebw_sum": 0.0, "ebw_n": 0,
@@ -155,8 +171,6 @@ def _new_group_summary(assignment: list) -> dict:
         "first_assignment": assignment,
         "weights": {},  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: id(m) -> gewicht van zijn tegenstander-scenario
     }
-
-
 def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) -> None:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: `opponent_weight` is het
     gewicht van het tegenstander-scenario waartegen deze matchup berekend
@@ -206,8 +220,6 @@ def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) 
             if ebw is not None:
                 st_[4] += ebw
                 st_[5] += 1
-
-
 def _finalize_group(key, g: dict) -> dict:
     rows_by_id = {}
     for _, _, m in g["top"]:
@@ -244,8 +256,6 @@ def _finalize_group(key, g: dict) -> dict:
         "players": g["players"], "positions": g["positions"],
         "first_assignment": g["first_assignment"],
     }
-
-
 def _build_all_valid_matchups(
     unique_opponent_lineups: dict,
     available_ids: list, max_per_player: dict,
@@ -256,7 +266,6 @@ def _build_all_valid_matchups(
     tegen ELKE tegenstander-opstelling - zie moduledocstring.
     Geeft (all_matchups, truncated, total_seen, diagnostics, groups) terug.
     include_non_compliant_variants wordt genegeerd (PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29).
-
     PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: elk tegenstander-scenario
     (their_key/info) krijgt hier zijn gewicht via
     lineup_rotation._opponent_lineup_weight(info) - EEN keer per unieke
@@ -313,6 +322,10 @@ def _build_all_valid_matchups(
             computed = _compute_matchup(
                 own_ordered_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings,
             )
+            # PADEL_ANALYSIS_TEAM_WIN_DISTRIBUTION_2026-09-29: kans op
+            # 2/1/0 ploegpunten, o.b.v. de per-board winkansen - zie
+            # moduledocstring. None wanneer niet alle boards een gekende
+            # winkans hebben.
             m = {
                 "assignment": computed["assignment"],
                 "expected_boards_won": computed["expected_boards_won"],
@@ -352,17 +365,11 @@ def _build_all_valid_matchups(
         "own_groups": len(group_list),
     }
     return all_matchups, truncated, total_seen, diagnostics, group_list
-
-
 def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
-
-
 _TABLE_CHAR_WIDTH_PX = 6.6
 _TABLE_COL_MIN_WIDTH = 90
 _TABLE_COL_MAX_WIDTH = 240
-
-
 def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, max_width: int = _TABLE_COL_MAX_WIDTH) -> int:
     max_len = 0
     for v in values:
@@ -371,22 +378,22 @@ def _estimate_column_width(values: list, min_width: int = _TABLE_COL_MIN_WIDTH, 
         max_len = max(max_len, len(str(v)))
     width = int(max_len * _TABLE_CHAR_WIDTH_PX) + 24
     return max(min_width, min(max_width, width))
-
-
 def _compliance_badge(fully_compliant: bool, rank_data_incomplete: bool = False) -> str:
     # PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29: er worden enkel nog reglementaire varianten berekend.
     if rank_data_incomplete:
         return "onzeker"
     return "OK"
-
-
 def _own_lineup_group_key(assignment: list) -> frozenset:
     return frozenset(frozenset(a["our_pair"]) for a in assignment)
-
-
 def _format_point_probs(pp: dict) -> str:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: leesbare, korte
-    weergave van een puntenkans-dict, bv. '68% · 2p 24% · 1p 8% · 0p'."""
+    weergave van een puntenkans-dict, bv. '68% · 2p 24% · 1p 8% · 0p'.
+    PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30: niet langer
+    gebruikt in de groepstitel (die toont de 3 kansen nu als aparte
+    st.metric()-elementen, zie _render_own_lineup_groups_with_opponents()).
+    Blijft hier staan als herbruikbare tekst-opmaak voor eventueel ander
+    gebruik (bv. lineup_rotation.py heeft een eigen, lokale kopie
+    _format_point_probs_short() om een cirkelvormige import te vermijden)."""
     if not pp:
         return "onbekend"
     return (
@@ -394,8 +401,6 @@ def _format_point_probs(pp: dict) -> str:
         f"{pp.get('p1', 0.0) * 100:.0f}% · 1p  "
         f"{pp.get('p0', 0.0) * 100:.0f}% · 0p"
     )
-
-
 def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
     rows = []
     board_column_names: list = []
@@ -443,8 +448,6 @@ def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
             row["Vorige keer"] = ""
         rows.append(row)
     return rows, board_column_names
-
-
 def _matchup_table_column_config(table_rows: list, board_column_names: list) -> tuple:
     column_config = {
         "#": st.column_config.NumberColumn("#", width="small"),
@@ -473,13 +476,10 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
     column_order += ["Toelichting", "Vorige keer"]
     return column_config, column_order
-
-
 def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: dict, ploeg_key: str = "") -> None:
     """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: werkt op de groepssamenvattingen uit
     _build_all_valid_matchups(). Best/worst case in de titel gelden over
     ALLE doorgerekende tegenstander-opstellingen van die groep.
-
     PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: het HOOFDGETAL in de
     groepstitel is nu de gewogen puntenkans (2/1/0), niet langer enkel
     best/worst EBW. De groepenlijst is al gesorteerd op kans-op-2-punten
@@ -525,12 +525,20 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
         best_txt = f"{best_ebw:.2f}" if best_ebw is not None else f"score {best.get('total_score', 0):.3f}"
         worst_txt = f"{worst_ebw:.2f}" if worst_ebw is not None else f"score {worst.get('total_score', 0):.3f}"
         badge = _compliance_badge(True, best.get("rank_data_incomplete", False))
-        # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: puntenkans is nu het
-        # eerste, meest prominente getal in de titel.
-        punten_txt = _format_point_probs(g.get("point_probs"))
-        header = (
-            f"{punten_txt}  ·  {badge}  -  {' \u00b7 '.join(korte_delen)}"
-        )
+        # PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30: de puntenkans
+        # staat nu als 3 aparte metrics BOVEN de expander - zie
+        # moduledocstring. De expander-titel zelf bevat enkel nog de
+        # reglement-badge + de korte koppellijst (geen opmaak mogelijk in
+        # een st.expander-label, vandaar de metrics ernaast i.p.v. erin).
+        pp_metrics = g.get("point_probs") or {}
+        col_p2, col_p1, col_p0 = st.columns(3)
+        with col_p2:
+            st.metric("Kans 2p (winst)", f"{pp_metrics.get('p2', 0.0) * 100:.0f}%")
+        with col_p1:
+            st.metric("Kans 1p (gelijk)", f"{pp_metrics.get('p1', 0.0) * 100:.0f}%")
+        with col_p0:
+            st.metric("Kans 0p (verlies)", f"{pp_metrics.get('p0', 0.0) * 100:.0f}%")
+        header = f"{badge}  -  {' \u00b7 '.join(korte_delen)}"
         with st.expander(header, expanded=False):
             st.markdown("**Onze opstelling in deze groep:**")
             st.markdown("\n".join(lange_regels))
@@ -542,8 +550,8 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
                 if n_missing else ""
             )
             st.caption(
-                f"Gewogen puntenkans over {g['n']} doorgerekende tegenstander-opstelling(en): "
-                f"{punten_txt}{missing_txt}. Best case {best_txt} en worst case {worst_txt} "
+                f"Bovenstaande kansen zijn het gewogen gemiddelde over {g['n']} doorgerekende "
+                f"tegenstander-opstelling(en){missing_txt}. Best case {best_txt} en worst case {worst_txt} "
                 f"verwachte gewonnen matchen (EBW){gem_txt}."
             )
             if len(g["rows"]) < g["n"]:
@@ -560,17 +568,18 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
     if not toon_alle and len(groups) > _GROUPS_DISPLAY_DEFAULT:
         st.caption(f"De beste {_GROUPS_DISPLAY_DEFAULT} van {len(groups)} eigen opstellingen getoond (gesorteerd op kans op 2 punten).")
     st.divider()
-
-
 def _render_best_for_selected_player(
     groups: list, sel_player_id: str, name_lookup_global: dict,
 ) -> None:
     """Welke ploegopstelling is het beste VOOR EEN SPECIFIEKE speler?
     PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: rekent op de volledige groepsstatistieken (alle
     tegenstander-opstellingen), niet op de bewaarde rijen.
-    NIET aangepast in PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: dit is
-    een PERSOONLIJKE maatstaf (winkans van 1 speler), geen ploegresultaat -
-    blijft dus op individuele winkans/EBW gebaseerd, net als voorheen."""
+    De SORTERING blijft ONGEWIJZIGD op de persoonlijke gemiddelde winkans
+    (een persoonlijke, geen ploegmaatstaf).
+    PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30: toont nu
+    ERNAAST ook de PLOEG-puntenkans (2/1/0) van diezelfde opstelling (uit
+    g["point_probs"], dezelfde gewogen berekening als de groepen hierboven)
+    - puur INFORMATIEF, verandert de sortering niet."""
     if not groups or not sel_player_id:
         return
     sel_id = str(sel_player_id)
@@ -594,11 +603,17 @@ def _render_best_for_selected_player(
             for idx, a in enumerate(g["first_assignment"])
         )
         team_gemiddeld = (team_som / team_n) if team_n else None
+        # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30:
+        # dezelfde gewogen ploeg-puntenkans als in de groepen hierboven.
+        pp = g.get("point_probs") or {}
         rijen.append({
             "Gemiddelde winkans": round(gemiddeld * 100, 1),
             "Slechtste geval": round(laagste * 100, 1),
             "Beste geval": round(hoogste * 100, 1),
             "Team gemiddeld": round(team_gemiddeld, 2) if team_gemiddeld is not None else None,
+            "Team Kans 2p %": round(pp.get("p2", 0.0) * 100, 0) if pp else None,
+            "Team Kans 1p %": round(pp.get("p1", 0.0) * 100, 0) if pp else None,
+            "Team Kans 0p %": round(pp.get("p0", 0.0) * 100, 0) if pp else None,
             f"Positie van {sel_naam}": pos_txt,
             "Volledige ploegopstelling": opstelling_txt,
             "Tegenstander-scenario's": n,
@@ -622,8 +637,9 @@ def _render_best_for_selected_player(
     )
     st.caption(
         "'Team gemiddeld' is het verwacht aantal gewonnen matchen voor de HELE ploeg (niet enkel "
-        f"{sel_naam}) bij dezelfde opstelling - zo zie je meteen of een opstelling die goed is voor "
-        f"{sel_naam} persoonlijk, ook goed is voor het team, of net een compromis vereist."
+        f"{sel_naam}) bij dezelfde opstelling; 'Team Kans 2p/1p/0p' is de bijhorende gewogen kans op "
+        "2/1/0 competitiepunten voor de HELE ploeg - zo zie je meteen of een opstelling die goed is "
+        f"voor {sel_naam} persoonlijk, ook goed is voor het team, of net een compromis vereist."
     )
     try:
         import pandas as _pd
@@ -635,6 +651,9 @@ def _render_best_for_selected_player(
             "Slechtste geval": "{:.1f}%",
             "Beste geval": "{:.1f}%",
             "Team gemiddeld": lambda v: f"{v:.2f}" if v is not None else "-",
+            "Team Kans 2p %": lambda v: f"{v:.0f}%" if v is not None else "-",
+            "Team Kans 1p %": lambda v: f"{v:.0f}%" if v is not None else "-",
+            "Team Kans 0p %": lambda v: f"{v:.0f}%" if v is not None else "-",
         })
         st.dataframe(
             styled, use_container_width=True, hide_index=True,
@@ -643,6 +662,10 @@ def _render_best_for_selected_player(
                 "Slechtste geval": st.column_config.NumberColumn("Worst", width="small"),
                 "Beste geval": st.column_config.NumberColumn("Best", width="small"),
                 "Team gemiddeld": st.column_config.NumberColumn("Team gem.", width="small"),
+                # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30
+                "Team Kans 2p %": st.column_config.NumberColumn("Team 2p", format="%.0f%%", width="small"),
+                "Team Kans 1p %": st.column_config.NumberColumn("Team 1p", format="%.0f%%", width="small"),
+                "Team Kans 0p %": st.column_config.NumberColumn("Team 0p", format="%.0f%%", width="small"),
                 "Tegenstander-scenario's": st.column_config.NumberColumn("Scen.", width="small"),
                 "Volledige ploegopstelling": st.column_config.TextColumn(
                     "Volledige ploegopstelling", width="large",
@@ -654,14 +677,15 @@ def _render_best_for_selected_player(
     beste = rijen[0]
     team_val = beste.get("Team gemiddeld")
     team_txt = f", team gemiddeld **{team_val:.2f}**" if team_val is not None else ""
+    # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30
+    team_p2 = beste.get("Team Kans 2p %")
+    team_pp_txt = f", team kans op 2 punten **{team_p2:.0f}%**" if team_p2 is not None else ""
     st.success(
         f"Beste voor {sel_naam}: **{beste['Volledige ploegopstelling']}** "
         f"- gemiddeld **{beste['Gemiddelde winkans']:.1f}%** winkans "
-        f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}."
+        f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}{team_pp_txt}."
     )
     st.divider()
-
-
 def _render_save_analysis_button(
     all_matchups: list, opp: dict, available_ids: list, name_lookup_global: dict,
     total_boards, max_per_player: dict, sel_player_id,
@@ -702,8 +726,6 @@ def _render_save_analysis_button(
         }
         doc_id = fb.save_lineup_analysis(sel_player_id, payload)
         st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
-
-
 def _render_all_valid_matchups(
     bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
