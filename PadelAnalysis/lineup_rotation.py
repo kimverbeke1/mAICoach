@@ -179,14 +179,13 @@ puntengrens daar mogen staan [...] Een gekozen speler bij Match 1
 verdwijnt meteen uit de keuzelijst van Match 2." + "Rotatie 2 houdt
 automatisch rekening met wie al samen speelde in Rotatie 1.")
 --------------------------------------------------------------------------
-_render_rotation_planner() krijgt nu 2 extra, optionele parameters:
-`profiles` en `sel_player_id` (page_lineup_lab.py geeft ze door - zie dat
-bestand). Zonder deze 2 (bv. een oudere aanroeper) vallen de presets en de
-custom-modus hieronder gewoon weg; de bestaande kaarten/"geavanceerd"-lijst
-blijven ONGEWIJZIGD werken.
-
-1. SNELKEUZES (_own_previous_encounters_as_presets + _strongest_available_
-   pairing, getoond via _render_rotation_quick_presets()):
+LET OP: deze bouwsteen bleek een MISVERSTAND - zie
+PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 VERDEROP, die
+"1. SNELKEUZES" hieronder VERVANGT. De beschrijving hieronder blijft staan
+als historisch record van WAT er eerst gebouwd was en WAAROM dat fout was;
+"2. CUSTOM-MODUS" bleef ongewijzigd en klopt nog steeds.
+1. SNELKEUZES (OUD, VERVANGEN - _own_previous_encounters_as_presets +
+   _strongest_available_pairing, getoond via _render_rotation_quick_presets()):
    - Elke eerdere EIGEN ontmoeting van sel_player_id (via _load_encounter_
      index/ll.list_encounters/ll.reconstruct_boards - DEZELFDE functies die
      lineup_sandbox.py al gebruikt voor zijn "Onze vorige opstelling"-
@@ -214,42 +213,16 @@ blijven ONGEWIJZIGD werken.
      kaarten/"geavanceerd") en bevestigt de rotatie via DEZELFDE
      _bevestig_rotatie()-closure als de kaarten - dus identieke
      locked_rotations/locked_opponents/locked_win_probs-boekhouding.
-
-2. CUSTOM-MODUS, klik-voor-klik (_render_custom_click_builder()):
+   PROBLEEM (zie correctie verderop): dit toonde presets van ONZE EIGEN
+   vorige opstellingen, ongeacht wie de tegenstander was - niet bruikbaar
+   om te bepalen wat WIJ tegen DEZE specifieke tegenstander moeten doen.
+2. CUSTOM-MODUS, klik-voor-klik (_render_custom_click_builder()) - BLIJFT
+   ONGEWIJZIGD, zie de functie zelf verderop voor de volledige werking:
    HERGEBRUIKT de reeds berekende `candidates`-lijst (dezelfde lijst als de
    3 kaarten en de "geavanceerd"-radio) IN PLAATS VAN de puntengrens-logica
    te herimplementeren - elke candidate is al een volledig gevalideerde
    rotatie (reglement-volgorde + puntengrens + excluded_pairs + player_
    budget, precies zoals _generate_rotation_candidates() die opbouwt).
-     - Match 1, speler 1: alle spelers die in ELK GEVAL als lid van
-       ordered_pairs[0] in minstens 1 candidate voorkomen (dus: "kan
-       volgens de puntengrens sterkste/Match-1-duo zijn").
-     - Match 1, speler 2: enkel de partners waarmee speler 1 SAMEN als
-       ordered_pairs[0] voorkomt (dedupe op het koppel, niet op de losse
-       spelers) - dus de partnerlijst versmalt meteen zodra speler 1
-       gekozen is.
-     - Match 2, speler 1/2: enkel de ordered_pairs[1]-opties van de
-       candidates waarvan ordered_pairs[0] EXACT het gekozen Match-1-koppel
-       is - hierdoor verdwijnen de Match-1-spelers automatisch uit de
-       Match-2-keuzelijst (ze maken geen deel uit van een andere candidate
-       se ordered_pairs[1] bij DEZELFDE ordered_pairs[0]), en is punt 3 uit
-       Kim's plan (geen koppel 2x in de ontmoeting) automatisch voldaan
-       (excluded_pairs zit al verwerkt in `candidates`).
-     - Wijzigt een eerdere keuze, dan wordt elke latere, nu-ongeldig
-       geworden keuze in DEZELFDE render gereset naar "- Kies -" (zelfde
-       patroon als de bestaande tegenstander-koppelkeuze hierboven in
-       _render_rotation_planner() - Streamlit's reactieve rerun-per-widget
-       maakt dit vanzelf consistent, geen aparte state-machine nodig).
-     - Zodra alle 4 spelers gekozen zijn, wordt de EXACTE candidate
-       opgezocht (_find_matching_candidate) en getoond met zijn al
-       berekende winkans/EBW - "Bevestig deze keuze" gaat via DEZELFDE
-       _bevestig_rotatie()-closure.
-   Dit garandeert dat elke combinatie die via de custom-modus samengesteld
-   kan worden, EXACT overeenkomt met een reeds gevalideerde candidate - er
-   wordt dus nooit een niet-reglementaire of dubbele koppelverdeling
-   aangeboden, zonder dat de puntengrens-logica hier een 2e keer
-   geschreven hoefde te worden.
-
 Beide bouwstenen staan in een eigen "Snelkeuzes" / "Zelf samenstellen"-
 expander, VOOR de bestaande 3 kaarten - kiest de gebruiker niets in een van
 beide, dan werken de kaarten en de "geavanceerd"-lijst exact zoals voorheen.
@@ -277,14 +250,87 @@ argumenten aan. De kaarten-knop blijft ONGEWIJZIGD rechtstreeks
 juiste arity). Getest: beide nieuwe paden bevestigen nu zonder
 TypeError, met exact dezelfde locked_rotations/locked_opponents/locked_
 win_probs-boekhouding als de kaarten.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 (op verzoek van Kim:
+"je hebt de snelkeuzes bij de rotatieplanner verkeerd begrepen. ik wil
+snelkeuzen van de tegenstander en dan bekijken wat wij daartegen kunnen
+doen. nu zijn het snelkeuzes van mijn matchen")
+--------------------------------------------------------------------------
+CORRECTIE op PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 hierboven:
+de "Snelkeuzes"-sectie toonde presets van ONZE EIGEN vorige opstellingen
+(_own_previous_encounters_as_presets, _strongest_available_pairing,
+_render_rotation_quick_presets) - dat beantwoordt niet Kim's vraag.
+Kim wil: snel de TEGENSTANDER-opstelling van een eerdere ontmoeting
+invullen (i.p.v. 2x apart een koppel uit een lange dropdown te moeten
+kiezen in "Wie stelt de tegenstander op..." hierboven), en dan zien wat
+WIJ daar het beste tegenover kunnen zetten - dat laatste deel gebeurt al
+automatisch zodra de tegenstander-opstelling gekend is (de 3 kaarten en
+"Zelf samenstellen" rekenen dan al tegen die specifieke tegenstander).
+FIX, VOLLEDIG VERWIJDERD (niet enkel verborgen, zie hieronder waarom):
+  - _own_previous_encounters_as_presets(), _strongest_available_pairing(),
+    _rotation_matches_format(), _eligible_presets(),
+    _render_rotation_quick_presets() - allemaal verwijderd. Ze waren enkel
+    gebouwd voor, en enkel gebruikt door, de foute "Snelkeuzes"-sectie op
+    basis van ONZE eigen opstellingen - nergens anders in de app gebruikt,
+    dus veilig te verwijderen i.p.v. dode code te laten liggen.
+NIEUW, in de plaats:
+  - _opponent_rotation_presets(bundle, next_rotation_num, pair_label_fn,
+    known_labels): geeft per eerdere ontmoeting TEGEN DEZE tegenstander
+    (via de reeds bestaande _historical_opponent_boards_list(bundle) en
+    _rotation_boards_for(full_boards, next_rotation_num)) de 2 borden
+    terug die bij de EERSTVOLGENDE rotatie horen - dus de tegenstander-
+    koppels van Match 1 en Match 2 zoals ze die dag EFFECTIEF speelden.
+    `pair_label_fn` is DEZELFDE _pair_label()-functie die de bestaande
+    dropdowns hieronder al gebruiken (lokaal gedefinieerd in
+    _render_rotation_planner(), binnen de "Wie stelt de tegenstander op"-
+    expander) - dat garandeert dat de tekst die deze functie teruggeeft
+    EXACT overeenkomt met een bestaande dropdown-optie in `paar_labels`,
+    zodat het instellen van een preset (zie hieronder) altijd een geldige,
+    reeds bestaande keuze treft. `known_labels` (paar_labels) wordt enkel
+    gebruikt om historische matchups te NEGEREN wanneer 1 van de 2 spelers
+    niet (meer) in het gekende tegenstander-roster zit (bv. iemand die
+    intussen de ploeg verliet) - dan zou de preset-tekst toch niet in de
+    dropdown-opties bestaan, en wordt de preset stil overgeslagen.
+  - _render_opponent_quick_presets(...): tekent 1 knop per (bruikbare)
+    historische ontmoeting, meest recent eerst (_historical_opponent_
+    boards_list() geeft de fixtures in bundle.previous_fixtures-volgorde;
+    dat is de scrape-volgorde, niet gegarandeerd datum-aflopend - daarom
+    wordt hier, ANDERS dan bij de oude eigen-opstelling-presets,
+    EXPLICIET gesorteerd op _parse_match_date(label) aflopend, met een
+    stabiele terugval naar de oorspronkelijke volgorde bij een
+    onherkenbare datum-tekst). Elke knop toont enkel de NAMEN (geen
+    P-klassement/padelstat-cijfers, die horen al bij de dropdown-opties
+    hieronder) voor een compacte knoptekst, bv. "Zoals op 12/09: Peeters/
+    Janssens - Claes/Wouters".
+  - KLIK-GEDRAG: i.p.v. een eigen, parallel bevestig-pad te bouwen (zoals
+    de oude, foute presets deden - en waar de arity-bug net uit ontstond),
+    vult een klik enkel de 2 BESTAANDE dropdown-selecties in
+    (st.session_state[key_i] voor i=0,1 - dezelfde keys als de 2
+    selectboxen hieronder) met de exacte preset-labels, en doet dan
+    st.rerun(scope="fragment") - EXACT hetzelfde patroon als lineup_
+    sandbox.py._apply_sandbox_preset(). Na de rerun lezen de bestaande
+    selectboxen die ingevulde waarde uit, rotation_opponent_boards wordt
+    net zoals bij een manuele keuze gevuld, en de bestaande candidates-
+    berekening/kaarten/"Zelf samenstellen" draaien ONGEWIJZIGD verder op
+    die tegenstander-opstelling. Er is dus GEEN aparte bevestig-closure
+    nodig voor deze presets - vandaar dat de arity-bug hier NIET kan
+    terugkeren: er wordt nergens een eigen on_confirm(...) meer
+    aangeroepen voor dit pad.
+  - PLAATSING: de nieuwe presets staan BOVENAAN, IN de bestaande "Wie
+    stelt de tegenstander op in rotatie N?"-expander (v\u00f3\u00f3r de 2
+    bestaande dropdowns) - dus niet langer in een aparte "Snelkeuzes"-
+    expander; de oude, verwijderde sectie stond er los van, wat het
+    misverstand mee in de hand werkte (leek een ANDERE keuze dan de
+    tegenstander-dropdowns, terwijl het dat net WEL had moeten zijn).
+  - Klikt de gebruiker niets: de 2 dropdowns werken exact zoals voorheen,
+    geen functionaliteit verloren.
 """
 import itertools
 import streamlit as st
-from dashboard_common import ll, taa, _parse_match_date  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
+from dashboard_common import ll, taa, _parse_match_date
 from lineup_scout import (
     _cached_official_rank, _cached_own_player_rating,
     _render_official_rank_warning, _format_points_bounds_diagnostic,
-    _load_encounter_index,  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
 )
 # PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: zie lineup_lab.py voor de
 # volledige toelichting bij de kalibratie van de winkans-formule.
@@ -574,180 +620,100 @@ def _render_candidate_card(
                 st.caption(f"(EBW deze rotatie: {ebw:.2f})")
             return st.button("Kies deze kaart", key=f"{key_prefix}_pick", type="primary", use_container_width=True)
 # -----------------------------------------------
-# PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 - zie moduledocstring.
+# PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 - zie moduledocstring.
+# (VERVANGT de eerder verwijderde, foute eigen-opstelling-presets van
+# PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30.)
 # -----------------------------------------------
-def _own_previous_encounters_as_presets(profiles: list, sel_player_id) -> list:
-    """Geeft ALLE eerdere EIGEN ontmoetingen van sel_player_id terug, elk
-    volledig in rotaties gegroepeerd, meest recente eerst. Hergebruikt
-    DEZELFDE bouwstenen als lineup_sandbox._recent_own_lineup_boards()
-    (_load_encounter_index, ll.list_encounters, ll.reconstruct_boards),
-    maar geeft hier ALLE ontmoetingen terug i.p.v. enkel de meest recente -
-    ll.list_encounters() sorteert al datum-aflopend, dus de volgorde van
-    `own_keys` hieronder is al de gewenste presetvolgorde.
-    Geeft een lijst van {"label": str, "rotations": [[pair0, pair1], ...]}
-    terug, waarbij elke `pair` een frozenset van 2 speler-id's is (dezelfde
-    vorm als elders in dit bestand). Faalt altijd stil ([])."""
+def _opponent_rotation_presets(
+    bundle: dict, next_rotation_num: int, pair_label_fn, known_labels: set,
+) -> list:
+    """Geeft per eerdere ontmoeting TEGEN DEZE tegenstander de 2 borden
+    terug die bij de EERSTVOLGENDE rotatie horen, als bruikbare presets.
+    `pair_label_fn` moet DEZELFDE _pair_label()-functie zijn die de
+    dropdowns hieronder gebruiken, zodat de teruggegeven labels ALTIJD een
+    bestaande dropdown-optie treffen. `known_labels` = paar_labels (de
+    huidige dropdown-opties) - een historische matchup waarvan 1 label er
+    niet (meer) in zit (bv. speler verliet de ploeg) wordt overgeslagen.
+    Geeft een lijst van {"fixture_label": str, "m1_label": str,
+    "m2_label": str, "m1_display": str, "m2_display": str} terug, meest
+    recente ontmoeting eerst (best-effort datum-sortering, zie
+    moduledocstring). Faalt altijd stil ([])."""
     try:
-        profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
-        docs, index = _load_encounter_index(profile_ids)
-        all_encounters = ll.list_encounters(index)
-        own_keys_labels = [
-            (key, label) for key, label in all_encounters
-            if any(pid == str(sel_player_id) for pid, _ in index[key])
-        ]
-        out = []
-        for key, label in own_keys_labels:
-            boards = ll.reconstruct_boards(index[key]) or []
-            sorted_boards = sorted(boards, key=lambda b: b.get("board_position") or 0)
-            pairs = [b.get("pair") for b in sorted_boards if len(b.get("pair") or []) == 2]
-            if not pairs:
-                continue
-            rotations = [
-                pairs[i: i + MATCHES_PER_ROTATION]
-                for i in range(0, len(pairs), MATCHES_PER_ROTATION)
-            ]
-            out.append({"label": label, "rotations": rotations})
-        return out
+        historical = _historical_opponent_boards_list(bundle)
     except Exception:  # noqa: BLE001
         return []
-def _strongest_available_pairing(
-    available_ids: list, player_ratings: dict, official_ranks_strict: dict, player_budget,
-) -> list:
-    """Snelle, deterministische preset: de 4 hoogst-gewaardeerde
-    beschikbare spelers (player_ratings, terugval official_ranks_strict),
-    gepaard als (1e+2e, 3e+4e). Geeft [duo_a, duo_b] (2 frozensets) terug,
-    of [] als er geen 4 spelers met budget > 0 beschikbaar zijn. Geeft GEEN
-    reglement-check (die gebeurt bij het TONEN van de preset, zie
-    _eligible_presets())."""
-    eligible = [
-        str(p) for p in available_ids
-        if player_budget is None or (player_budget.get(str(p), 0) or 0) > 0
-    ]
-    if len(eligible) < 4:
-        return []
-    def _sterkte(pid: str):
-        if player_ratings and player_ratings.get(pid) is not None:
-            return player_ratings[pid]
-        return official_ranks_strict.get(pid) or 0
-    eligible_sorted = sorted(eligible, key=_sterkte, reverse=True)
-    top4 = eligible_sorted[:4]
-    return [frozenset(top4[0:2]), frozenset(top4[2:4])]
-def _rotation_matches_format(rotation: list) -> bool:
-    return len(rotation) == MATCHES_PER_ROTATION and all(len(p) == 2 for p in rotation)
-def _eligible_presets(
-    raw_presets: list, available_ids: list, excluded_pairs: set, player_budget,
-) -> tuple:
-    """Filtert een lijst kandidaat-presets (elk {"label", "rotation":
-    [pair0, pair1]}) tot wat werkelijk aangeboden mag worden: alle 4
-    spelers in `available_ids`, budget > 0 (indien player_budget gezet
-    is), en geen van beide koppels al in `excluded_pairs`. Geeft
-    (geldige_presets, aantal_overgeslagen) terug - het aantal wordt
-    gebruikt voor een verzamelmelding i.p.v. per preset een reden te
-    tonen."""
-    beschikbaar = {str(p) for p in available_ids}
-    geldig = []
-    overgeslagen = 0
-    for preset in raw_presets:
-        rotation = preset["rotation"]
-        if not _rotation_matches_format(rotation):
-            overgeslagen += 1
+
+    def _datum_sleutel(item):
+        fixture_label, _ = item
+        parsed = None
+        try:
+            parsed = _parse_match_date(fixture_label)
+        except Exception:  # noqa: BLE001
+            parsed = None
+        return (parsed is not None, parsed or (0, 0, 0))
+
+    historical_sorted = sorted(historical, key=_datum_sleutel, reverse=True)
+    out = []
+    for fixture_label, full_boards in historical_sorted:
+        rot_boards = _rotation_boards_for(full_boards, next_rotation_num)
+        if not rot_boards or len(rot_boards) != 2:
             continue
-        alle_spelers = {str(x) for pair in rotation for x in pair}
-        if not alle_spelers.issubset(beschikbaar):
-            overgeslagen += 1
+        m1_pair = (rot_boards[0].get("opponent_pair") or [])
+        m2_pair = (rot_boards[1].get("opponent_pair") or [])
+        if len(m1_pair) != 2 or len(m2_pair) != 2:
             continue
-        if player_budget is not None and any(
-            (player_budget.get(str(pid), 0) or 0) <= 0 for pid in alle_spelers
-        ):
-            overgeslagen += 1
+        try:
+            m1_label = pair_label_fn(m1_pair[0], m1_pair[1])
+            m2_label = pair_label_fn(m2_pair[0], m2_pair[1])
+        except Exception:  # noqa: BLE001
             continue
-        if any(pair in excluded_pairs for pair in rotation):
-            overgeslagen += 1
+        if m1_label not in known_labels or m2_label not in known_labels:
+            # Minstens 1 speler zit niet (meer) in het gekende tegenstander-
+            # roster - deze preset zou een niet-bestaande dropdown-optie
+            # instellen, dus overslaan i.p.v. een kapotte knop te tonen.
             continue
-        geldig.append(preset)
-    return geldig, overgeslagen
-def _render_rotation_quick_presets(
-    profiles, sel_player_id, available_ids, synergy_fn, official_ranks_strict,
-    player_ratings, opponent_ratings, effective_opponent_boards, excluded_pairs,
-    player_budget, tournament_rules_dict, ploeg_id, next_rotation_num, on_confirm,
+        m1_namen = " / ".join(p.get("name", "?") for p in m1_pair)
+        m2_namen = " / ".join(p.get("name", "?") for p in m2_pair)
+        out.append({
+            "fixture_label": fixture_label,
+            "m1_label": m1_label, "m2_label": m2_label,
+            "m1_display": m1_namen, "m2_display": m2_namen,
+        })
+    return out
+def _render_opponent_quick_presets(
+    bundle: dict, next_rotation_num: int, pair_label_fn, known_labels: set,
+    key_i0: str, key_i1: str,
 ) -> None:
-    """PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 - zie
-    moduledocstring. `on_confirm(ordered_pairs, win_probs)` is de
-    2-argumenten-wrapper rond _bevestig_rotatie() uit
-    _render_rotation_planner() - zie PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_
-    FIX_2026-09-30."""
-    raw_presets = []
-    if profiles is not None and sel_player_id is not None:
-        for encounter in _own_previous_encounters_as_presets(profiles, sel_player_id):
-            idx = next_rotation_num - 1
-            if idx < len(encounter["rotations"]):
-                raw_presets.append({
-                    "label": f"Zelfde als: {encounter['label']}",
-                    "rotation": encounter["rotations"][idx],
-                })
-    sterkste = _strongest_available_pairing(
-        available_ids, player_ratings, official_ranks_strict, player_budget,
-    )
-    if sterkste:
-        raw_presets.append({"label": "Sterkste beschikbare (Elo)", "rotation": sterkste})
-    if not raw_presets:
-        st.caption("Nog geen snelkeuzes beschikbaar (geen eerdere eigen ontmoetingen gekend).")
-        return
-    geldig, overgeslagen = _eligible_presets(raw_presets, available_ids, excluded_pairs, player_budget)
-    # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30: elke geldige
-    # preset gaat nog door DEZELFDE reglement-check (sterkste-eerst +
-    # puntengrens) als de rest van dit bestand - een preset die de
-    # puntengrens van de gekozen afdeling schendt, wordt hier alsnog
-    # geweerd (met reden), in plaats van een ongeldige knop te tonen.
-    padelstat = player_ratings or {}
-    bruikbaar = []
-    afgewezen_door_regels = 0
-    for preset in geldig:
-        duo_a, duo_b = preset["rotation"]
-        variants = _rotation_order_variants(
-            duo_a, duo_b, official_ranks_strict, padelstat, rules=tournament_rules_dict,
-        )["variants"]
-        variants = [v for v in variants if v["is_regulation_compliant"] is not False]
-        if not variants:
-            afgewezen_door_regels += 1
-            continue
-        ordered = variants[0]["ordered_pairs"]
-        bruikbaar.append({"label": preset["label"], "ordered_pairs": ordered})
-    if not bruikbaar:
-        st.info(
-            "Geen enkele snelkeuze is momenteel bruikbaar (spelers niet beschikbaar, budget op, "
-            "koppel al gebruikt, of de puntengrens van de gekozen afdeling laat het niet toe)."
-        )
-        return
-    totaal_genegeerd = overgeslagen + afgewezen_door_regels
-    if totaal_genegeerd:
+    """PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 - zie
+    moduledocstring. Tekent 1 knop per bruikbare historische ontmoeting
+    tegen DEZE tegenstander. `key_i0`/`key_i1` zijn de EXACTE
+    session_state-keys van de 2 bestaande "Tegenstander match 1/2"-
+    dropdowns hieronder - een klik vult die rechtstreeks in en doet een
+    st.rerun(scope="fragment"), net als lineup_sandbox.py's preset-knoppen.
+    Geen eigen bevestig-pad: de bestaande dropdown-logica en alles wat
+    daarop bouwt (candidates/kaarten/"Zelf samenstellen") werkt hierna
+    ONGEWIJZIGD verder, exact zoals bij een manuele dropdown-keuze."""
+    presets = _opponent_rotation_presets(bundle, next_rotation_num, pair_label_fn, known_labels)
+    if not presets:
         st.caption(
-            f"{totaal_genegeerd} snelkeuze(s) niet getoond (speler niet beschikbaar/budget op/"
-            "koppel al gebruikt/puntengrens)."
+            "Nog geen snelkeuze beschikbaar voor deze rotatie-positie (geen eerdere ontmoeting "
+            "tegen deze tegenstander met bekende opstelling op exact deze plaats)."
         )
-    for i, preset in enumerate(bruikbaar):
-        ordered_pairs = preset["ordered_pairs"]
-        rot_boards = _rotation_boards_for(effective_opponent_boards, next_rotation_num)
-        if rot_boards and player_ratings is not None:
-            computed = _compute_matchup(
-                ordered_pairs, rot_boards, synergy_fn, player_ratings,
-                official_ranks_strict, opponent_ratings or {},
-            )
-            win_probs = [a.get("win_probability") for a in computed["assignment"]]
-            ebw = computed.get("expected_boards_won")
-        else:
-            win_probs = [None, None]
-            ebw = None
-        ebw_txt = f" (verwacht {ebw:.2f} gewonnen matchen)" if ebw is not None else ""
-        # Deterministische, unieke key o.b.v. positie + koppel-inhoud (GEEN
-        # hash() - die is procesbreed stabiel maar onnodig fragiel/onleesbaar).
-        pair_key_txt = "_".join(sorted(str(x) for pair in ordered_pairs for x in pair))
+        return
+    st.caption("Snelkeuze: tegenstander-opstelling zoals in een eerdere ontmoeting -")
+    for i, preset in enumerate(presets):
+        knop_tekst = (
+            f"Zoals op {preset['fixture_label']}: "
+            f"M1 {preset['m1_display']}  -  M2 {preset['m2_display']}"
+        )
         if st.button(
-            f"{preset['label']}{ebw_txt}",
-            key=f"preset_{ploeg_id}_{next_rotation_num}_{i}_{pair_key_txt}",
+            knop_tekst,
+            key=f"opp_preset_{next_rotation_num}_{i}",
             use_container_width=True,
         ):
-            on_confirm(ordered_pairs, win_probs)
+            st.session_state[key_i0] = preset["m1_label"]
+            st.session_state[key_i1] = preset["m2_label"]
+            st.rerun(scope="fragment")
 def _match1_eligible_players(candidates: list) -> list:
     """Alle speler-id's die in minstens 1 candidate als lid van
     ordered_pairs[0] (Match 1) voorkomen - dus: kan volgens de reeds
@@ -1515,7 +1481,7 @@ def _render_rotation_planner(
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
     report_for_ai=None, tournament_rules_dict=None, rules_label=None,
     bundle=None, total_boards=None, max_per_player=None,
-    profiles=None, sel_player_id=None,  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
+    profiles=None, sel_player_id=None,  # nog aanvaard voor achterwaartse compatibiliteit, niet meer gebruikt door de nieuwe tegenstander-presets
 ):
     """PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26: @st.fragment isoleert
     deze functie van een volledige pagina-rerun. Zie de oorspronkelijke
@@ -1653,6 +1619,15 @@ def _render_rotation_planner(
             geen_keuze = "- Kies een koppel -"
             paar_labels = [geen_keuze] + [_pair_label(p1, p2) for p1, p2 in alle_paren]
             paar_map = {_pair_label(p1, p2): (p1, p2) for p1, p2 in alle_paren}
+            key_i0 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_0"
+            key_i1 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_1"
+            # PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30: snelkeuzes
+            # BOVENAAN, in DEZE expander, v\u00f3\u00f3r de 2 dropdowns - zie
+            # moduledocstring. Vult bij een klik gewoon de 2 bestaande
+            # dropdown-keys in en herlaadt; geen apart bevestig-pad.
+            _render_opponent_quick_presets(
+                bundle, next_rotation_num, _pair_label, set(paar_labels), key_i0, key_i1,
+            )
             voorstel_idx = [0, 0]
             if opponent_boards:
                 offset = (next_rotation_num - 1) * 2
@@ -1681,7 +1656,7 @@ def _render_rotation_planner(
                     ]
                 else:
                     beschikbare_labels = paar_labels
-                key_i = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_{i}"
+                key_i = key_i0 if i == 0 else key_i1
                 if key_i in st.session_state and st.session_state[key_i] not in beschikbare_labels:
                     st.session_state[key_i] = geen_keuze
                 with cols[i]:
@@ -1757,23 +1732,18 @@ def _render_rotation_planner(
     if rotation_opponent_boards:
         opp_pairs_voor_log = [b.get("opponent_pair") or [] for b in rotation_opponent_boards]
     # PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30: _bevestig_rotatie()
-    # verwacht 3 argumenten, maar de presets en de custom-modus roepen
-    # on_confirm(ordered_pairs, win_probs) aan met slechts 2 - deze wrapper
-    # vult opp_pairs_voor_log (al hierboven berekend, identiek aan wat de
-    # kaarten-knop gebruikt) automatisch aan. Zie moduledocstring.
+    # verwacht 3 argumenten. De custom-modus roept on_confirm(ordered_pairs,
+    # win_probs) aan met slechts 2 - deze wrapper vult opp_pairs_voor_log
+    # automatisch aan. De tegenstander-presets hierboven gebruiken deze
+    # wrapper NIET MEER (PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30):
+    # zij vullen enkel de bestaande dropdown-selecties in en herladen.
     def _on_confirm_2arg(ordered_pairs, win_probs) -> None:
         _bevestig_rotatie(ordered_pairs, opp_pairs_voor_log, win_probs)
-    # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30: snelkeuzes en
-    # klik-voor-klik-custom-modus, VOOR de 3 kaarten - zie moduledocstring.
-    # Beide gebruiken de _on_confirm_2arg-wrapper (zie
-    # PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30), dus identieke
-    # locked_*-boekhouding ongeacht welk pad de gebruiker kiest.
-    with st.expander("Snelkeuzes", expanded=False):
-        _render_rotation_quick_presets(
-            profiles, sel_player_id, available_ids, synergy_fn, official_ranks_strict,
-            player_ratings, opponent_ratings, effective_opponent_boards, excluded_pairs,
-            player_budget, tournament_rules_dict, ploeg_id, next_rotation_num, _on_confirm_2arg,
-        )
+    # PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30: de oude, foute
+    # "Snelkeuzes"-expander (eigen-opstelling-presets) is VERWIJDERD - zie
+    # moduledocstring. De tegenstander-snelkeuzes staan nu hierboven, IN de
+    # "Wie stelt de tegenstander op..."-expander. Enkel "Zelf samenstellen"
+    # (eigen koppelkeuze, klik-voor-klik) blijft hier staan.
     with st.expander("Zelf samenstellen (klik-voor-klik)", expanded=False):
         _render_custom_click_builder(
             candidates, name_lookup_global, ploeg_id, next_rotation_num, _on_confirm_2arg,
