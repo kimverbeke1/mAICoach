@@ -317,20 +317,73 @@ NIEUW, in de plaats:
     terugkeren: er wordt nergens een eigen on_confirm(...) meer
     aangeroepen voor dit pad.
   - PLAATSING: de nieuwe presets staan BOVENAAN, IN de bestaande "Wie
-    stelt de tegenstander op in rotatie N?"-expander (v\u00f3\u00f3r de 2
+    stelt de tegenstander op in rotatie N?"-expander (vóór de 2
     bestaande dropdowns) - dus niet langer in een aparte "Snelkeuzes"-
     expander; de oude, verwijderde sectie stond er los van, wat het
     misverstand mee in de hand werkte (leek een ANDERE keuze dan de
     tegenstander-dropdowns, terwijl het dat net WEL had moeten zijn).
   - Klikt de gebruiker niets: de 2 dropdowns werken exact zoals voorheen,
     geen functionaliteit verloren.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 (op verzoek van Kim, na het
+gezamenlijk uitgetekende ontwerp - 1 sectie "Opstelling", sandbox weg,
+eindpaneel na beide rotaties, "meest frequent"-snelkeuze data-gedreven
+i.p.v. een vast aantal: "Dus daarom zit ik te denken aan verschillende
+scenario's die automatisch al kunnen getest worden [...] je zou dus zeker
+ook kans op 1,2 of 0 punten bij de rotatieplanner moeten tonen.")
+--------------------------------------------------------------------------
+Drie afzonderlijke toevoegingen, elk met een eigen reden:
+1. EINDPANEEL (_render_encounter_summary()): zodra borden_bevestigd >=
+   total_boards, toonde de code hiervoor ENKEL een st.success()-melding en
+   dan een `return` - geen enkele samenvatting van de 4 matchen of de
+   eind-puntenkans was zichtbaar. _render_encounter_summary() herrekent
+   (via de reeds bestaande _match_outcome_point_probabilities()) de
+   EXACTE P(2)/P(1)/P(0) over de effectief gekozen winkansen van ALLE
+   bevestigde rotaties (locked_win_probs_per_rotation, plat gemaakt - GEEN
+   placeholder/50% meer nodig, want alles ligt vast), en toont daarnaast
+   elke match met de effectieve namen (locked_rotations/locked_opponents).
+2. "MEEST FREQUENT"-SNELKEUZE (_opponent_rotation_frequent_preset()): Kim
+   koos bewust GEEN vast aantal ("hangt af van wat zinvol is") - daarom is
+   dit DATA-GEDREVEN: de functie telt, over ALLE historische ontmoetingen
+   tegen deze tegenstander (dezelfde _opponent_rotation_presets()-data,
+   hergebruikt, geen nieuwe databron), welke (Match 1-duo, Match 2-duo)-
+   COMBINATIE op deze rotatie-positie het VAAKST voorkwam. Een extra knop
+   verschijnt ENKEL als die frequentie >= 2 is (anders is het toeval, geen
+   signaal) EN de combinatie nog niet toevallig IDENTIEK is aan de "zoals
+   op [meest recente datum]"-knop die _render_opponent_quick_presets() al
+   toont (geen zinloze dubbele knop). Bij 0 of 1 bruikbare "zoals op..."-
+   presets kan er sowieso geen frequentie >= 2 bestaan, dus verschijnt de
+   knop dan vanzelf niet - geen aparte lege-lijst-check nodig.
+3. SANDBOX-PRESETS VERHUISD (_strongest_quartet_candidate(),
+   _own_previous_rotation_pairs()): Kim bevestigde "sandbox weg" (punt 3)
+   en vroeg de nuttige presets ("Ons sterkste 4 (Elo)", "Onze vorige
+   opstelling") te verhuizen naar "Zelf samenstellen" (punt 4 van het
+   plan), i.p.v. zomaar te verdwijnen. BEIDE functies zoeken een
+   CANDIDATE die exact bij het voorstel past (via _find_matching_
+   candidate(), dezelfde functie die de klik-voor-klik-modus al gebruikt)
+   - bestaat die niet (bv. de puntengrens laat deze combinatie niet toe
+   voor de gekozen afdeling, of 1 van de spelers is deze rotatie niet
+   beschikbaar), dan toont de knop een duidelijke melding i.p.v. een
+   ongeldige keuze te forceren. _own_previous_rotation_pairs() hergebruikt
+   dezelfde bron als de vroegere lineup_sandbox._recent_own_lineup_boards()
+   (_load_encounter_index/ll.list_encounters/ll.reconstruct_boards).
+   lineup_sandbox.py en zijn aanroep in page_lineup_lab.py zijn hierdoor
+   overbodig geworden en VERWIJDERD (git rm, zie de instructies bij
+   oplevering) - functioneel is er dus NIETS verloren, enkel VERPLAATST
+   naar waar het hoort: naast de andere opstelling-keuzes voor DEZE
+   tegenstander, i.p.v. een volledig aparte, losstaande pagina-sectie.
+   lineup_whatif.py (en zijn aanroep) is EVENEENS verwijderd - Kim: "die
+   wat als: mijn winkans bij een andere partner mag weg" - dat bestand had
+   geen andere afhankelijkheden, dus een zuivere verwijdering.
 """
 import itertools
+from collections import Counter
 import streamlit as st
 from dashboard_common import ll, taa, _parse_match_date
 from lineup_scout import (
     _cached_official_rank, _cached_own_player_rating,
     _render_official_rank_warning, _format_points_bounds_diagnostic,
+    _load_encounter_index,  # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: voor de overgenomen sandbox-preset "Onze vorige opstelling"
 )
 # PADEL_ANALYSIS_WINPROB_CALIBRATION_2026-09-22: zie lineup_lab.py voor de
 # volledige toelichting bij de kalibratie van de winkans-formule.
@@ -642,7 +695,6 @@ def _opponent_rotation_presets(
         historical = _historical_opponent_boards_list(bundle)
     except Exception:  # noqa: BLE001
         return []
-
     def _datum_sleutel(item):
         fixture_label, _ = item
         parsed = None
@@ -651,7 +703,6 @@ def _opponent_rotation_presets(
         except Exception:  # noqa: BLE001
             parsed = None
         return (parsed is not None, parsed or (0, 0, 0))
-
     historical_sorted = sorted(historical, key=_datum_sleutel, reverse=True)
     out = []
     for fixture_label, full_boards in historical_sorted:
@@ -714,6 +765,53 @@ def _render_opponent_quick_presets(
             st.session_state[key_i0] = preset["m1_label"]
             st.session_state[key_i1] = preset["m2_label"]
             st.rerun(scope="fragment")
+    # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: data-gedreven extra knop,
+    # enkel als er een echt frequentie-signaal is - zie moduledocstring.
+    frequent = _opponent_rotation_frequent_preset(presets)
+    if frequent is not None:
+        knop_tekst = (
+            f"Meest frequent ({frequent['freq']}x): "
+            f"M1 {frequent['m1_display']}  -  M2 {frequent['m2_display']}"
+        )
+        if st.button(
+            knop_tekst,
+            key=f"opp_preset_frequent_{next_rotation_num}",
+            use_container_width=True,
+        ):
+            st.session_state[key_i0] = frequent["m1_label"]
+            st.session_state[key_i1] = frequent["m2_label"]
+            st.rerun(scope="fragment")
+def _opponent_rotation_frequent_preset(presets: list) -> dict:
+    """PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 - zie moduledocstring.
+    Neemt de output van _opponent_rotation_presets() (1 rij per historische
+    ontmoeting tegen deze tegenstander, al gesorteerd meest-recent-eerst)
+    en zoekt de (m1_label, m2_label)-COMBINATIE die het VAAKST voorkwam.
+    Geeft None terug als:
+      - er minder dan 2 presets zijn (geen zinvolle frequentie mogelijk);
+      - de hoogste frequentie < 2 is (elke combinatie kwam maar 1x voor -
+        geen signaal, puur toeval welke het eerst in de lijst staat);
+      - de meest-frequente combinatie toevallig EXACT de eerste (dus meest
+        recente) preset is - dan zou deze knop een zinloos duplicaat van
+        "zoals op [meest recente datum]" zijn.
+    Bij een gelijke frequentie tussen meerdere combinaties: Counter.most_
+    common() geeft de eerst-ingevoegde volgorde als tiebreak, en presets
+    is al gesorteerd op datum aflopend - dus bij een gelijke stand wint de
+    meest recente combinatie, net als de rest van deze snelkeuze-sectie."""
+    if len(presets) < 2:
+        return None
+    counter = Counter((p["m1_label"], p["m2_label"]) for p in presets)
+    (m1, m2), freq = counter.most_common(1)[0]
+    if freq < 2:
+        return None
+    meest_recent = presets[0]
+    if (meest_recent["m1_label"], meest_recent["m2_label"]) == (m1, m2):
+        return None
+    match = next(p for p in presets if (p["m1_label"], p["m2_label"]) == (m1, m2))
+    return {
+        "m1_label": m1, "m2_label": m2,
+        "m1_display": match["m1_display"], "m2_display": match["m2_display"],
+        "freq": freq,
+    }
 def _match1_eligible_players(candidates: list) -> list:
     """Alle speler-id's die in minstens 1 candidate als lid van
     ordered_pairs[0] (Match 1) voorkomen - dus: kan volgens de reeds
@@ -763,17 +861,141 @@ def _find_matching_candidate(candidates: list, duo_a: frozenset, duo_b: frozense
         ):
             return cand
     return None
+def _candidates_player_pool(candidates: list) -> set:
+    """Alle speler-id's die in minstens 1 candidate voorkomen (Match 1 of
+    Match 2 samen) - gebruikt om de 'sterkste 4'-preset te bepalen zonder
+    spelers voor te stellen die voor deze rotatie toch niet beschikbaar
+    zijn (budget op, of al gebruikt in een vorige rotatie)."""
+    out = set()
+    for cand in candidates:
+        if cand.get("ordered_pairs"):
+            for pair in cand["ordered_pairs"]:
+                out |= set(pair)
+    return out
+def _strongest_quartet_candidate(candidates: list, player_ratings: dict, official_ranks_strict: dict):
+    """PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 - zie moduledocstring
+    (sandbox-preset 'Ons sterkste 4 (Elo)', verhuisd van lineup_sandbox.py).
+    Sorteert de spelers die in DEZE rotatie nog beschikbaar zijn
+    (_candidates_player_pool) op playing strength (player_ratings, terugval
+    official_ranks_strict), en zoekt onder `candidates` (al reglementair
+    gevalideerd) de kandidaat die EXACT uit deze top-4 bestaat. Geeft None
+    terug als er geen 4 beschikbare spelers zijn, of als geen enkele
+    gevalideerde candidate exact deze 4 spelers gebruikt (bv. omdat geen
+    enkele koppelverdeling van precies deze 4 de puntengrens haalt)."""
+    pool = _candidates_player_pool(candidates)
+    if len(pool) < 4:
+        return None
+    def _sterkte(pid):
+        if player_ratings and player_ratings.get(pid) is not None:
+            return player_ratings[pid]
+        return official_ranks_strict.get(pid) or 0
+    top4 = set(sorted(pool, key=_sterkte, reverse=True)[:4])
+    for cand in candidates:
+        if not cand.get("ordered_pairs"):
+            continue
+        spelers = {p for pair in cand["ordered_pairs"] for p in pair}
+        if spelers == top4:
+            return cand
+    return None
+def _own_previous_rotation_pairs(profiles: list, sel_player_id, next_rotation_num: int):
+    """PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 - zie moduledocstring
+    (sandbox-preset 'Onze vorige opstelling', verhuisd van lineup_
+    sandbox.py._recent_own_lineup_boards()). Geeft (duo_a, duo_b) van ONZE
+    EIGEN vorige interclubontmoeting terug voor deze rotatie-positie, als 2
+    frozensets - of None als er geen vorige ontmoeting gekend is, of als
+    die niet genoeg borden had voor deze rotatie-positie. Faalt altijd
+    stil (None), nooit een crash."""
+    if not profiles or not sel_player_id:
+        return None
+    try:
+        profile_ids = tuple(sorted(p.get("player_id") for p in profiles if p.get("player_id")))
+        docs, index = _load_encounter_index(profile_ids)
+        all_encounters = ll.list_encounters(index)
+        own_keys = [key for key, _ in all_encounters if any(pid == str(sel_player_id) for pid, _ in index[key])]
+        if not own_keys:
+            return None
+        most_recent_key = own_keys[0]  # ll.list_encounters() sorteert al datum-aflopend
+        boards = ll.reconstruct_boards(index[most_recent_key]) or []
+        sorted_boards = sorted(boards, key=lambda b: b.get("board_position") or 0)
+        pairs = [tuple(b.get("pair")) for b in sorted_boards if len(b.get("pair") or []) == 2]
+        offset = (int(next_rotation_num) - 1) * MATCHES_PER_ROTATION
+        if offset + 1 >= len(pairs):
+            return None
+        return frozenset(pairs[offset]), frozenset(pairs[offset + 1])
+    except Exception:  # noqa: BLE001
+        return None
+def _render_own_lineup_quick_presets(
+    candidates: list, profiles, sel_player_id, player_ratings: dict,
+    official_ranks_strict: dict, next_rotation_num: int,
+    key_m1p1: str, key_m1p2: str, key_m2p1: str, key_m2p2: str,
+    name_lookup_global: dict,
+) -> None:
+    """PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 - zie moduledocstring.
+    Tekent de 2 overgenomen sandbox-presets BOVENAAN "Zelf samenstellen".
+    Een klik vult de 4 BESTAANDE selectbox-keys van de klik-voor-klik-
+    bouwer rechtstreeks in (zelfde patroon als de tegenstander-presets
+    hierboven) en herlaadt - geen apart bevestig-pad, dus geen risico op
+    de eerder gefixte arity-bug."""
+    def _fill(duo_a, duo_b) -> None:
+        p1a, p2a = tuple(duo_a)
+        p1b, p2b = tuple(duo_b)
+        st.session_state[key_m1p1] = name_lookup_global.get(p1a, p1a)
+        st.session_state[key_m1p2] = name_lookup_global.get(p2a, p2a)
+        st.session_state[key_m2p1] = name_lookup_global.get(p1b, p1b)
+        st.session_state[key_m2p2] = name_lookup_global.get(p2b, p2b)
+        st.rerun(scope="fragment")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Ons sterkste 4 (Elo)", key=f"own_preset_elo_{next_rotation_num}", use_container_width=True):
+            sterkste = _strongest_quartet_candidate(candidates, player_ratings, official_ranks_strict)
+            if sterkste is None:
+                st.warning(
+                    "Geen geldige rotatie gevonden met exact de 4 sterkste beschikbare spelers "
+                    "(bv. de puntengrens van de gekozen afdeling laat deze combinatie niet toe)."
+                )
+            else:
+                _fill(frozenset(sterkste["ordered_pairs"][0]), frozenset(sterkste["ordered_pairs"][1]))
+    with col_b:
+        if st.button("Onze vorige opstelling", key=f"own_preset_prev_{next_rotation_num}", use_container_width=True):
+            vorige = _own_previous_rotation_pairs(profiles, sel_player_id, next_rotation_num)
+            if vorige is None:
+                st.warning("Geen vorige eigen opstelling gekend voor deze rotatie-positie.")
+            else:
+                duo_a, duo_b = vorige
+                gevonden = _find_matching_candidate(candidates, duo_a, duo_b)
+                if gevonden is None:
+                    st.warning(
+                        "Onze vorige opstelling op deze positie is nu niet geldig (bv. een speler is "
+                        "deze rotatie niet beschikbaar, of het koppel speelde al in een eerdere rotatie)."
+                    )
+                else:
+                    _fill(duo_a, duo_b)
 def _render_custom_click_builder(
     candidates: list, name_lookup_global: dict, ploeg_id, next_rotation_num, on_confirm,
+    profiles=None, sel_player_id=None, player_ratings: dict = None, official_ranks_strict: dict = None,
 ) -> None:
     """PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 - zie
     moduledocstring voor de volledige toelichting. Bouwt EEN rotatie op uit
     de reeds berekende, gevalideerde `candidates`-lijst, klik voor klik.
     `on_confirm(ordered_pairs, win_probs)` is de 2-argumenten-wrapper rond
     _bevestig_rotatie() uit _render_rotation_planner() - zie
-    PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30."""
+    PADEL_ANALYSIS_PRESET_CONFIRM_ARITY_FIX_2026-09-30.
+    PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: `profiles`/`sel_player_id`/
+    `player_ratings`/`official_ranks_strict` zijn nieuw - enkel gebruikt
+    voor de 2 overgenomen sandbox-presets bovenaan (zie moduledocstring).
+    Zonder deze 4 argumenten (bv. een oudere aanroeper) vallen enkel die 2
+    preset-knoppen weg; de rest van deze functie werkt ONGEWIJZIGD."""
     geen_keuze = "- Kies -"
     kp = f"custom_{ploeg_id}_{next_rotation_num}"
+    key_m1p1_vooraf, key_m1p2_vooraf = f"{kp}_m1p1", f"{kp}_m1p2"
+    key_m2p1_vooraf, key_m2p2_vooraf = f"{kp}_m2p1", f"{kp}_m2p2"
+    if profiles is not None or player_ratings is not None:
+        _render_own_lineup_quick_presets(
+            candidates, profiles, sel_player_id, player_ratings or {}, official_ranks_strict or {},
+            next_rotation_num, key_m1p1_vooraf, key_m1p2_vooraf, key_m2p1_vooraf, key_m2p2_vooraf,
+            name_lookup_global,
+        )
+        st.divider()
     m1_opties = [geen_keuze] + [
         name_lookup_global.get(pid, pid) for pid in _match1_eligible_players(candidates)
     ]
@@ -1475,13 +1697,57 @@ def _render_assignment_with_outcome(assignment: list, name_lookup_global: dict) 
             f"**{name_lookup_global.get(p1,p1)} / {name_lookup_global.get(p2,p2)}** "
             f"(synergie {a['synergy']}) - vs **{opp_names}**: {wp_txt}{rating_txt}"
         )
+def _render_encounter_summary(
+    locked_rotations: list, locked_opponents: list, locked_win_probs_per_rotation: list,
+    name_lookup_global: dict,
+) -> None:
+    """PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 - zie moduledocstring.
+    Toont, zodra ALLE rotaties van de ontmoeting bevestigd zijn, een
+    eindsamenvatting: de 4 (of n) matchen op een rij, en de EXACTE P(2)/
+    P(1)/P(0) over de VOLLEDIGE ontmoeting - hergebruikt
+    _match_outcome_point_probabilities() met de effectief gekozen
+    winkansen (GEEN placeholder/50% nodig, want alles ligt al vast)."""
+    flat_win_probs = [wp for rotatie in locked_win_probs_per_rotation for wp in rotatie]
+    pp = _match_outcome_point_probabilities(flat_win_probs)
+    n_missing = _n_missing_win_probs(flat_win_probs)
+    st.markdown("**Eindresultaat van deze ontmoeting:**")
+    col_p2, col_p1, col_p0 = st.columns(3)
+    with col_p2:
+        st.metric("Kans 2p (winst)", f"{pp['p2'] * 100:.0f}%")
+    with col_p1:
+        st.metric("Kans 1p (gelijk)", f"{pp['p1'] * 100:.0f}%")
+    with col_p0:
+        st.metric("Kans 0p (verlies)", f"{pp['p0'] * 100:.0f}%")
+    if n_missing:
+        st.caption(
+            f"{n_missing} match(en) zonder bekende winkans (tegenstander destijds niet gekozen) - "
+            "geteld als 50/50 in bovenstaande kansen."
+        )
+    for rot_idx, pairs in enumerate(locked_rotations, start=1):
+        opp_voor_rotatie = (
+            locked_opponents[rot_idx - 1] if rot_idx - 1 < len(locked_opponents) else None
+        )
+        win_probs_voor_rotatie = (
+            locked_win_probs_per_rotation[rot_idx - 1] if rot_idx - 1 < len(locked_win_probs_per_rotation) else [None, None]
+        )
+        for match_idx, pair in enumerate(pairs, start=1):
+            p1, p2 = tuple(pair)
+            ons = f"{name_lookup_global.get(p1, p1)} / {name_lookup_global.get(p2, p2)}"
+            tegen = ""
+            if opp_voor_rotatie and match_idx - 1 < len(opp_voor_rotatie):
+                namen = [x.get("name", "?") for x in opp_voor_rotatie[match_idx - 1]]
+                if namen:
+                    tegen = f" - tegen **{' / '.join(namen)}**"
+            wp = win_probs_voor_rotatie[match_idx - 1] if match_idx - 1 < len(win_probs_voor_rotatie) else None
+            wp_txt = f" ({int(round(wp * 100))}% winkans)" if wp is not None else " (winkans onbekend)"
+            st.write(f"Rotatie {rot_idx} - Match {match_idx}: **{ons}**{tegen}{wp_txt}")
 @st.fragment
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
     opponent_boards=None, player_ratings=None, opponent_ratings=None,
     report_for_ai=None, tournament_rules_dict=None, rules_label=None,
     bundle=None, total_boards=None, max_per_player=None,
-    profiles=None, sel_player_id=None,  # nog aanvaard voor achterwaartse compatibiliteit, niet meer gebruikt door de nieuwe tegenstander-presets
+    profiles=None, sel_player_id=None,  # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: opnieuw ACTIEF gebruikt, voor de overgenomen sandbox-presets in "Zelf samenstellen"
 ):
     """PADEL_ANALYSIS_FRAGMENT_ISOLATION_2026-09-26: @st.fragment isoleert
     deze functie van een volledige pagina-rerun. Zie de oorspronkelijke
@@ -1573,6 +1839,13 @@ def _render_rotation_planner(
             f"Alle {int(total_boards)} wedstrijden van deze ontmoeting zijn ingedeeld "
             f"over {len(locked_rotations)} rotatie(s)."
         )
+        # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: eindpaneel - zie
+        # moduledocstring. Voorheen stopte de functie hier zonder enige
+        # samenvatting te tonen.
+        st.divider()
+        _render_encounter_summary(
+            locked_rotations, locked_opponents, locked_win_probs_per_rotation, name_lookup_global,
+        )
         return
     unique_opp_players = (bundle or {}).get("unique_players") or []
     rotation_opponent_boards = None
@@ -1622,7 +1895,7 @@ def _render_rotation_planner(
             key_i0 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_0"
             key_i1 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_1"
             # PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30: snelkeuzes
-            # BOVENAAN, in DEZE expander, v\u00f3\u00f3r de 2 dropdowns - zie
+            # BOVENAAN, in DEZE expander, vóór de 2 dropdowns - zie
             # moduledocstring. Vult bij een klik gewoon de 2 bestaande
             # dropdown-keys in en herlaadt; geen apart bevestig-pad.
             _render_opponent_quick_presets(
@@ -1745,8 +2018,13 @@ def _render_rotation_planner(
     # "Wie stelt de tegenstander op..."-expander. Enkel "Zelf samenstellen"
     # (eigen koppelkeuze, klik-voor-klik) blijft hier staan.
     with st.expander("Zelf samenstellen (klik-voor-klik)", expanded=False):
+        # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: profiles/sel_player_id/
+        # player_ratings/official_ranks_strict actief doorgegeven voor de
+        # overgenomen sandbox-presets - zie moduledocstring.
         _render_custom_click_builder(
             candidates, name_lookup_global, ploeg_id, next_rotation_num, _on_confirm_2arg,
+            profiles=profiles, sel_player_id=sel_player_id,
+            player_ratings=player_ratings, official_ranks_strict=official_ranks_strict,
         )
     # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
     # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op

@@ -3,8 +3,8 @@ page_lineup_lab.py - "Opstelling-analyse"-pagina (Volgende match,
 Opstelling-scenario's, Rotatieplanner, Opgeslagen analyses).
 PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27: dit bestand is de orchestratie-laag;
 de zware onderdelen staan in lineup_scout.py, lineup_rules.py,
-lineup_opponent_history.py, lineup_rotation.py, lineup_matchup_table.py en
-lineup_sandbox.py. Patch bij een aanpassing enkel de betrokken module.
+lineup_opponent_history.py, lineup_rotation.py en lineup_matchup_table.py.
+Patch bij een aanpassing enkel de betrokken module.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_FRAGMENT_ISOLATION_STAGE2_2026-09-27
 --------------------------------------------------------------------------
@@ -95,21 +95,10 @@ aantal rotaties kan instellen. zal handig zijn voor in voorjaar waar het dan
 --------------------------------------------------------------------------
 Het aantal rotaties is instelbaar (standaard ROTATIONS_PER_ENCOUNTER = 2,
 najaar; voorjaar = 3). De keuze wordt per sessie onthouden en geldt voor de
-matchup-tabel, de rotatieplanner en de sandbox. Het aantal matchen per
-rotatie blijft vast op 2. 'Max. matchen per speler' is begrensd op het
-aantal rotaties (een speler speelt per rotatie hoogstens 1 match) en wordt
-ook aan de rotatieplanner doorgegeven.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29 (op verzoek van Kim: "stel
-dat ik met Nico en Joris mijn 2 matchen speel in de 2de match van elke
-rotatie. wat zijn dan mijn winstkansen. Hoger dan met Carl?")
---------------------------------------------------------------------------
-Nieuwe sectie na de matchup-tabel: _render_whatif_comparison() (lineup_
-whatif.py) laat 2 partnerkeuzes voor jezelf op EEN gekozen bordpositie
-exact naast elkaar berekenen en vergelijken - zonder AI, met dezelfde
-winkans-formule als de rest van de app. Zie lineup_whatif.py voor de
-volledige toelichting bij waarom dit een apart instrument is naast de
-volledige-ploeg-matchup-tabel hierboven.
+matchup-tabel en de rotatieplanner. Het aantal matchen per rotatie blijft
+vast op 2. 'Max. matchen per speler' is begrensd op het aantal rotaties
+(een speler speelt per rotatie hoogstens 1 match) en wordt ook aan de
+rotatieplanner doorgegeven.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30 (op verzoek van Kim:
 "Snelkeuzes bovenaan, per rotatie: 'Zelfde opstelling als vorige match X'
@@ -119,14 +108,39 @@ meteen uit de keuzelijst van Match 2" + "Rotatie 2 houdt automatisch
 rekening met wie al samen speelde in Rotatie 1")
 --------------------------------------------------------------------------
 _render_rotation_planner() (lineup_rotation.py) krijgt hier nu OOK
-`profiles` en `sel_player_id` mee - voorheen ontbraken die, terwijl
-_render_lineup_sandbox() ze al wel kreeg. Nodig voor de nieuwe
-snelkeuzes/presets (eigen historische opstellingen opzoeken per speler) en
-de klik-voor-klik-custom-modus - zie lineup_rotation.py voor de volledige
-toelichting bij wat daar precies gebouwd is. Punt 3 uit Kim's plan (geen
-koppel 2x in dezelfde ontmoeting) bestond al via `excluded_pairs` en is
-ONGEWIJZIGD - de nieuwe presets/custom-modus respecteren die set net als
-de bestaande kaarten en de "geavanceerd"-lijst.
+`profiles` en `sel_player_id` mee. Nodig voor de snelkeuzes/presets (eigen
+historische opstellingen opzoeken per speler) en de klik-voor-klik-
+custom-modus - zie lineup_rotation.py voor de volledige toelichting bij
+wat daar precies gebouwd is. Punt 3 uit Kim's plan (geen koppel 2x in
+dezelfde ontmoeting) bestond al via `excluded_pairs` en is ONGEWIJZIGD -
+de presets/custom-modus respecteren die set net als de bestaande kaarten
+en de "geavanceerd"-lijst.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01 (op verzoek van Kim, na het
+gezamenlijk uitgetekende ontwerp: "die wat als: mijn winkans bij een
+andere partner mag weg" + "ja sandbox verwijderen" + "je zou dus zeker
+ook kans op 1,2 of 0 punten bij de rotatieplanner moeten tonen")
+--------------------------------------------------------------------------
+TWEE VERWIJDERINGEN in dit bestand, beide ZUIVER (geen vervangende aanroep
+nodig in page_lineup_lab.py zelf - de nuttige presets uit de sandbox zijn
+verhuisd NAAR lineup_rotation.py, zie dat bestand voor de volledige
+toelichting):
+  1. lineup_whatif._render_whatif_comparison() en zijn import - de
+     "Wat als: mijn winkans bij een andere partner"-sectie. Kim: "mag weg".
+     Geen andere code was hiervan afhankelijk.
+  2. lineup_sandbox._render_lineup_sandbox() en zijn import - de aparte
+     "Sandbox: bouw je eigen opstelling"-sectie. Kim bevestigde "sandbox
+     verwijderen" nadat de 2 nuttige presets ("Ons sterkste 4 (Elo)",
+     "Onze vorige opstelling") verhuisd waren naar de "Zelf samenstellen"-
+     expander in de Rotatieplanner (lineup_rotation.py).
+Na deze 2 verwijderingen bestaat de volgorde van _render_opstelling_
+scenario() nog uit: matchup-tabel ("Opstelling-scenario's") -> Rotatie-
+planner (nu met eindpaneel en de tegenstander-snelkeuzes) - zie
+lineup_rotation.py voor de volledige toelichting bij wat daar nieuw is.
+lineup_whatif.py en lineup_sandbox.py zelf blijven als BESTAND nog
+bestaan in de repo (dit bestand kan ze niet verwijderen) - zie de
+oplever-instructies voor de `git rm`-commando's om ze ook daar weg te
+halen.
 """
 import streamlit as st
 from dashboard_common import (
@@ -153,8 +167,8 @@ from lineup_rotation import (
     ROTATIONS_MIN, ROTATIONS_MAX,  # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29
 )
 from lineup_matchup_table import _render_all_valid_matchups
-from lineup_sandbox import _render_lineup_sandbox
-from lineup_whatif import _render_whatif_comparison  # PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29
+# PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: lineup_whatif en lineup_sandbox
+# zijn NIET MEER GEIMPORTEERD - zie moduledocstring.
 # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
 # Faalt de import, dan draait de pagina gewoon door zonder metingen.
 try:
@@ -382,17 +396,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
         ) or []
     st.divider()
-    # PADEL_ANALYSIS_WHATIF_PARTNER_COMPARE_2026-09-29: gerichte "wat als"-
-    # vergelijking (2 partnerkeuzes voor jezelf op 1 bordpositie), los van de
-    # volledige-ploeg-optimalisatie hierboven - zie lineup_whatif.py.
-    with perf.step("_render_whatif_comparison (wat-als partnervergelijking)"):
-        _render_whatif_comparison(
-            bundle, opp, available_ids, name_lookup_global,
-            player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
-            sel_player_id, name_lookup_global.get(sel_player_id, sel_player_id),
-            n_rotations=n_rotations,
-        )
-    st.divider()
     chosen_scenario_boards = None
     with perf.step("_render_rotation_planner"):
         _render_rotation_planner(
@@ -403,14 +406,6 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             bundle=bundle, total_boards=total_boards,
             max_per_player=max_per_player,  # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29
             profiles=profiles, sel_player_id=sel_player_id,  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
-        )
-    st.divider()
-    with perf.step("_render_lineup_sandbox"):
-        _render_lineup_sandbox(
-            bundle, opp, available_ids, name_lookup_global,
-            player_ratings, official_ranks_strict, opponent_ratings, synergy_fn,
-            profiles=profiles, sel_player_id=sel_player_id,
-            n_rotations=n_rotations,  # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29
         )
 def _render_saved_lineup_analyses(name_lookup_global: dict):
     st.markdown('<div class="section-header">Opgeslagen opstelling-analyses</div>', unsafe_allow_html=True)
