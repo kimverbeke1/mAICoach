@@ -139,6 +139,58 @@ op dit moment geen betrouwbare rotatiepositie-informatie over vorige
 seizoenen. Kim akkoord (2026-09-30, "optie 1"): nu bouwen met wat er is,
 architectuur zo dat vorige seizoenen er later bij kunnen zonder dit bestand
 te moeten aanpassen (enkel lineup_rotation._opponent_lineup_weight()).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01 (op verzoek van Kim: "bij de
+matchups zie ik 3 keer dezelfde percentages: 30-40-30. nutteloos.")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de weging na te rekenen: _opponent_lineup_
+weight() geeft een historisch scenario slechts +1.0 BOVENOP de vaste basis
+1.0 PER OBSERVATIE (dus een 1x gespeeld scenario weegt 2.0, een 3x
+gespeeld scenario weegt 4.0) - tegenover tot wel
+_THEORETICAL_MAX_VARIANTS=300 zuiver THEORETISCHE scenario's die ELK ook
+basisgewicht 1.0 krijgen. Met bv. 1 historisch scenario (gewicht 2.0) naast
+287 theoretische (gewicht 287), weegt het ENIGE grounded datapunt dus voor
+amper ~0.7% van het gewogen gemiddelde mee - de group-kans is dan in de
+praktijk vrijwel UITSLUITEND het gemiddelde over alle theoretische
+tegenstander-opstellingen. Omdat dat gemiddelde per definitie over VEEL
+verschillende tegenstander-koppels gaat, convergeert het voor VERSCHILLENDE
+eigen opstellingen naar bijna hetzelfde getal (de wet van de grote
+aantallen middelt het verschil tussen onze eigen opstellingen grotendeels
+weg) - exact Kim's eerdere constatering ("dat leert me niets... uiteindelijk
+gemiddeld gezien door alle combinaties weer op zelfde uitkomt"), nu
+teruggekeerd omdat de weging te zwak is om dat tegen te houden zodra het
+theoretische roster groot is. Een 2e, onafhankelijke oorzaak die TOT
+HETZELFDE SYMPTOOM leidt: ontbrekende ratings (player_ratings/official_
+ranks/opponent_ratings) maken win_probability voor (bijna) elke match
+None, waardoor _match_outcome_point_probabilities() overal terugvalt op de
+neutrale 50%-aanname - dan is de 31.25%/37.5%/31.25%-verdeling voor N=4
+borden WISKUNDIG IDENTIEK voor elke groep, ongeacht de weging.
+FIX, VOLLEDIG ZICHTBAARHEID I.P.V. EEN GEDRAGSWIJZIGING VAN DE WEGING ZELF
+(die weegformule blijft bewust ONGEWIJZIGD - zie lineup_rotation.py,
+_opponent_lineup_weight() - een latere herziening van de weging zelf is
+een aparte, grotere beslissing): _finalize_group() geeft nu ook
+"n_historical_scenarios" (= len(g["historical"]), al bijgehouden maar tot
+nu toe niet doorgegeven) terug. _render_own_lineup_groups_with_opponents()
+toont daarmee, ALTIJD zichtbaar naast de 3 metrics (niet verstopt in de
+expander), hoeveel van de g["n"] doorgerekende scenario's effectief
+HISTORISCH vs THEORETISCH waren, plus - indien van toepassing - EEN van
+de 2 volgende, elkaar uitsluitende waarschuwingen:
+  1. Als >= 50% van de individuele match-schattingen in deze groep een
+     onbekende winkans had (n_missing_ratings t.o.v. g["n"] x aantal
+     borden): een duidelijke waarschuwing dat de percentages vooral op de
+     neutrale 50%-aanname steunen (oorzaak 2 hierboven) - actie: ontbrekend
+     klassement/rating aanvullen.
+  2. Anders, als er 0 historische scenario's zijn EN >= 20 theoretische:
+     een duidelijke notitie dat het cijfer vrijwel uitsluitend op
+     theoretische scenario's steunt (oorzaak 1 hierboven) - actie: verklein
+     het tegenstander-roster hierboven tot de spelers die je ECHT verwacht,
+     zodat er minder, meer relevante theoretische scenario's overblijven
+     en het gewicht van eventuele historische scenario's meer gewicht
+     krijgt in verhouding.
+Dit maakt de 2 mogelijke, fundamenteel verschillende oorzaken van
+"identieke percentages" voor het eerst van elkaar te ONDERSCHEIDEN, met
+een concrete, bruikbare vervolgstap per geval - i.p.v. enkel een cijfer
+te tonen zonder te verklaren waarom het niet onderscheidend aanvoelt.
 """
 import heapq
 import streamlit as st
@@ -159,6 +211,9 @@ _KEEP_PER_GROUP = 25               # bewaarde beste rijen per eigen opstelling
 _GROUPS_DISPLAY_DEFAULT = 20       # standaard getoonde eigen opstellingen
 _SAVE_MAX_MATCHUPS = 150           # Firestore-document < 1 MB
 _MAX_TOTAL_MATCHUPS = _MAX_COMPUTED_MATCHUPS  # oude naam, voor compatibiliteit
+# PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: drempels voor de 2 diagnose-captions hieronder.
+_DILUTION_MISSING_RATIO_THRESHOLD = 0.5   # >= 50% onbekende winkansen -> waarschuwing
+_DILUTION_THEORETICAL_MIN_COUNT = 20       # 0 historisch + >= 20 theoretisch -> notitie
 def _sort_val(m) -> float:
     ebw = m.get("expected_boards_won")
     return ebw if ebw is not None else m.get("total_score", 0.0)
@@ -253,6 +308,12 @@ def _finalize_group(key, g: dict) -> dict:
         "best": g["best"], "worst": g["worst"],
         "mean_ebw": (g["ebw_sum"] / g["ebw_n"]) if g["ebw_n"] else None,
         "point_probs": point_probs,  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30
+        # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: hoeveel van g["n"]
+        # scenario's effectief HISTORISCH waren (g["historical"] bevat ALLE
+        # historische matchups van deze groep, niet enkel de bewaarde top -
+        # zie _add_to_group()) - gebruikt om de dilutie-captions hieronder
+        # te kunnen tonen zonder opnieuw te moeten tellen.
+        "n_historical_scenarios": len(g["historical"]),
         "players": g["players"], "positions": g["positions"],
         "first_assignment": g["first_assignment"],
     }
@@ -476,6 +537,38 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
     column_order += ["Toelichting", "Vorige keer"]
     return column_config, column_order
+def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> None:
+    """PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01 - zie moduledocstring.
+    Toont, ALTIJD zichtbaar (dus buiten de expander), hoeveel van de
+    doorgerekende scenario's van deze groep effectief HISTORISCH vs
+    THEORETISCH waren, en - indien van toepassing - EEN van 2 elkaar
+    uitsluitende waarschuwingen over waarom de getoonde percentages
+    mogelijk niet (sterk) onderscheidend zijn tussen groepen."""
+    n_total = g.get("n", 0)
+    n_hist = g.get("n_historical_scenarios", 0)
+    n_theo = max(0, n_total - n_hist)
+    st.caption(
+        f"Gebaseerd op {n_total} tegenstander-scenario('s) ({n_hist} effectief gespeeld dit "
+        f"seizoen, {n_theo} theoretisch)."
+    )
+    n_boards_per_row = len(best.get("assignment") or [])
+    denom = n_total * n_boards_per_row
+    missing_fraction = (n_missing / denom) if denom else 0.0
+    if missing_fraction >= _DILUTION_MISSING_RATIO_THRESHOLD:
+        st.warning(
+            f"Bij {missing_fraction * 100:.0f}% van de doorgerekende matchen in deze groep is de "
+            "winkans onbekend (ontbrekend klassement/rating) - de percentages hierboven steunen "
+            "dus voor een groot deel op een neutrale 50%-aanname en zijn minder betrouwbaar. "
+            "Vul het ontbrekende klassement/rating aan voor een scherper cijfer."
+        )
+    elif n_hist == 0 and n_theo >= _DILUTION_THEORETICAL_MIN_COUNT:
+        st.caption(
+            "Let op: dit cijfer is (nog) uitsluitend gebaseerd op THEORETISCHE tegenstander-"
+            "opstellingen (nog geen enkele hiervan effectief gespeeld dit seizoen). Bij veel "
+            "mogelijke tegenstander-opstellingen kan het verschil tussen eigen opstellingen "
+            "hierdoor klein lijken - verklein het tegenstander-roster hierboven tot de spelers "
+            "die je effectief verwacht, voor een scherper onderscheid."
+        )
 def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: dict, ploeg_key: str = "") -> None:
     """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: werkt op de groepssamenvattingen uit
     _build_all_valid_matchups(). Best/worst case in de titel gelden over
@@ -484,7 +577,10 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
     groepstitel is nu de gewogen puntenkans (2/1/0), niet langer enkel
     best/worst EBW. De groepenlijst is al gesorteerd op kans-op-2-punten
     (zie _build_all_valid_matchups()) - hier enkel weergave, geen
-    herordening."""
+    herordening.
+    PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: toont nu ALTIJD (dus
+    voor het openklikken) een korte, verklarende dilutie-diagnose naast de
+    3 metrics - zie _render_group_dilution_diagnosis()."""
     if not groups:
         return
     st.markdown('<div class="section-header">Onze opstellingen - klap open voor de tegenstander-opstellingen</div>', unsafe_allow_html=True)
@@ -538,13 +634,17 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
             st.metric("Kans 1p (gelijk)", f"{pp_metrics.get('p1', 0.0) * 100:.0f}%")
         with col_p0:
             st.metric("Kans 0p (verlies)", f"{pp_metrics.get('p0', 0.0) * 100:.0f}%")
+        # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: ALTIJD zichtbaar,
+        # VOOR de expander - zie moduledocstring voor waarom dit niet
+        # verstopt mag zitten achter een klik.
+        n_missing = pp_metrics.get("n_missing_ratings", 0)
+        _render_group_dilution_diagnosis(g, best, n_missing)
         header = f"{badge}  -  {' \u00b7 '.join(korte_delen)}"
         with st.expander(header, expanded=False):
             st.markdown("**Onze opstelling in deze groep:**")
             st.markdown("\n".join(lange_regels))
             gem = g.get("mean_ebw")
             gem_txt = f", gemiddeld EBW {gem:.2f}" if gem is not None else ""
-            n_missing = (g.get("point_probs") or {}).get("n_missing_ratings", 0)
             missing_txt = (
                 f" ({n_missing} match(en) zonder bekende winkans, geteld als 50/50 in de puntenkans)"
                 if n_missing else ""
