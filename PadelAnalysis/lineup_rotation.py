@@ -375,6 +375,64 @@ Drie afzonderlijke toevoegingen, elk met een eigen reden:
    lineup_whatif.py (en zijn aanroep) is EVENEENS verwijderd - Kim: "die
    wat als: mijn winkans bij een andere partner mag weg" - dat bestand had
    geen andere afhankelijkheden, dus een zuivere verwijdering.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_PRESET_ORDER_BUG_2026-10-02 (op verzoek van Kim,
+na het testen van build1: "nog steeds maar 1 snelkeuze")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd: `_pair_label(p1, p2)` (lokaal gedefinieerd in
+_render_rotation_planner(), gebruikt voor zowel de 2 dropdowns als de
+presets) is ORDE-GEVOELIG - het formatteert p1 EERST, dan p2. De dropdown-
+opties (`alle_paren = itertools.combinations(unique_opp_players, 2)`)
+leggen voor elk koppel een VASTE, aan de LIJSTVOLGORDE van
+`unique_opp_players` gebonden volgorde vast - compleet onafhankelijk van
+de volgorde waarin een HISTORISCHE wedstrijd diezelfde 2 spelers
+vermeldde (die volgorde weerspiegelt de bordvolgorde van toen, bv.
+sterkste eerst volgens art. 6.6). _opponent_rotation_presets() riep
+`pair_label_fn(m1_pair[0], m1_pair[1])` aan met de HISTORISCHE volgorde,
+en vergeleek de uitkomst via EXACTE STRING-gelijkheid met `known_labels`
+(de dropdown-opties). Voor een koppel in de "verkeerde" volgorde t.o.v.
+de dropdown genereerde dit een andere, niet-overeenkomende string - en
+viel de preset dus ten onrechte weg als "speler niet gekend", ook al
+stond diezelfde speler wel degelijk in de tegenstander-roster. Met
+meestal maar 1-2 historische ontmoetingen per tegenstander was de kans
+hoog dat dit de ENIGE overlevende preset liet zijn (of zelfs 0).
+FIX: vervangt de string-vergelijking door een ID-GEBASEERDE lookup, die
+per definitie orde-ONAFHANKELIJK is. `_render_rotation_planner()` bouwt
+nu, naast `paar_labels`/`paar_map` (ongewijzigd, voor de dropdowns zelf),
+ook `paar_label_by_uids = {frozenset({uid1, uid2}): label, ...}` - EEN
+canonieke labeltekst per ONGEORDEND koppel spelers. Deze dict (niet
+langer `pair_label_fn` + `known_labels`) wordt doorgegeven aan
+_render_opponent_quick_presets()/_opponent_rotation_presets(), die nu de
+frozenset van de 2 historische user_id's opzoekt in deze dict i.p.v. zelf
+een nieuwe labeltekst te formatteren en die te vergelijken. Bestaat het
+koppel niet (meer) in de huidige tegenstander-roster, dan geeft
+.get() None terug en wordt de preset - exact zoals voorheen bedoeld -
+stil overgeslagen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_CARDS_REQUIRE_OPPONENT_2026-10-02 (op verzoek van
+Kim: "bij kaarten niet logisch om al iets te tonen als er nog geen
+tegenstander is")
+--------------------------------------------------------------------------
+De 3 kaarten (Aanbevolen/Veiligst/Alternatief) werden al VOOR het kiezen
+van een tegenstander-opstelling getoond, met een expliciete "(nog
+neutraal - tegenstander onbekend)"-notitie (PADEL_ANALYSIS_ROTATION_
+CARDS_NEUTRAL_LABEL_2026-09-30) zodra alle 3 kaarten toch dezelfde,
+wiskundig correcte maar betekenisloze 50/50-verdeling toonden. Kim geeft
+nu aan dat de kaarten in dat geval beter HELEMAAL niet getoond worden,
+in plaats van getoond-maar-met-een-waarschuwing.
+FIX: `_render_rotation_planner()` berekent nu `rot_boards_this_rotation =
+_rotation_boards_for(effective_opponent_boards, next_rotation_num)` VOOR
+de kaarten-sectie. Is dat None (geen tegenstander-opstelling gekend voor
+DEZE rotatie - noch via de snelkeuzes, noch via de 2 dropdowns, noch via
+een extern meegegeven `opponent_boards`), dan verschijnt enkel een korte
+info-melding die uitlegt WAAROM er geen kaarten staan en WAT te doen
+(eerst een tegenstander kiezen hierboven) - de kaarten-berekening
+(_rank_and_label_candidates_for_cards) wordt dan niet eens uitgevoerd.
+"Zelf samenstellen" (klik-voor-klik) en "Alle N combinaties (geavanceerd)"
+blijven ONGEWIJZIGD altijd bruikbaar (ze toonden al geen misleidende
+winkans-percentages zonder tegenstander - enkel een EBW/synergie-score,
+of bij ontbrekende EBW een synergie-score i.p.v. een percentage) - Kim's
+melding gold specifiek de 3 kaarten, dus enkel die sectie is aangepast.
 """
 import itertools
 from collections import Counter
@@ -678,15 +736,21 @@ def _render_candidate_card(
 # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30.)
 # -----------------------------------------------
 def _opponent_rotation_presets(
-    bundle: dict, next_rotation_num: int, pair_label_fn, known_labels: set,
+    bundle: dict, next_rotation_num: int, paar_label_by_uids: dict,
 ) -> list:
     """Geeft per eerdere ontmoeting TEGEN DEZE tegenstander de 2 borden
     terug die bij de EERSTVOLGENDE rotatie horen, als bruikbare presets.
-    `pair_label_fn` moet DEZELFDE _pair_label()-functie zijn die de
-    dropdowns hieronder gebruiken, zodat de teruggegeven labels ALTIJD een
-    bestaande dropdown-optie treffen. `known_labels` = paar_labels (de
-    huidige dropdown-opties) - een historische matchup waarvan 1 label er
-    niet (meer) in zit (bv. speler verliet de ploeg) wordt overgeslagen.
+    PADEL_ANALYSIS_ROTATION_PRESET_ORDER_BUG_2026-10-02 (op verzoek van
+    Kim: "nog steeds maar 1 snelkeuze") - zie moduledocstring voor de
+    volledige root-cause-analyse. `paar_label_by_uids` is een dict
+    {frozenset({uid1, uid2}): label} opgebouwd uit de DROPDOWN-opties
+    zelf (dus altijd de canonieke, bestaande labeltekst voor dat koppel,
+    ONGEACHT in welke volgorde de historische wedstrijd die 2 spelers
+    vermeldde) - dit VERVANGT de vorige, ORDE-GEVOELIGE aanpak
+    (pair_label_fn(m1_pair[0], m1_pair[1]) + string-vergelijking met
+    known_labels), die voor een koppel in de "verkeerde" volgorde altijd
+    een net andere string genereerde dan de dropdown-optie en zo bijna
+    elke preset ten onrechte liet afvallen.
     Geeft een lijst van {"fixture_label": str, "m1_label": str,
     "m2_label": str, "m1_display": str, "m2_display": str} terug, meest
     recente ontmoeting eerst (best-effort datum-sortering, zie
@@ -713,12 +777,11 @@ def _opponent_rotation_presets(
         m2_pair = (rot_boards[1].get("opponent_pair") or [])
         if len(m1_pair) != 2 or len(m2_pair) != 2:
             continue
-        try:
-            m1_label = pair_label_fn(m1_pair[0], m1_pair[1])
-            m2_label = pair_label_fn(m2_pair[0], m2_pair[1])
-        except Exception:  # noqa: BLE001
-            continue
-        if m1_label not in known_labels or m2_label not in known_labels:
+        m1_uids = frozenset(str(p.get("user_id")) for p in m1_pair)
+        m2_uids = frozenset(str(p.get("user_id")) for p in m2_pair)
+        m1_label = paar_label_by_uids.get(m1_uids)
+        m2_label = paar_label_by_uids.get(m2_uids)
+        if m1_label is None or m2_label is None:
             # Minstens 1 speler zit niet (meer) in het gekende tegenstander-
             # roster - deze preset zou een niet-bestaande dropdown-optie
             # instellen, dus overslaan i.p.v. een kapotte knop te tonen.
@@ -732,7 +795,7 @@ def _opponent_rotation_presets(
         })
     return out
 def _render_opponent_quick_presets(
-    bundle: dict, next_rotation_num: int, pair_label_fn, known_labels: set,
+    bundle: dict, next_rotation_num: int, paar_label_by_uids: dict,
     key_i0: str, key_i1: str,
 ) -> None:
     """PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 - zie
@@ -744,7 +807,7 @@ def _render_opponent_quick_presets(
     Geen eigen bevestig-pad: de bestaande dropdown-logica en alles wat
     daarop bouwt (candidates/kaarten/"Zelf samenstellen") werkt hierna
     ONGEWIJZIGD verder, exact zoals bij een manuele dropdown-keuze."""
-    presets = _opponent_rotation_presets(bundle, next_rotation_num, pair_label_fn, known_labels)
+    presets = _opponent_rotation_presets(bundle, next_rotation_num, paar_label_by_uids)
     if not presets:
         st.caption(
             "Nog geen snelkeuze beschikbaar voor deze rotatie-positie (geen eerdere ontmoeting "
@@ -1894,12 +1957,22 @@ def _render_rotation_planner(
             paar_map = {_pair_label(p1, p2): (p1, p2) for p1, p2 in alle_paren}
             key_i0 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_0"
             key_i1 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_1"
+            # PADEL_ANALYSIS_ROTATION_PRESET_ORDER_BUG_2026-10-02: ID-gebaseerde
+            # lookup i.p.v. een string-vergelijking op (orde-gevoelige) labels -
+            # zie moduledocstring en _opponent_rotation_presets(). Deze dict
+            # geeft, voor elk koppel spelers dat in de dropdown bestaat, de
+            # EXACTE, canonieke labeltekst terug - ongeacht in welke volgorde
+            # een historische wedstrijd die 2 spelers vermeldde.
+            paar_label_by_uids = {
+                frozenset({str(p1.get("user_id")), str(p2.get("user_id"))}): _pair_label(p1, p2)
+                for p1, p2 in alle_paren
+            }
             # PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30: snelkeuzes
             # BOVENAAN, in DEZE expander, vóór de 2 dropdowns - zie
             # moduledocstring. Vult bij een klik gewoon de 2 bestaande
             # dropdown-keys in en herlaadt; geen apart bevestig-pad.
             _render_opponent_quick_presets(
-                bundle, next_rotation_num, _pair_label, set(paar_labels), key_i0, key_i1,
+                bundle, next_rotation_num, paar_label_by_uids, key_i0, key_i1,
             )
             voorstel_idx = [0, 0]
             if opponent_boards:
@@ -1949,6 +2022,11 @@ def _render_rotation_planner(
             elif gekozen_paren[0] or gekozen_paren[1]:
                 st.caption("Kies ook een koppel voor de andere match om de winkansen te herberekenen.")
     effective_opponent_boards = rotation_opponent_boards or opponent_boards
+    # PADEL_ANALYSIS_ROTATION_CARDS_REQUIRE_OPPONENT_2026-10-02: bepaalt of
+    # er voor DEZE rotatie al een tegenstander-opstelling gekend is - zie
+    # moduledocstring. Gebruikt verderop om de 3 kaarten te verbergen
+    # zolang dit None is (anders zijn alle kaarten toch neutraal 50/50).
+    rot_boards_this_rotation = _rotation_boards_for(effective_opponent_boards, next_rotation_num)
     rot_cache_key = f"rot_candidates_v2_{ploeg_id}_{next_rotation_num}"
     rot_sig_key = f"rot_candidates_sig_v2_{ploeg_id}_{next_rotation_num}"
     rot_signature = (
@@ -2026,30 +2104,47 @@ def _render_rotation_planner(
             profiles=profiles, sel_player_id=sel_player_id,
             player_ratings=player_ratings, official_ranks_strict=official_ranks_strict,
         )
-    # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
-    # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op
-    # de volledige ontmoeting"-berekening per kandidaat hieronder.
-    flat_locked_win_probs = [wp for rotatie in locked_win_probs_per_rotation for wp in rotatie]
-    cards = _rank_and_label_candidates_for_cards(
-        candidates, flat_locked_win_probs, total_boards=total_boards, max_cards=3,
-    )
-    st.caption(
-        "De 3 onderstaande kaarten zijn een selectie uit de "
-        f"{len(candidates)} berekende combinaties: de kaart met de hoogste kans op 2 ploegpunten voor de "
-        "VOLLEDIGE ontmoeting ('Aanbevolen'), de veiligste keuze voor deze rotatie specifiek ('Veiligst'), "
-        "en een alternatief met een ander koppelprofiel. 'Impact op volledige ontmoeting' telt nog niet "
-        "geplande rotaties neutraal als 50/50 mee - dat wordt scherper naarmate je meer rotaties bevestigt."
-    )
-    if not cards:
-        st.info("Geen kaarten te tonen - te weinig onderscheiden combinaties.")
+    # PADEL_ANALYSIS_ROTATION_CARDS_REQUIRE_OPPONENT_2026-10-02 (op verzoek
+    # van Kim: "bij kaarten niet logisch om al iets te tonen als er nog
+    # geen tegenstander is") - zie moduledocstring. Zonder een gekende
+    # tegenstander-opstelling voor DEZE rotatie is elke kandidaat even
+    # "onbekend" - de 3 kaarten zouden dan toch enkel een identieke,
+    # betekenisloze 50/50-verdeling tonen (het is_neutral-label deed dat
+    # eerder al zichtbaar, maar Kim geeft aan dat de kaarten dan beter
+    # gewoon niet getoond worden i.p.v. getoond-maar-neutraal).
+    if not rot_boards_this_rotation:
+        st.info(
+            "Kies hierboven eerst de tegenstander-opstelling voor deze rotatie (via een snelkeuze of "
+            "de 2 dropdowns) om de 3 aanbevolen kaarten te zien - zonder gekende tegenstander is elke "
+            "combinatie nog even 'onbekend', dus zouden de kaarten toch enkel een neutrale 50/50-"
+            "verdeling tonen. 'Zelf samenstellen' en 'Alle combinaties (geavanceerd)' hieronder blijven "
+            "wel gewoon bruikbaar, gerangschikt op synergie."
+        )
     else:
-        card_cols = st.columns(len(cards))
-        for col, card in zip(card_cols, cards):
-            key_prefix = f"rot_card_v1_{ploeg_id}_{next_rotation_num}_{card['role']}"
-            if _render_candidate_card(col, card, name_lookup_global, key_prefix):
-                _bevestig_rotatie(
-                    card["candidate"]["ordered_pairs"], opp_pairs_voor_log, card["win_probs"],
-                )
+        # PADEL_ANALYSIS_ROTATION_CARDS_2026-09-30: winkansen van de reeds
+        # bevestigde rotaties, plat (2 per rotatie) - basis voor de "impact op
+        # de volledige ontmoeting"-berekening per kandidaat hieronder.
+        flat_locked_win_probs = [wp for rotatie in locked_win_probs_per_rotation for wp in rotatie]
+        cards = _rank_and_label_candidates_for_cards(
+            candidates, flat_locked_win_probs, total_boards=total_boards, max_cards=3,
+        )
+        st.caption(
+            "De 3 onderstaande kaarten zijn een selectie uit de "
+            f"{len(candidates)} berekende combinaties: de kaart met de hoogste kans op 2 ploegpunten voor de "
+            "VOLLEDIGE ontmoeting ('Aanbevolen'), de veiligste keuze voor deze rotatie specifiek ('Veiligst'), "
+            "en een alternatief met een ander koppelprofiel. 'Impact op volledige ontmoeting' telt nog niet "
+            "geplande rotaties neutraal als 50/50 mee - dat wordt scherper naarmate je meer rotaties bevestigt."
+        )
+        if not cards:
+            st.info("Geen kaarten te tonen - te weinig onderscheiden combinaties.")
+        else:
+            card_cols = st.columns(len(cards))
+            for col, card in zip(card_cols, cards):
+                key_prefix = f"rot_card_v1_{ploeg_id}_{next_rotation_num}_{card['role']}"
+                if _render_candidate_card(col, card, name_lookup_global, key_prefix):
+                    _bevestig_rotatie(
+                        card["candidate"]["ordered_pairs"], opp_pairs_voor_log, card["win_probs"],
+                    )
     ai_key = f"rot_ai_v3_{ploeg_id}_{next_rotation_num}"
     if taa is not None and report_for_ai is not None:
         if st.button("AI-inzicht over deze combinaties", key=f"rot_ai_btn_v3_{ploeg_id}_{next_rotation_num}"):
