@@ -191,11 +191,39 @@ Dit maakt de 2 mogelijke, fundamenteel verschillende oorzaken van
 "identieke percentages" voor het eerst van elkaar te ONDERSCHEIDEN, met
 een concrete, bruikbare vervolgstap per geval - i.p.v. enkel een cijfer
 te tonen zonder te verklaren waarom het niet onderscheidend aanvoelt.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02 (op verzoek van Kim: "hou
+wel ook wat rekening met statistische gegevens zoals: persoon x speelt
+bijna altijd met die persoon y. of persoon x speelt bijna altijd 1ste
+match. combineer ook die data.")
+--------------------------------------------------------------------------
+1. WEGING: elk tegenstander-scenario krijgt nu als gewicht de VOORSPELDE
+   KANS uit opponent_lineup_model.py (deelname + vaste koppels + Match 1/2-
+   voorkeur, softmax over alle scenario's) i.p.v. de vroegere "1 + aantal
+   keer gespeeld". Daardoor tellen honderden theoretische, onwaarschijnlijke
+   opstellingen (bv. met een speler die nooit meespeelt, of 2 spelers die
+   nooit samen spelen) bijna niet meer mee - precies de oorzaak van de
+   uitgevlakte "30-40-30"-percentages (PADEL_ANALYSIS_DILUTED_GROUP_PROBS).
+   _opponent_lineup_weight() in lineup_rotation.py blijft bestaan als
+   terugval wanneer het model niet beschikbaar is.
+2. BUGFIX in dezelfde lijn: _finalize_group() berekende de gewogen
+   puntenkans enkel over de BEWAARDE rijen (beste 25 op EBW + slechtste +
+   historische). Met modelgewichten kunnen de waarschijnlijkste scenario's
+   net buiten die top-25 vallen. De gewogen som wordt nu INCREMENTEEL in
+   _add_to_group() over ALLE doorgerekende matchups bijgehouden - exact,
+   niet langer een benadering, en zonder extra geheugen.
+3. Nieuw expander-blok "Voorspelde tegenstander-opstellingen" toont de top
+   5 met kans en de redenen, zodat de weging controleerbaar is.
+Cache-sleutels naar v4 (de gewichten zijn veranderd).
 """
 import heapq
 import streamlit as st
 from dashboard_common import fb, taa
 from lineup_scout import _opponent_official_ranks, _opponent_padelstat_ratings
+try:
+    import opponent_lineup_model as olm  # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02
+except Exception:  # noqa: BLE001  pragma: no cover
+    olm = None
 from lineup_rotation import (
     _enumerate_rotation_aware_pairings, _enumerate_own_variant_combinations,
     _compute_matchup, _default_opponent_max_per_player,
@@ -225,6 +253,8 @@ def _new_group_summary(assignment: list) -> dict:
         "players": {}, "positions": {},
         "first_assignment": assignment,
         "weights": {},  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: id(m) -> gewicht van zijn tegenstander-scenario
+        # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: exacte gewogen som over ALLE matchups.
+        "w_sum": 0.0, "w_p2": 0.0, "w_p1": 0.0, "w_p0": 0.0, "n_missing": 0,
     }
 def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) -> None:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: `opponent_weight` is het
@@ -235,6 +265,13 @@ def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) 
     val = _sort_val(m)
     g["n"] += 1
     g["weights"][id(m)] = opponent_weight
+    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: incrementeel, over ALLE matchups.
+    pp_m = m.get("point_probs") or {}
+    g["w_sum"] += opponent_weight
+    g["w_p2"] += opponent_weight * pp_m.get("p2", 0.0)
+    g["w_p1"] += opponent_weight * pp_m.get("p1", 0.0)
+    g["w_p0"] += opponent_weight * pp_m.get("p0", 0.0)
+    g["n_missing"] += int(m.get("n_missing_win_probs", 0) or 0)
     ebw = m.get("expected_boards_won")
     if ebw is not None:
         g["ebw_sum"] += ebw
@@ -303,6 +340,13 @@ def _finalize_group(key, g: dict) -> dict:
     # (het gebruikelijke geval bij een realistische tegenstander-roster)
     # is dit exact, geen schatting.
     point_probs = _aggregate_group_point_probabilities(all_group_matches, g["weights"])
+    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: exacte waarde over ALLE
+    # matchups (incrementeel bijgehouden) vervangt de benadering hierboven.
+    if g.get("w_sum", 0.0) > 0:
+        point_probs = {
+            "p2": g["w_p2"] / g["w_sum"], "p1": g["w_p1"] / g["w_sum"],
+            "p0": g["w_p0"] / g["w_sum"], "n_missing_ratings": g.get("n_missing", 0),
+        }
     return {
         "key": key, "n": g["n"], "rows": rows,
         "best": g["best"], "worst": g["worst"],
@@ -322,6 +366,7 @@ def _build_all_valid_matchups(
     available_ids: list, max_per_player: dict,
     synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
     tournament_rules_dict, include_non_compliant_variants: bool = False,
+    opponent_weight_override: dict = None,  # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02
 ) -> tuple:
     """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: rekent ELKE reglementaire eigen opstelling door
     tegen ELKE tegenstander-opstelling - zie moduledocstring.
@@ -366,6 +411,10 @@ def _build_all_valid_matchups(
         their_key: _opponent_lineup_weight(info)
         for their_key, info in unique_opponent_lineups.items()
     }
+    if opponent_weight_override:
+        opponent_weight_by_key = {
+            k: opponent_weight_override.get(k, 0.0) for k in unique_opponent_lineups
+        }
     for own_ordered_pairs, own_rotations_info, fully_compliant, rank_data_incomplete in valid_own_options:
         if computed_n >= _MAX_COMPUTED_MATCHUPS:
             truncated = True
@@ -549,7 +598,7 @@ def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> Non
     n_theo = max(0, n_total - n_hist)
     st.caption(
         f"Gebaseerd op {n_total} tegenstander-scenario('s) ({n_hist} effectief gespeeld dit "
-        f"seizoen, {n_theo} theoretisch)."
+        f"seizoen, {n_theo} theoretisch), gewogen naar hun voorspelde waarschijnlijkheid."
     )
     n_boards_per_row = len(best.get("assignment") or [])
     denom = n_total * n_boards_per_row
@@ -561,7 +610,7 @@ def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> Non
             "dus voor een groot deel op een neutrale 50%-aanname en zijn minder betrouwbaar. "
             "Vul het ontbrekende klassement/rating aan voor een scherper cijfer."
         )
-    elif n_hist == 0 and n_theo >= _DILUTION_THEORETICAL_MIN_COUNT:
+    elif n_hist == 0 and n_theo >= _DILUTION_THEORETICAL_MIN_COUNT and olm is None:
         st.caption(
             "Let op: dit cijfer is (nog) uitsluitend gebaseerd op THEORETISCHE tegenstander-"
             "opstellingen (nog geen enkele hiervan effectief gespeeld dit seizoen). Bij veel "
@@ -826,6 +875,52 @@ def _render_save_analysis_button(
         }
         doc_id = fb.save_lineup_analysis(sel_player_id, payload)
         st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
+def _model_weights_for_lineups(bundle: dict, unique_opponent_lineups: dict) -> tuple:
+    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per
+    tegenstander-scenario. Geeft (weights {key: kans}, stats) of (None, None)."""
+    if olm is None or not unique_opponent_lineups:
+        return None, None
+    try:
+        stats = olm.build_opponent_stats(bundle)
+        roster = {str(p.get("user_id")) for p in (bundle.get("unique_players") or []) if p.get("user_id")}
+        for key in unique_opponent_lineups:
+            for pair in key:
+                roster |= set(pair)
+        roster_uids = sorted(roster)
+        logs = {
+            key: olm.full_lineup_log_score(stats, list(key), roster_uids)
+            for key in unique_opponent_lineups
+        }
+        return olm.softmax_weights(logs), stats
+    except Exception:  # noqa: BLE001
+        return None, None
+def _render_predicted_opponent_lineups(unique_opponent_lineups: dict, weights: dict, stats: dict) -> None:
+    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: top 5 voorspelde
+    tegenstander-opstellingen met kans + redenen (controleerbare weging)."""
+    if not weights:
+        return
+    top = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top5_share = sum(w for _, w in top)
+    with st.expander(
+        f"Voorspelde tegenstander-opstellingen (statistisch model, op basis van "
+        f"{stats.get('n_fixtures', 0)} eerdere ontmoeting(en))", expanded=False,
+    ):
+        st.caption(
+            "Het model combineert 3 eenvoudige signalen uit hun eerdere ontmoetingen: wie speelt vaak "
+            "mee, wie speelt vaak SAMEN, en wie speelt meestal Match 1 of Match 2. Die kans is het "
+            "gewicht van elk scenario in de puntenkansen hieronder. "
+            f"De top 5 hieronder samen: {top5_share * 100:.0f}% van het totale gewicht."
+        )
+        for key, w in top:
+            info = unique_opponent_lineups[key]
+            hist = f" - effectief gespeeld ({', '.join(info['historical_labels'])})" if info.get("is_historical") else ""
+            st.write(f"**{w * 100:.1f}%** - {_format_opponent_lineup_label(info['boards'])}{hist}")
+            redenen = []
+            for r in range(0, len(key) - 1, 2):
+                redenen += olm.explain_rotation(stats, key[r], key[r + 1], max_reasons=2)
+            uniek = list(dict.fromkeys(redenen))[:3]
+            if uniek:
+                st.caption(" · ".join(uniek))
 def _render_all_valid_matchups(
     bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
@@ -935,6 +1030,10 @@ def _render_all_valid_matchups(
     if not unique_opponent_lineups:
         st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
         return []
+    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per scenario.
+    model_weights, model_stats = _model_weights_for_lineups(bundle, unique_opponent_lineups)
+    if model_weights:
+        _render_predicted_opponent_lineups(unique_opponent_lineups, model_weights, model_stats)
     settings_signature = (
         tuple(sorted(available_ids)),
         tuple(sorted(max_per_player.items())),
@@ -952,8 +1051,9 @@ def _render_all_valid_matchups(
     # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: opnieuw nieuwe sleutels (v3), want elke matchup/groep
     # heeft nu ook "point_probs" - een oud, gecachet resultaat zonder dat veld zou de nieuwe kolommen
     # als "onbekend" tonen i.p.v. echt herberekend te worden.
-    result_key = f"scenario_result_v3_{opp['ploeg_id']}"
-    sig_key = f"scenario_result_sig_v3_{opp['ploeg_id']}"
+    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: v4 - andere weging.
+    result_key = f"scenario_result_v4_{opp['ploeg_id']}"
+    sig_key = f"scenario_result_sig_v4_{opp['ploeg_id']}"
     clicked = st.button(
         "Bereken alle geldige matchups", type="primary", key=f"compute_scenarios_{opp['ploeg_id']}",
         help="Berekent pas NA deze klik - wijzig gerust eerst alle instellingen hierboven zonder dat de "
@@ -965,6 +1065,7 @@ def _render_all_valid_matchups(
                 unique_opponent_lineups, available_ids, max_per_player, synergy_fn,
                 player_ratings, official_ranks_strict, opponent_ratings, tournament_rules_dict,
                 include_non_compliant_variants=include_non_compliant,
+                opponent_weight_override=model_weights,
             )
             st.session_state[sig_key] = signature
     stored = st.session_state.get(result_key)

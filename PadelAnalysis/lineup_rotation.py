@@ -433,10 +433,39 @@ blijven ONGEWIJZIGD altijd bruikbaar (ze toonden al geen misleidende
 winkans-percentages zonder tegenstander - enkel een EBW/synergie-score,
 of bij ontbrekende EBW een synergie-score i.p.v. een percentage) - Kim's
 melding gold specifiek de 3 kaarten, dus enkel die sectie is aangepast.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_SCENARIO_CARDS_2026-10-02 (op verzoek van Kim:
+"kaarten ook in lineup_rotation. qua scenario's kunnen we zo starten. hou
+wel ook wat rekening met statistische gegevens zoals: persoon x speelt
+bijna altijd met die persoon y. of persoon x speelt bijna altijd 1ste
+match.")
+--------------------------------------------------------------------------
+Bovenaan "Wie stelt de tegenstander op in rotatie N?" staan nu
+SCENARIO-KAARTEN: de 3 waarschijnlijkste tegenstander-opstellingen voor
+DEZE rotatie volgens opponent_lineup_model.py (deelname + vaste koppels +
+Match 1/2-voorkeur, met de art. 6.6-bordvolgorde, de puntengrens en - in
+rotatie 2+ - zonder koppels die in deze ontmoeting al speelden). Per kaart:
+de kans, de redenen in gewone taal, ONS BESTE ANTWOORD (hoogste kans op 2
+ploegpunten voor de volledige ontmoeting, gegeven wat al vastligt) en een
+knop "Gebruik dit scenario" die - net als de historische snelkeuzes - de 2
+bestaande tegenstander-dropdowns invult (zelfde paar_label_by_uids-lookup,
+geen apart bevestig-pad).
+Daaronder een ROBUUST VOORSTEL: de eigen opstelling met de hoogste GEWOGEN
+kans over de top-5 scenario's (gewicht = voorspelde kans), plus - indien
+verschillend - de opstelling die de kans op MINSTENS 1 punt maximaliseert
+(het "opofferen voor 1 punt"-profiel uit Kim's ontwerp). Zo kan Kim ook
+VOOR de tegenstander bekend is al een onderbouwde keuze maken.
+De zware berekening (alle eigen opties x 5 scenario's) wordt per rotatie
+gecachet in session_state, met een signatuur op spelers/budget/vastgelegde
+rotaties/klassementen.
 """
 import itertools
 from collections import Counter
 import streamlit as st
+try:
+    import opponent_lineup_model as olm  # PADEL_ANALYSIS_ROTATION_SCENARIO_CARDS_2026-10-02
+except Exception:  # noqa: BLE001  pragma: no cover
+    olm = None
 from dashboard_common import ll, taa, _parse_match_date
 from lineup_scout import (
     _cached_official_rank, _cached_own_player_rating,
@@ -1804,6 +1833,160 @@ def _render_encounter_summary(
             wp = win_probs_voor_rotatie[match_idx - 1] if match_idx - 1 < len(win_probs_voor_rotatie) else None
             wp_txt = f" ({int(round(wp * 100))}% winkans)" if wp is not None else " (winkans onbekend)"
             st.write(f"Rotatie {rot_idx} - Match {match_idx}: **{ons}**{tegen}{wp_txt}")
+# -----------------------------------------------
+# PADEL_ANALYSIS_ROTATION_SCENARIO_CARDS_2026-10-02 - zie moduledocstring.
+# -----------------------------------------------
+_SCENARIO_TOP_K = 5      # scenario's voor het robuuste voorstel
+_SCENARIO_CARDS_N = 3    # getoonde scenario-kaarten
+_SAFE_ALT_MIN_GAIN = 0.03  # "minstens 1 punt"-alternatief pas vanaf +3 procentpunten tonen
+def _scenario_boards(pairs: list, names: dict, ranks: dict) -> list:
+    """2 tegenstander-koppels (frozensets van uids) -> bord-dicts in het
+    formaat dat _compute_matchup() verwacht."""
+    boards = []
+    for pair in pairs:
+        spelers = []
+        for uid in sorted(pair):
+            r = ranks.get(uid)
+            spelers.append({
+                "name": names.get(uid, uid), "user_id": uid,
+                "ranking": f"P{int(r)}" if r is not None else None,
+            })
+        boards.append({"opponent_pair": spelers})
+    return boards
+def _impact_from_win_probs(locked_flat: list, win_probs: list, total_boards) -> dict:
+    wps = list(locked_flat) + list(win_probs)
+    if total_boards is not None and int(total_boards) > len(wps):
+        wps += [None] * (int(total_boards) - len(wps))
+    return _match_outcome_point_probabilities(wps)
+def _compute_opponent_scenario_analysis(
+    bundle, unique_opp_players, own_options, synergy_fn, player_ratings,
+    official_ranks_strict, opponent_ratings, tournament_rules_dict,
+    opp_excluded_pairs, locked_flat, total_boards,
+) -> dict:
+    """Voorspelt de tegenstander-scenario's voor deze rotatie en berekent per
+    scenario ons beste antwoord + een robuust voorstel over de top-K."""
+    stats = olm.build_opponent_stats(bundle, MATCHES_PER_ROTATION)
+    names = {str(p.get("user_id")): p.get("name", "?") for p in unique_opp_players}
+    names.update(stats["names"])
+    roster_uids = [str(p.get("user_id")) for p in unique_opp_players if p.get("user_id")]
+    opp_ranks = {u: _cached_official_rank(u) for u in roster_uids}
+    opp_ps = {u: _cached_own_player_rating(u) for u in roster_uids}
+    opp_ps = {k: v for k, v in opp_ps.items() if v is not None}
+    def _order(pairs):
+        return _rank_pairs_with_padelstat_tiebreak(pairs, opp_ranks, opp_ps)
+    pred = olm.predict_rotation_scenarios(
+        stats, unique_opp_players, _order, opp_ranks, rules=tournament_rules_dict,
+        excluded_pairs=opp_excluded_pairs, top_n=_SCENARIO_TOP_K,
+    )
+    scenarios = pred["scenarios"]
+    if not scenarios or not own_options:
+        return {"stats": stats, "scenarios": [], "n_total": pred["n_total"], "robust": None, "safe": None}
+    tot_w = sum(s["prob"] for s in scenarios) or 1.0
+    per_option = {}
+    for s_idx, scen in enumerate(scenarios):
+        boards = _scenario_boards(scen["pairs"], names, opp_ranks)
+        scen["boards"] = boards
+        beste = None
+        for o_idx, pairs in enumerate(own_options):
+            comp = _compute_matchup(
+                pairs, boards, synergy_fn, player_ratings or {},
+                official_ranks_strict, opponent_ratings or {},
+            )
+            wps = [a.get("win_probability") for a in comp["assignment"]]
+            impact = _impact_from_win_probs(locked_flat, wps, total_boards)
+            acc = per_option.setdefault(o_idx, {"p2": 0.0, "p1": 0.0, "p0": 0.0})
+            w = scen["prob"] / tot_w
+            for k in ("p2", "p1", "p0"):
+                acc[k] += w * impact[k]
+            sleutel = (impact["p2"], comp["expected_boards_won"])
+            if beste is None or sleutel > beste["sleutel"]:
+                beste = {"sleutel": sleutel, "pairs": pairs, "win_probs": wps, "impact": impact}
+        scen["best"] = beste
+    robust_idx = max(per_option, key=lambda i: (per_option[i]["p2"], per_option[i]["p1"]))
+    safe_idx = max(per_option, key=lambda i: (per_option[i]["p2"] + per_option[i]["p1"], per_option[i]["p2"]))
+    robust = {"pairs": own_options[robust_idx], "impact": per_option[robust_idx]}
+    safe = None
+    winst_min1 = (per_option[safe_idx]["p2"] + per_option[safe_idx]["p1"]) - (
+        per_option[robust_idx]["p2"] + per_option[robust_idx]["p1"]
+    )
+    # Enkel tonen bij een BETEKENISVOL verschil - anders is het ruis.
+    if safe_idx != robust_idx and winst_min1 >= _SAFE_ALT_MIN_GAIN:
+        safe = {"pairs": own_options[safe_idx], "impact": per_option[safe_idx]}
+    return {
+        "stats": stats, "scenarios": scenarios, "n_total": pred["n_total"],
+        "robust": robust, "safe": safe, "top_k_share": tot_w,
+    }
+def _pairs_txt(pairs, name_lookup_global) -> str:
+    return "  -  ".join(
+        f"M{i}: {' / '.join(name_lookup_global.get(u, u) for u in sorted(p))}"
+        for i, p in enumerate(pairs, start=1)
+    )
+def _render_opponent_scenario_cards(
+    analysis: dict, name_lookup_global: dict, paar_label_by_uids: dict,
+    key_i0: str, key_i1: str, next_rotation_num: int, ploeg_id,
+) -> None:
+    """Tekent de 3 scenario-kaarten + het robuuste voorstel."""
+    stats = analysis["stats"]
+    n_fix = stats.get("n_fixtures", 0)
+    st.markdown("**Verwachte tegenstander-opstellingen (statistisch model)**")
+    if n_fix == 0:
+        st.caption(
+            "Nog geen eerdere ontmoetingen van deze tegenstander gekend - elke opstelling is even "
+            "waarschijnlijk, dus het model kan (nog) niets voorspellen. Kies de tegenstander hieronder zelf."
+        )
+        return
+    scenarios = analysis["scenarios"]
+    if not scenarios:
+        st.caption("Geen geldige tegenstander-opstelling gevonden voor deze rotatie.")
+        return
+    st.caption(
+        f"Op basis van {n_fix} eerdere ontmoeting(en): wie speelt vaak mee, wie speelt vaak samen, en "
+        f"wie speelt meestal Match 1/2. {analysis['n_total']} mogelijke opstellingen gescoord."
+    )
+    toon = scenarios[:_SCENARIO_CARDS_N]
+    cols = st.columns(len(toon))
+    for idx, (col, scen) in enumerate(zip(cols, toon)):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**Scenario {chr(65 + idx)}** - {scen['prob'] * 100:.0f}% kans")
+                for m_idx, pair in enumerate(scen["pairs"], start=1):
+                    namen = " / ".join(stats["names"].get(u, u) for u in sorted(pair))
+                    st.write(f"Tegen M{m_idx}: {namen}")
+                if scen["reasons"]:
+                    st.caption(" · ".join(scen["reasons"]))
+                best = scen.get("best")
+                if best:
+                    regels = []
+                    for m_idx, (pair, wp) in enumerate(zip(best["pairs"], best["win_probs"]), start=1):
+                        wp_txt = f"{wp * 100:.0f}%" if wp is not None else "?"
+                        regels.append(
+                            f"M{m_idx} {' / '.join(name_lookup_global.get(u, u) for u in sorted(pair))} ({wp_txt})"
+                        )
+                    st.markdown("Ons beste antwoord: " + " · ".join(regels))
+                    st.caption(f"Ontmoeting: {_format_point_probs_short(best['impact'])}")
+                m1_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][0]))
+                m2_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][1]))
+                if m1_lbl and m2_lbl and st.button(
+                    "Gebruik dit scenario", key=f"opp_scen_{ploeg_id}_{next_rotation_num}_{idx}",
+                    use_container_width=True,
+                ):
+                    st.session_state[key_i0] = m1_lbl
+                    st.session_state[key_i1] = m2_lbl
+                    st.rerun(scope="fragment")
+    robust = analysis.get("robust")
+    if robust:
+        st.success(
+            f"Robuust voorstel (gewogen over de {len(scenarios)} waarschijnlijkste scenario's, "
+            f"samen {analysis.get('top_k_share', 0) * 100:.0f}% kans): **{_pairs_txt(robust['pairs'], name_lookup_global)}** "
+            f"- {_format_point_probs_short(robust['impact'])}"
+        )
+        safe = analysis.get("safe")
+        if safe:
+            st.info(
+                f"Voor minstens 1 punt (hoogste kans op 1 of 2 punten): **{_pairs_txt(safe['pairs'], name_lookup_global)}** "
+                f"- {_format_point_probs_short(safe['impact'])}. Kies dit als een gelijkspel volstaat."
+            )
+    st.divider()
 @st.fragment
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
@@ -1967,6 +2150,57 @@ def _render_rotation_planner(
                 frozenset({str(p1.get("user_id")), str(p2.get("user_id"))}): _pair_label(p1, p2)
                 for p1, p2 in alle_paren
             }
+            # PADEL_ANALYSIS_ROTATION_SCENARIO_CARDS_2026-10-02: scenario-
+            # kaarten (statistisch model) bovenaan - zie moduledocstring.
+            if olm is not None:
+                opp_excluded_pairs = set()
+                for rot_opp in locked_opponents:
+                    for paar in rot_opp or []:
+                        uids = frozenset(str(x.get("user_id")) for x in paar if x.get("user_id"))
+                        if len(uids) == 2:
+                            opp_excluded_pairs.add(uids)
+                locked_flat = [wp for rot in locked_win_probs_per_rotation for wp in rot]
+                scen_sig = (
+                    tuple(sorted(available_ids)), next_rotation_num,
+                    tuple(sorted(tuple(sorted(p)) for p in excluded_pairs)),
+                    tuple(sorted(tuple(sorted(p)) for p in opp_excluded_pairs)),
+                    tuple(sorted(player_budget.items())) if player_budget else None,
+                    tuple(sorted(official_ranks_strict.items())),
+                    tuple(sorted((player_ratings or {}).items())),
+                    tuple(sorted((opponent_ratings or {}).items())),
+                    tuple(str(p.get("user_id")) for p in unique_opp_players),
+                    len((bundle or {}).get("previous_fixtures") or []),
+                    tuple(sorted(tournament_rules_dict.items())) if tournament_rules_dict else None,
+                    tuple(locked_flat),
+                )
+                scen_key = f"rot_scen_v1_{ploeg_id}_{next_rotation_num}"
+                scen_sig_key = f"rot_scen_sig_v1_{ploeg_id}_{next_rotation_num}"
+                if st.session_state.get(scen_sig_key) != scen_sig:
+                    try:
+                        own_all, _, _ = _generate_rotation_candidates(
+                            available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
+                            opponent_boards=None, player_ratings=player_ratings,
+                            opponent_ratings=opponent_ratings, max_results=100_000,
+                            tournament_rules_dict=tournament_rules_dict,
+                            rotation_number=next_rotation_num, player_budget=player_budget,
+                        )
+                        own_options = [c["ordered_pairs"] for c in own_all]
+                        st.session_state[scen_key] = _compute_opponent_scenario_analysis(
+                            bundle, unique_opp_players, own_options, synergy_fn, player_ratings,
+                            official_ranks_strict, opponent_ratings, tournament_rules_dict,
+                            opp_excluded_pairs, locked_flat, total_boards,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.session_state[scen_key] = {"error": f"{type(exc).__name__}: {exc}"}
+                    st.session_state[scen_sig_key] = scen_sig
+                analysis = st.session_state.get(scen_key) or {}
+                if analysis.get("error"):
+                    st.caption(f"Scenario-voorspelling mislukt: {analysis['error']}")
+                elif analysis:
+                    _render_opponent_scenario_cards(
+                        analysis, name_lookup_global, paar_label_by_uids,
+                        key_i0, key_i1, next_rotation_num, ploeg_id,
+                    )
             # PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30: snelkeuzes
             # BOVENAAN, in DEZE expander, vóór de 2 dropdowns - zie
             # moduledocstring. Vult bij een klik gewoon de 2 bestaande
