@@ -141,6 +141,25 @@ lineup_whatif.py en lineup_sandbox.py zelf blijven als BESTAND nog
 bestaan in de repo (dit bestand kan ze niet verwijderen) - zie de
 oplever-instructies voor de `git rm`-commando's om ze ook daar weg te
 halen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03 (op verzoek van Kim, meermaals
+gemeld: "Snelkeuze tegenstander is nog altijd maar 1 optie" + het model
+toonde "Op basis van 1 eerdere ontmoeting(en)")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd in de code: `bundle` komt van de scout-header
+(osu.render_scout_header) en bevat enkel de LAATSTE ontmoeting(en) in
+"previous_fixtures". De volledige historiek (`full_opp_bundle`, via
+_scout_team_all_fixtures met lookback=alle) werd enkel gebruikt voor het
+blok "vorige ontmoetingen" en - via _merge_full_opponent_roster - om de
+SPELERSLIJST aan te vullen, NIET de ontmoetingen zelf. Matchup-tabel,
+Rotatieplanner, snelkeuzes en het statistische model zagen dus maar 1
+ontmoeting - wat alle eerdere snelkeuze-fixes zinloos maakte.
+FIX: _planning_bundle_with_all_fixtures() maakt een KOPIE van `bundle`
+waarin "previous_fixtures" = alle ontmoetingen uit full_opp_bundle +
+bundle (ontdubbeld). Die kopie gaat naar de matchup-tabel en de
+Rotatieplanner. `bundle` zelf (scout-header, AI-rapport, "vorige
+ontmoetingen") blijft ONGEWIJZIGD. Een caption toont hoeveel ontmoetingen
+de planning gebruikt, zodat dit voortaan controleerbaar is.
 """
 import streamlit as st
 from dashboard_common import (
@@ -203,6 +222,37 @@ SECTION_RANG = "Rangschikking"
 SECTION_POULE = "Andere ploegen"
 SECTION_SAVED = "Opgeslagen analyses"
 _SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED]
+def _fixture_key(fx_bundle: dict):
+    """PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03: sleutel om dezelfde
+    ontmoeting uit 2 bundels te herkennen."""
+    fx = fx_bundle.get("fixture") or {}
+    if fx.get("match_id"):
+        return ("id", str(fx.get("match_id")))
+    key = (
+        str(fx.get("date_text") or ""),
+        str(fx.get("home_ploeg_id") or fx.get("home_name") or ""),
+        str(fx.get("away_ploeg_id") or fx.get("away_name") or ""),
+    )
+    if not any(key):
+        return ("obj", id(fx_bundle))
+    return ("dt",) + key
+def _planning_bundle_with_all_fixtures(bundle: dict, full_bundle: dict) -> dict:
+    """PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03 - zie moduledocstring."""
+    full = (full_bundle or {}).get("previous_fixtures") or []
+    eigen = (bundle or {}).get("previous_fixtures") or []
+    if not full:
+        return bundle
+    gezien = set()
+    samen = []
+    for fxb in list(full) + list(eigen):
+        k = _fixture_key(fxb)
+        if k in gezien:
+            continue
+        gezien.add(k)
+        samen.append(fxb)
+    out = dict(bundle)
+    out["previous_fixtures"] = samen
+    return out
 @st.fragment
 def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_player_id, report):
     """PADEL_ANALYSIS_FRAGMENT_ISOLATION_STAGE2_2026-09-27: @st.fragment
@@ -252,6 +302,8 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         full_opp_bundle = _scout_team_all_fixtures(
             fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,
         ) if fixtures else {}
+    # PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03: planning op ALLE ontmoetingen.
+    planning_bundle = _planning_bundle_with_all_fixtures(bundle, full_opp_bundle)
     with perf.step("_render_previous_opponent_lineup (vorige ontmoetingen)"):
         _render_previous_opponent_lineup(bundle, opp=opp, full_bundle=full_opp_bundle)
     with perf.step("_render_match1_frequency_opponent"):
@@ -343,8 +395,12 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             f"**{n_rotations} rotaties van {MATCHES_PER_ROTATION} matchen** = {total_boards} "
             f"matchen per ontmoeting (standaard najaar: {ROTATIONS_PER_ENCOUNTER} rotaties)."
         )
+    n_planning_fx = len([fx for fx in planning_bundle.get("previous_fixtures", []) or [] if fx.get("boards")])
+    st.caption(
+        f"Planning en voorspellingen gebruiken **{n_planning_fx}** eerdere ontmoeting(en) van deze tegenstander."
+    )
     afwijkend = sorted({
-        len(fx.get("boards") or []) for fx in bundle.get("previous_fixtures", []) or []
+        len(fx.get("boards") or []) for fx in planning_bundle.get("previous_fixtures", []) or []
         if fx.get("boards") and len(fx.get("boards")) != total_boards
     })
     if afwijkend:
@@ -390,7 +446,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         name_lookup_global.setdefault(_pid, _lbl)
     with perf.step("_render_all_valid_matchups (matchup-tabel)"):
         all_matchups = _render_all_valid_matchups(
-            bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
+            planning_bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
             player_ratings, official_ranks_strict, opponent_ratings, report,
             name_lookup_global, sel_player_id,
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
@@ -403,7 +459,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             opponent_boards=chosen_scenario_boards, player_ratings=player_ratings,
             opponent_ratings=opponent_ratings, report_for_ai=report,
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
-            bundle=bundle, total_boards=total_boards,
+            bundle=planning_bundle, total_boards=total_boards,
             max_per_player=max_per_player,  # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29
             profiles=profiles, sel_player_id=sel_player_id,  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
         )
