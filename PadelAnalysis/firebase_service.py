@@ -316,18 +316,55 @@ def save_padelstat_rating(player_id: str, padelstat_id: str, rating: Optional[in
     save_official_klassement_from_padelstat() aangeroepen — je hoeft dat dus
     niet apart te doen. Achterwaarts compatibel: bestaande aanroepen zonder
     deze twee nieuwe parameters blijven exact hetzelfde gedrag vertonen."""
+    now = utc_now_iso()
     doc = {
         "player_id": str(player_id),
         "padelstat_id": str(padelstat_id),
         "rating": rating,
         "rating_source": rating_source,
         "raw_text_snippet": raw_text_snippet,
-        "fetched_at": utc_now_iso(),
+        "fetched_at": now,
     }
-    db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).set(sanitize_for_firestore(doc), merge=True)
+    ref = db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id))
+    # PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03 (Kim: "al gespeelde matchen ook nog te kunnen
+    # analyseren maar dan met de padelstat waardes van toen"): naast de huidige waarde ook een
+    # HISTORIEK bijhouden in het veld "history" ([{"rating", "fetched_at"}]). Enkel een nieuwe
+    # regel als de rating effectief WIJZIGT (geen dubbele regels bij elke dagelijkse refresh), en
+    # max. _PADELSTAT_HISTORY_MAX regels (Firestore-document < 1 MB). Faalt stil: de huidige
+    # waarde wordt hoe dan ook bewaard.
+    if rating is not None:
+        try:
+            bestaand = ref.get()
+            data = bestaand.to_dict() if bestaand.exists else {}
+            history = list(data.get("history") or [])
+            gewijzigd = False
+            if not history and data.get("rating") is not None and data.get("fetched_at"):
+                # eerste keer: de reeds gekende waarde wordt het startpunt van de historiek
+                history.append({"rating": data.get("rating"), "fetched_at": data.get("fetched_at")})
+                gewijzigd = True
+            if not history or history[-1].get("rating") != rating:
+                history.append({"rating": rating, "fetched_at": now})
+                gewijzigd = True
+            if gewijzigd:
+                doc["history"] = history[-_PADELSTAT_HISTORY_MAX:]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{player_id}] padelstat-historiek niet bijgewerkt: {e}")
+    ref.set(sanitize_for_firestore(doc), merge=True)
     if matched_klassement is not None:
         save_official_klassement_from_padelstat(player_id, matched_klassement, club_confirmed=club_confirmed)
     return doc
+_PADELSTAT_HISTORY_MAX = 400
+def get_padelstat_rating_at(player_id: str, moment_iso: str) -> Optional[int]:
+    """PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03: de padelstat-rating zoals die gold op
+    `moment_iso` (ISO-datum of -tijdstip, bv. "2026-09-26"): de laatste historiek-regel met
+    fetched_at <= moment. None als er voor dat moment nog geen waarde bekend was."""
+    data = get_padelstat_rating(player_id) or {}
+    beste = None
+    for regel in data.get("history") or []:
+        t = str(regel.get("fetched_at") or "")
+        if t and t[:len(moment_iso)] <= moment_iso and (beste is None or t >= beste[0]):
+            beste = (t, regel.get("rating"))
+    return beste[1] if beste else None
 def get_padelstat_rating(player_id: str) -> Optional[dict]:
     doc = db.collection(PADELSTAT_CACHE_COLLECTION).document(str(player_id)).get()
     if not doc.exists:
