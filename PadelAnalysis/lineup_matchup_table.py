@@ -255,6 +255,9 @@ def _new_group_summary(assignment: list) -> dict:
         "weights": {},  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: id(m) -> gewicht van zijn tegenstander-scenario
         # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: exacte gewogen som over ALLE matchups.
         "w_sum": 0.0, "w_p2": 0.0, "w_p1": 0.0, "w_p0": 0.0, "n_missing": 0,
+        # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02: matchup tegen de MEEST
+        # waarschijnlijke tegenstander-opstelling + bereik van P(2).
+        "top_w": -1.0, "top_w_m": None, "p2_min": None, "p2_max": None,
     }
 def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) -> None:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: `opponent_weight` is het
@@ -272,6 +275,16 @@ def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) 
     g["w_p1"] += opponent_weight * pp_m.get("p1", 0.0)
     g["w_p0"] += opponent_weight * pp_m.get("p0", 0.0)
     g["n_missing"] += int(m.get("n_missing_win_probs", 0) or 0)
+    # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02
+    if opponent_weight > g["top_w"] or (
+        opponent_weight == g["top_w"] and g["top_w_m"] is not None
+        and pp_m.get("p2", 0.0) > (g["top_w_m"].get("point_probs") or {}).get("p2", 0.0)
+    ):
+        g["top_w"], g["top_w_m"] = opponent_weight, m
+    p2v = pp_m.get("p2")
+    if p2v is not None:
+        g["p2_min"] = p2v if g["p2_min"] is None else min(g["p2_min"], p2v)
+        g["p2_max"] = p2v if g["p2_max"] is None else max(g["p2_max"], p2v)
     ebw = m.get("expected_boards_won")
     if ebw is not None:
         g["ebw_sum"] += ebw
@@ -358,6 +371,9 @@ def _finalize_group(key, g: dict) -> dict:
         # zie _add_to_group()) - gebruikt om de dilutie-captions hieronder
         # te kunnen tonen zonder opnieuw te moeten tellen.
         "n_historical_scenarios": len(g["historical"]),
+        # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02
+        "vs_likely": g.get("top_w_m"), "vs_likely_weight": g.get("top_w", 0.0),
+        "p2_min": g.get("p2_min"), "p2_max": g.get("p2_max"),
         "players": g["players"], "positions": g["positions"],
         "first_assignment": g["first_assignment"],
     }
@@ -463,7 +479,10 @@ def _build_all_valid_matchups(
     # kans op 2 punten (was: best-case EBW) - dat is nu de vraag die Kim
     # wil beantwoord zien: welke opstelling maximaliseert de kans op een
     # ploegoverwinning, niet louter het beste best-case scenario.
-    group_list.sort(key=lambda g: g["point_probs"]["p2"], reverse=True)
+    group_list.sort(key=lambda g: (
+        round(g["point_probs"]["p2"], 3),
+        ((g.get("vs_likely") or {}).get("point_probs") or {}).get("p2", 0.0),
+    ), reverse=True)
     all_matchups = [m for g in group_list for m in g["rows"]]
     all_matchups.sort(key=_sort_val, reverse=True)
     diagnostics = {
@@ -596,10 +615,28 @@ def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> Non
     n_total = g.get("n", 0)
     n_hist = g.get("n_historical_scenarios", 0)
     n_theo = max(0, n_total - n_hist)
-    st.caption(
-        f"Gebaseerd op {n_total} tegenstander-scenario('s) ({n_hist} effectief gespeeld dit "
-        f"seizoen, {n_theo} theoretisch), gewogen naar hun voorspelde waarschijnlijkheid."
+    # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02: duidelijker (geen grijze caption) +
+    # resultaat tegen de MEEST waarschijnlijke tegenstander-opstelling en het bereik.
+    vs = g.get("vs_likely")
+    regels = []
+    if vs is not None:
+        pv = vs.get("point_probs") or {}
+        hist_txt = " (effectief gespeeld)" if vs.get("is_historical") else ""
+        regels.append(
+            f"**Tegen hun waarschijnlijkste opstelling{hist_txt}** "
+            f"({g.get('vs_likely_weight', 0) * 100:.0f}% kans): "
+            f"**{pv.get('p2', 0) * 100:.0f}% winst** · {pv.get('p1', 0) * 100:.0f}% gelijk · "
+            f"{pv.get('p0', 0) * 100:.0f}% verlies"
+        )
+    if g.get("p2_min") is not None:
+        regels.append(
+            f"Kans op winst varieert van **{g['p2_min'] * 100:.0f}%** (slechtste tegenstander-opstelling) "
+            f"tot **{g['p2_max'] * 100:.0f}%** (gunstigste)."
+        )
+    regels.append(
+        f"Gewogen over {n_total} tegenstander-scenario's ({n_hist} effectief gespeeld, {n_theo} theoretisch)."
     )
+    st.markdown("  \n".join(regels))
     n_boards_per_row = len(best.get("assignment") or [])
     denom = n_total * n_boards_per_row
     missing_fraction = (n_missing / denom) if denom else 0.0
@@ -650,6 +687,24 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
         "Reglementair: OK = geverifieerd conform art. 6.6. onzeker = minstens 1 speler heeft nog geen bekend "
         "officieel klassement - de volgorde kon NIET betrouwbaar geverifieerd worden."
     )
+    # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02: hoe groot is het verschil
+    # tussen onze beste en slechtste eigen opstelling eigenlijk?
+    p2s = [g["point_probs"]["p2"] for g in groups]
+    if len(p2s) > 1:
+        spread = (max(p2s) - min(p2s)) * 100
+        if spread < 3:
+            st.info(
+                f"De {len(groups)} eigen opstellingen liggen dicht bij elkaar (kans op winst "
+                f"{min(p2s) * 100:.0f}% - {max(p2s) * 100:.0f}%): onze spelers zijn ongeveer even sterk "
+                "tegenover deze tegenstander, dus de keuze maakt gemiddeld weinig uit. Het echte verschil "
+                "zit in WIE de tegenstander opstelt - zie 'Tegen hun waarschijnlijkste opstelling' per groep "
+                "en de scenario-kaarten in de Rotatieplanner."
+            )
+        else:
+            st.markdown(
+                f"**Verschil tussen onze beste en slechtste opstelling: {spread:.0f} procentpunt** "
+                f"kans op winst ({max(p2s) * 100:.0f}% vs {min(p2s) * 100:.0f}%)."
+            )
     toon_alle = False
     if len(groups) > _GROUPS_DISPLAY_DEFAULT:
         toon_alle = st.checkbox(

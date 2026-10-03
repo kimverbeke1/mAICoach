@@ -607,6 +607,17 @@ def _format_point_probs_short(pp: dict, is_neutral: bool = False) -> str:
     if is_neutral:
         return basis + " (nog neutraal - tegenstander onbekend)"
     return basis
+def _impact_markdown(pp: dict) -> str:
+    """PADEL_ANALYSIS_IMPACT_VISIBLE_2026-10-02 (Kim: "De ontmoeting
+    resultaten mogen veel duidelijker getoond worden. Nu staat dat in het
+    lichtgrijs in een kleinere font"): normale tekst, vet, met kleurcode."""
+    if not pp:
+        return "**Ontmoeting:** onbekend"
+    p2, p1, p0 = (pp.get(k, 0.0) * 100 for k in ("p2", "p1", "p0"))
+    return (
+        f"**Ontmoeting:** :green[**{p2:.0f}% winst**] · :orange[**{p1:.0f}% gelijk**] · "
+        f":red[**{p0:.0f}% verlies**]"
+    )
 def _candidate_pair_set_key(candidate: dict) -> frozenset:
     """Identificeert een kandidaat op ZIJN KOPPELS (ongeacht bordvolgorde) -
     gebruikt om de 3 kaarten van elkaar te onderscheiden op een echt ander
@@ -744,10 +755,7 @@ def _render_candidate_card(
             # PADEL_ANALYSIS_ROTATION_CARDS_NEUTRAL_LABEL_2026-09-30: is_neutral
             # doorgegeven aan _format_point_probs_short() i.p.v. de kansen
             # zonder context te tonen.
-            st.caption(
-                f"Impact op volledige ontmoeting: "
-                f"{_format_point_probs_short(card['impact'], card.get('is_neutral', False))}"
-            )
+            st.markdown(_impact_markdown(card["impact"]))
             if card.get("is_neutral"):
                 st.caption(
                     "Deze kaarten zijn nu nog gelijkwaardig omdat er nog geen enkele winkans gekend is "
@@ -766,6 +774,7 @@ def _render_candidate_card(
 # -----------------------------------------------
 def _opponent_rotation_presets(
     bundle: dict, next_rotation_num: int, paar_label_by_uids: dict,
+    paar_label_by_names: dict = None, skipped: list = None,
 ) -> list:
     """Geeft per eerdere ontmoeting TEGEN DEZE tegenstander de 2 borden
     terug die bij de EERSTVOLGENDE rotatie horen, als bruikbare presets.
@@ -805,12 +814,29 @@ def _opponent_rotation_presets(
         m1_pair = (rot_boards[0].get("opponent_pair") or [])
         m2_pair = (rot_boards[1].get("opponent_pair") or [])
         if len(m1_pair) != 2 or len(m2_pair) != 2:
+            if skipped is not None:
+                skipped.append(f"{fixture_label}: onvolledige koppels op het uitslagenblad")
             continue
         m1_uids = frozenset(str(p.get("user_id")) for p in m1_pair)
         m2_uids = frozenset(str(p.get("user_id")) for p in m2_pair)
         m1_label = paar_label_by_uids.get(m1_uids)
         m2_label = paar_label_by_uids.get(m2_uids)
+        # PADEL_ANALYSIS_PRESET_NAME_FALLBACK_2026-10-02: zelfde speler kan in
+        # een ouder uitslagenblad een ANDERE id hebben (of geen) - val dan
+        # terug op de naam.
+        if paar_label_by_names:
+            def _nk(pair):
+                return frozenset(_norm_name(p.get("name")) for p in pair)
+            if m1_label is None:
+                m1_label = paar_label_by_names.get(_nk(m1_pair))
+            if m2_label is None:
+                m2_label = paar_label_by_names.get(_nk(m2_pair))
         if m1_label is None or m2_label is None:
+            if skipped is not None:
+                ontbr = [
+                    p.get("name", "?") for p in (m1_pair if m1_label is None else []) + (m2_pair if m2_label is None else [])
+                ]
+                skipped.append(f"{fixture_label}: speler(s) niet in de huidige tegenstander-selectie ({', '.join(ontbr)})")
             # Minstens 1 speler zit niet (meer) in het gekende tegenstander-
             # roster - deze preset zou een niet-bestaande dropdown-optie
             # instellen, dus overslaan i.p.v. een kapotte knop te tonen.
@@ -823,9 +849,11 @@ def _opponent_rotation_presets(
             "m1_display": m1_namen, "m2_display": m2_namen,
         })
     return out
+def _norm_name(naam) -> str:
+    return " ".join(str(naam or "").lower().split())
 def _render_opponent_quick_presets(
     bundle: dict, next_rotation_num: int, paar_label_by_uids: dict,
-    key_i0: str, key_i1: str,
+    key_i0: str, key_i1: str, paar_label_by_names: dict = None,
 ) -> None:
     """PADEL_ANALYSIS_ROTATION_OPPONENT_PRESETS_2026-09-30 - zie
     moduledocstring. Tekent 1 knop per bruikbare historische ontmoeting
@@ -836,7 +864,19 @@ def _render_opponent_quick_presets(
     Geen eigen bevestig-pad: de bestaande dropdown-logica en alles wat
     daarop bouwt (candidates/kaarten/"Zelf samenstellen") werkt hierna
     ONGEWIJZIGD verder, exact zoals bij een manuele dropdown-keuze."""
-    presets = _opponent_rotation_presets(bundle, next_rotation_num, paar_label_by_uids)
+    skipped = []
+    presets = _opponent_rotation_presets(
+        bundle, next_rotation_num, paar_label_by_uids, paar_label_by_names, skipped,
+    )
+    # PADEL_ANALYSIS_PRESET_NAME_FALLBACK_2026-10-02: zichtbaar WAAROM een
+    # eerdere ontmoeting geen snelkeuze werd (evidence i.p.v. gissen).
+    n_hist = len(_historical_opponent_boards_list(bundle))
+    if skipped or n_hist != len(presets):
+        with st.expander(f"Snelkeuzes: {len(presets)} van {n_hist} eerdere ontmoeting(en) bruikbaar", expanded=False):
+            for regel in skipped:
+                st.write(f"- {regel}")
+            if not skipped and n_hist != len(presets):
+                st.write("- Overige ontmoetingen hadden geen borden voor deze rotatie-positie.")
     if not presets:
         st.caption(
             "Nog geen snelkeuze beschikbaar voor deze rotatie-positie (geen eerdere ontmoeting "
@@ -1963,7 +2003,7 @@ def _render_opponent_scenario_cards(
                             f"M{m_idx} {' / '.join(name_lookup_global.get(u, u) for u in sorted(pair))} ({wp_txt})"
                         )
                     st.markdown("Ons beste antwoord: " + " · ".join(regels))
-                    st.caption(f"Ontmoeting: {_format_point_probs_short(best['impact'])}")
+                    st.markdown(_impact_markdown(best["impact"]))
                 m1_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][0]))
                 m2_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][1]))
                 if m1_lbl and m2_lbl and st.button(
@@ -2094,6 +2134,14 @@ def _render_rotation_planner(
         )
         return
     unique_opp_players = (bundle or {}).get("unique_players") or []
+    # PADEL_ANALYSIS_PLANNER_FOLLOWS_OPP_SELECTION_2026-10-02: volg de
+    # selectie "Beschikbare tegenstander-spelers" uit de matchup-tabel, zodat
+    # de planner (scenario's, dropdowns) meteen herrekent als je die wijzigt.
+    gekozen_opp_namen = st.session_state.get(f"theoretical_opp_players_{ploeg_id}")
+    if gekozen_opp_namen:
+        gefilterd = [p for p in unique_opp_players if p.get("name", "?") in set(gekozen_opp_namen)]
+        if len(gefilterd) >= 4:
+            unique_opp_players = gefilterd
     rotation_opponent_boards = None
     if unique_opp_players:
         with st.expander(
@@ -2148,6 +2196,10 @@ def _render_rotation_planner(
             # een historische wedstrijd die 2 spelers vermeldde.
             paar_label_by_uids = {
                 frozenset({str(p1.get("user_id")), str(p2.get("user_id"))}): _pair_label(p1, p2)
+                for p1, p2 in alle_paren
+            }
+            paar_label_by_names = {
+                frozenset({_norm_name(p1.get("name")), _norm_name(p2.get("name"))}): _pair_label(p1, p2)
                 for p1, p2 in alle_paren
             }
             # PADEL_ANALYSIS_ROTATION_SCENARIO_CARDS_2026-10-02: scenario-
@@ -2207,6 +2259,7 @@ def _render_rotation_planner(
             # dropdown-keys in en herlaadt; geen apart bevestig-pad.
             _render_opponent_quick_presets(
                 bundle, next_rotation_num, paar_label_by_uids, key_i0, key_i1,
+                paar_label_by_names=paar_label_by_names,
             )
             voorstel_idx = [0, 0]
             if opponent_boards:
