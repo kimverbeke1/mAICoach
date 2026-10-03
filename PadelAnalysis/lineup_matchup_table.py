@@ -215,11 +215,27 @@ match. combineer ook die data.")
 3. Nieuw expander-blok "Voorspelde tegenstander-opstellingen" toont de top
    5 met kans en de redenen, zodat de weging controleerbaar is.
 Cache-sleutels naar v4 (de gewichten zijn veranderd).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 (op verzoek van Kim: "gewoon
+overal hetzelfde gemiddelde zien is ook niet zinvol. Dus specifieke cases
+zijn wel interessant")
+--------------------------------------------------------------------------
+Meteen na de voorspelde tegenstander-opstellingen (en VOOR de knop
+"Bereken alle geldige matchups") staat nu de scenario-matrix uit
+lineup_scenario_matrix.py: benoemde tegenstander-scenario's als kolommen,
+eigen strategieen (aanvallend / veilig / robuust / counter) als rijen, met
+de exacte kans per cel. Ze rekent zelf (licht: enkel de eigen opstellingen
+x max. 8 scenario's) en heeft de knop dus niet nodig. Faalt de module, dan
+werkt de rest van deze sectie ongewijzigd verder.
 """
 import heapq
 import streamlit as st
 from dashboard_common import fb, taa
 from lineup_scout import _opponent_official_ranks, _opponent_padelstat_ratings
+try:
+    import lineup_scenario_matrix as lsm  # PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03
+except Exception:  # noqa: BLE001  pragma: no cover
+    lsm = None
 try:
     import opponent_lineup_model as olm  # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -1089,6 +1105,16 @@ def _render_all_valid_matchups(
     model_weights, model_stats = _model_weights_for_lineups(bundle, unique_opponent_lineups)
     if model_weights:
         _render_predicted_opponent_lineups(unique_opponent_lineups, model_weights, model_stats)
+    # PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 - zie moduledocstring.
+    if lsm is not None:
+        try:
+            lsm.render_scenario_matrix(
+                unique_opponent_lineups, model_weights, available_ids, max_per_player,
+                int(total_boards), synergy_fn, player_ratings, official_ranks_strict,
+                opponent_ratings, tournament_rules_dict, name_lookup_global, str(opp["ploeg_id"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - nooit de rest van de pagina breken
+            st.warning(f"Scenario-analyse mislukt: {type(exc).__name__}: {exc}")
     settings_signature = (
         tuple(sorted(available_ids)),
         tuple(sorted(max_per_player.items())),
