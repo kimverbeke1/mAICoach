@@ -227,6 +227,29 @@ eigen strategieen (aanvallend / veilig / robuust / counter) als rijen, met
 de exacte kans per cel. Ze rekent zelf (licht: enkel de eigen opstellingen
 x max. 8 scenario's) en heeft de knop dus niet nodig. Faalt de module, dan
 werkt de rest van deze sectie ongewijzigd verder.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03 (feedback Kim: "Als ik bvb een speler
+wegklik [...] dan moet je die opstelling niet tonen want is niet mogelijk",
+"handig om bij de spelers en het aantal matchen te zien welke padelstat
+score en officiele ranking ze hebben [...] het aantal matchen die ze
+waarschijnlijk gaan spelen al voorstellen. Moet dus geupdate worden als je
+spelers toevoegt of wegklikt", "minstens 1 punt [...] zou bij matchup ook
+logischer zijn", grotere koppen per opstelling)
+--------------------------------------------------------------------------
+1. Tegenstander-opstellingen (ook EFFECTIEF GESPEELDE) met een speler die
+   niet in "Beschikbare tegenstander-spelers" staat, worden weggelaten -
+   voor de matrix, het model en de matchup-tabel. Herkenning op id OF naam.
+2. Het veld per tegenstander-speler toont "Naam (P-klassement · ps
+   padelstat)" en staat standaard op het VERWACHTE aantal matchen: het
+   gemiddelde aantal matchen per ontmoeting dat die speler speelde
+   (statistisch model), herschaald naar het totaal en begrensd op 1 match
+   per rotatie. Zonder historiek: gelijk verdeeld (zoals voorheen). Wijzig
+   je de selectie, dan wordt het voorstel herberekend.
+3. "Onze opstellingen": grote kop per opstelling met de namen per rotatie,
+   daaronder 4 grote cijfers (winst / gelijk / verlies / minstens 1 punt),
+   de uitklapknop heet "Details".
+4. Het model (stats) wordt mee doorgegeven aan de scenario-matrix voor de
+   duiding van de kansen.
 """
 import heapq
 import streamlit as st
@@ -747,20 +770,32 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
         # reglement-badge + de korte koppellijst (geen opmaak mogelijk in
         # een st.expander-label, vandaar de metrics ernaast i.p.v. erin).
         pp_metrics = g.get("point_probs") or {}
-        col_p2, col_p1, col_p0 = st.columns(3)
+        # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: grote kop met de namen per rotatie.
+        per_rot = {}
+        for idx, a in enumerate(best["assignment"]):
+            p1_, p2_ = a["our_pair"]
+            per_rot.setdefault(idx // 2 + 1, []).append(
+                f"{name_lookup_global.get(p1_, p1_)} / {name_lookup_global.get(p2_, p2_)}"
+            )
+        _sep = " \u00b7 "
+        st.markdown("#### " + "  \u00a0|\u00a0  ".join(
+            f"R{r}: {_sep.join(v)}" for r, v in sorted(per_rot.items())
+        ) + f"  \u00a0 `{badge}`")
+        col_p2, col_p1, col_p0, col_ge1 = st.columns(4)
         with col_p2:
-            st.metric("Kans 2p (winst)", f"{pp_metrics.get('p2', 0.0) * 100:.0f}%")
+            st.metric("Winst (2p)", f"{pp_metrics.get('p2', 0.0) * 100:.0f}%")
         with col_p1:
-            st.metric("Kans 1p (gelijk)", f"{pp_metrics.get('p1', 0.0) * 100:.0f}%")
+            st.metric("Gelijk (1p)", f"{pp_metrics.get('p1', 0.0) * 100:.0f}%")
         with col_p0:
-            st.metric("Kans 0p (verlies)", f"{pp_metrics.get('p0', 0.0) * 100:.0f}%")
+            st.metric("Verlies (0p)", f"{pp_metrics.get('p0', 0.0) * 100:.0f}%")
+        with col_ge1:
+            st.metric("Minstens 1 punt", f"{(pp_metrics.get('p2', 0.0) + pp_metrics.get('p1', 0.0)) * 100:.0f}%")
         # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: ALTIJD zichtbaar,
         # VOOR de expander - zie moduledocstring voor waarom dit niet
         # verstopt mag zitten achter een klik.
         n_missing = pp_metrics.get("n_missing_ratings", 0)
         _render_group_dilution_diagnosis(g, best, n_missing)
-        header = f"{badge}  -  {' \u00b7 '.join(korte_delen)}"
-        with st.expander(header, expanded=False):
+        with st.expander("Details", expanded=False):
             st.markdown("**Onze opstelling in deze groep:**")
             st.markdown("\n".join(lange_regels))
             gem = g.get("mean_ebw")
@@ -992,6 +1027,50 @@ def _render_predicted_opponent_lineups(unique_opponent_lineups: dict, weights: d
             uniek = list(dict.fromkeys(redenen))[:3]
             if uniek:
                 st.caption(" · ".join(uniek))
+def _expected_matches_per_player(bundle: dict, chosen_ids: list, needed: int, max_per: int) -> dict:
+    """PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: verwacht aantal matchen per tegenstander-
+    speler. Basis = gemiddeld aantal matchen per ontmoeting (model-stats),
+    herschaald naar `needed` (largest remainder) en begrensd op `max_per`.
+    Zonder historiek: None (de aanroeper valt terug op gelijk verdelen)."""
+    if olm is None or not chosen_ids:
+        return None
+    try:
+        stats = olm.build_opponent_stats(bundle)
+    except Exception:  # noqa: BLE001
+        return None
+    n_fix = stats.get("n_fixtures", 0)
+    if n_fix <= 0:
+        return None
+    raw = {}
+    for u in chosen_ids:
+        gem = stats["slot_total"].get(u, 0) / n_fix
+        raw[u] = gem if gem > 0 else 0.25  # nooit gezien: kleine kans
+    totaal = sum(raw.values()) or 1.0
+    doel = {u: min(max_per, v * needed / totaal) for u, v in raw.items()}
+    out = {u: int(v) for u, v in doel.items()}
+    rest = needed - sum(out.values())
+    volgorde = sorted(doel, key=lambda u: doel[u] - int(doel[u]), reverse=True)
+    i = 0
+    while rest > 0 and i < 10 * len(volgorde):
+        u = volgorde[i % len(volgorde)]
+        if out[u] < max_per:
+            out[u] += 1
+            rest -= 1
+        i += 1
+    return out
+
+
+def _filter_lineups_to_roster(unique_opponent_lineups: dict, chosen_ids: set, chosen_names: set) -> dict:
+    """PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: enkel opstellingen waarvan ELKE speler (op
+    id of naam) in de gekozen tegenstander-selectie zit."""
+    def _ok(p):
+        return str(p.get("user_id")) in chosen_ids or " ".join(str(p.get("name") or "").lower().split()) in chosen_names
+    return {
+        k: v for k, v in unique_opponent_lineups.items()
+        if all(_ok(p) for b in v.get("boards") or [] for p in (b.get("opponent_pair") or []))
+    }
+
+
 def _render_all_valid_matchups(
     bundle, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
@@ -1049,11 +1128,16 @@ def _render_all_valid_matchups(
                     "'onbekende sterkte' bij het genereren van theoretische opstellingen."
                 )
             opponent_padelstat_ratings = _opponent_padelstat_ratings(bundle)
-            default_opp_max = _default_opponent_max_per_player(chosen_opp_ids, needed)
+            # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: voorstel op basis van het model, anders gelijk verdeeld.
+            max_per_opp = max(1, int(total_boards) // 2)
+            default_opp_max = (
+                _expected_matches_per_player(bundle, chosen_opp_ids, needed, max_per_opp)
+                or _default_opponent_max_per_player(chosen_opp_ids, needed)
+            )
             roster_sig_key = f"opp_roster_sig_{opp['ploeg_id']}"
             roster_signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
             if st.session_state.get(roster_sig_key) != roster_signature:
-                prefix = f"opp_max_{opp['ploeg_id']}_"
+                prefix = f"opp_max_v2_{opp['ploeg_id']}_"
                 for stale_key in [k for k in list(st.session_state) if str(k).startswith(prefix)]:
                     st.session_state.pop(stale_key, None)
                 st.session_state[roster_sig_key] = roster_signature
@@ -1061,17 +1145,26 @@ def _render_all_valid_matchups(
                 f"Max. aantal wedstrijden per tegenstander-speler (standaard gelijk verdeeld over {needed} "
                 "benodigde plaatsen - een speler mag, net als bij ons, meerdere matchen spelen met "
                 "verschillende partners, maar nooit 2 GELIJKTIJDIGE matchen binnen dezelfde rotatie). "
-                "Dit herberekent automatisch zodra je de selectie hierboven of het aantal wedstrijden wijzigt:"
+                "Het voorstel is het VERWACHTE aantal matchen per speler (gemiddelde uit hun eerdere ontmoetingen, "
+                "herschaald naar het totaal) en wordt herberekend zodra je de selectie hierboven wijzigt:"
             )
             opp_cols = st.columns(min(len(chosen_opp_ids), 6) or 1)
             opponent_max_per_player = {}
             for i, pid in enumerate(chosen_opp_ids):
                 with opp_cols[i % len(opp_cols)]:
+                    naam = next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid)
+                    rk = opponent_official_ranks.get(pid)
+                    ps = opponent_padelstat_ratings.get(pid)
+                    info = " · ".join(x for x in [
+                        f"P{int(rk)}" if rk is not None else "P?",
+                        f"ps {int(ps)}" if ps is not None else "",
+                    ] if x)
+                    # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: label met klassement/padelstat.
                     opponent_max_per_player[pid] = st.number_input(
-                        next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid),
-                        min_value=0, max_value=int(total_boards),
-                        value=default_opp_max.get(pid, 0), step=1,
-                        key=f"opp_max_{opp['ploeg_id']}_{pid}",
+                        f"{naam} ({info})",
+                        min_value=0, max_value=max_per_opp,
+                        value=min(default_opp_max.get(pid, 0), max_per_opp), step=1,
+                        key=f"opp_max_v2_{opp['ploeg_id']}_{pid}",
                     )
             opp_total_slots = sum(opponent_max_per_player.values())
             if opp_total_slots != needed:
@@ -1098,6 +1191,18 @@ def _render_all_valid_matchups(
                 if meta["truncated"]:
                     st.warning(f"Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
+    # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: niet-geselecteerde spelers -> opstelling weg.
+    gekozen_namen = st.session_state.get(f"theoretical_opp_players_{opp['ploeg_id']}")
+    if unique_players and gekozen_namen is not None:
+        gekozen_ids = {str(p.get("user_id")) for p in unique_players if p.get("name", "?") in set(gekozen_namen)}
+        gekozen_norm = {" ".join(str(n).lower().split()) for n in gekozen_namen}
+        n_voor = len(unique_opponent_lineups)
+        unique_opponent_lineups = _filter_lineups_to_roster(unique_opponent_lineups, gekozen_ids, gekozen_norm)
+        if len(unique_opponent_lineups) < n_voor:
+            st.caption(
+                f"{n_voor - len(unique_opponent_lineups)} opstelling(en) weggelaten omdat er een niet-geselecteerde "
+                "tegenstander-speler in staat (ook eerder effectief gespeelde opstellingen)."
+            )
     if not unique_opponent_lineups:
         st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
         return []
@@ -1112,6 +1217,7 @@ def _render_all_valid_matchups(
                 unique_opponent_lineups, model_weights, available_ids, max_per_player,
                 int(total_boards), synergy_fn, player_ratings, official_ranks_strict,
                 opponent_ratings, tournament_rules_dict, name_lookup_global, str(opp["ploeg_id"]),
+                model_stats=model_stats,
             )
         except Exception as exc:  # noqa: BLE001 - nooit de rest van de pagina breken
             st.warning(f"Scenario-analyse mislukt: {type(exc).__name__}: {exc}")

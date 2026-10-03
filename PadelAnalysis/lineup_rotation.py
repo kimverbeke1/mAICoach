@@ -483,6 +483,43 @@ die getallen al berekenen als rotatie 2 nog niet gecheckt is?")
    een volgende stap.
 5. Betrouwbaarheidslabel (geen/laag/matig/goed) op basis van het aantal
    eerdere ontmoetingen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03 (op verzoek van Kim: "Twee rotaties samen
+simuleren: akkoord, zo moet het" + "bij de rotatieplanner kan je dan een
+scenario kiezen maar dat lijkt dan ergens los te staan van de andere
+scenario's [...] effectief gewoon een scenario kunnen kiezen maar de
+mogelijkheid hebben om vanuit dat scenario dan toch wijzigingen te doen door
+manueel speler per speler aan te passen. Niet per koppel aanpassen")
+--------------------------------------------------------------------------
+1. ADAPTIEVE 2-ROTATIE-SIMULATIE (_two_rotation_plan): enkel bij het
+   najaarsformaat (2 rotaties van 2 matchen) en in rotatie 1. Voor elke
+   eigen rotatie-1-opstelling x elk waarschijnlijk tegenstander-scenario
+   voor rotatie 1 wordt de VOLLEDIGE ontmoeting doorgerekend:
+     - rotatie 2 kiezen WIJ pas na rotatie 1, als we de stand (2-0 / 1-1 /
+       0-2) en hun rotatie-1-opstelling kennen: per stand wordt de beste
+       eigen rotatie 2 gezocht, binnen de regels (koppels die al speelden
+       vallen weg, speelbudget, puntengrens, art. 6.6);
+     - hun rotatie 2 wordt voorspeld met hetzelfde statistisch model,
+       zonder hun koppels uit rotatie 1;
+     - winkansen hangen enkel af van (ons koppel, hun koppel) en worden 1x
+       berekend en daarna hergebruikt.
+   Resultaat: 3 PLANKAARTEN ("Meeste verwachte punten", "Grootste kans op
+   winst", "Minstens 1 punt") met de rotatie-1-opstelling (label gespreid /
+   opofferen), winst/gelijk/verlies voor de HELE ontmoeting, en het plan
+   voor rotatie 2 per stand. Ze vervangen in rotatie 1 de kaarten per
+   rotatie (die zouden de plankaarten tegenspreken). In de laatste rotatie
+   blijft de exacte berekening zoals voorheen.
+   Zodra een tegenstander-opstelling gekozen is, rekenen de plankaarten
+   tegen precies die opstelling. "Ons beste antwoord" bij elk scenario is
+   in deze modus ook een volledig plan (rotatie 1 + rotatie 2 per stand).
+2. TEGENSTANDER PER SPELER: de 2 koppel-dropdowns zijn vervangen door 4
+   speler-dropdowns (Match 1 speler 1/2, Match 2 speler 1/2). Een gekozen
+   speler verdwijnt uit de andere dropdowns, en koppels die in deze
+   ontmoeting al speelden worden niet aangeboden. "Gebruik dit scenario"
+   vult de 4 dropdowns in - daarna kan je speler per speler aanpassen.
+3. "Andere waarschijnlijke opstellingen" is inklapbaar, met in de titel het
+   aantal en hun samengetelde kans. Het "Robuust voorstel" valt weg in de
+   plan-modus (de plankaarten nemen die rol over).
 """
 import itertools
 from collections import Counter
@@ -2034,6 +2071,7 @@ def _compute_opponent_scenario_analysis(
     base = {
         "stats": stats, "scenarios": shown, "n_total": pred["n_total"],
         "coverage": cum, "is_final": is_final, "robust": None,
+        "opp_ranks": opp_ranks, "opp_ps": opp_ps,  # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03
     }
     if not shown or not own_options:
         return base
@@ -2087,18 +2125,20 @@ def _answer_txt(best: dict, name_lookup_global: dict) -> str:
         regels.append(f"M{m_idx} {' / '.join(name_lookup_global.get(u, u) for u in sorted(pair))} ({wp_txt})")
     return " · ".join(regels)
 def _render_opponent_scenario_cards(
-    analysis: dict, name_lookup_global: dict, paar_label_by_uids: dict,
-    key_i0: str, key_i1: str, next_rotation_num: int, ploeg_id,
+    analysis: dict, name_lookup_global: dict, fill_fn, next_rotation_num: int, ploeg_id,
+    plan: dict = None,
 ) -> None:
     """PADEL_ANALYSIS_SCENARIO_LIST_2026-10-03: EEN lijst tegenstander-
-    scenario's (top 3 als kaarten, de rest als compacte lijst), met de
-    effectief gespeelde opstellingen gemarkeerd. Vervangt de aparte
-    "Zoals op ..."-snelkeuzes, die niet overeenkwamen met de kaarten."""
+    scenario's (top 3 als kaarten, de rest inklapbaar), met de effectief
+    gespeelde opstellingen gemarkeerd.
+    PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: `fill_fn(scen)` vult de 4 speler-dropdowns
+    in (geeft False als een speler niet in de huidige selectie zit). Met
+    `plan` (2-rotatie-modus) is "ons beste antwoord" een volledig plan."""
     stats = analysis["stats"]
     names = stats["names"]
     n_fix = stats.get("n_fixtures", 0)
     niveau, uitleg = _model_reliability(n_fix)
-    st.markdown("**Verwachte tegenstander-opstellingen**")
+    st.markdown("**Verwachte tegenstander-opstellingen (deze rotatie)**")
     if n_fix == 0:
         st.info(
             "Nog geen eerdere ontmoetingen van deze tegenstander gekend - elke opstelling is even "
@@ -2112,19 +2152,37 @@ def _render_opponent_scenario_cards(
     tekst = (
         f"Betrouwbaarheid: **{niveau}** ({uitleg}). Het model kijkt naar wie vaak meespeelt, wie vaak "
         f"samen speelt en wie meestal Match 1 of 2 speelt. {analysis['n_total']} mogelijke opstellingen "
-        f"gescoord - hieronder de waarschijnlijkste, samen {analysis['coverage'] * 100:.0f}% van de kans."
+        f"voor deze rotatie gescoord - hieronder de waarschijnlijkste, samen {analysis['coverage'] * 100:.0f}% van de kans."
     )
     (st.warning if niveau == "laag" else st.markdown)(tekst)
     is_final = analysis.get("is_final")
+    plan_by_s = (plan or {}).get("per_scenario") or {}
+
     def _knop(scen, key, label):
-        m1_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][0]))
-        m2_lbl = paar_label_by_uids.get(frozenset(scen["pairs"][1]))
-        if m1_lbl and m2_lbl and st.button(label, key=key, use_container_width=True):
-            st.session_state[key_i0] = m1_lbl
-            st.session_state[key_i1] = m2_lbl
-            st.rerun(scope="fragment")
+        if st.button(label, key=key, use_container_width=True):
+            if fill_fn(scen):
+                st.rerun(scope="fragment")
+            else:
+                st.warning("Een speler van dit scenario zit niet in de huidige tegenstander-selectie.")
+
     def _tegen(scen, m_idx):
         return " / ".join(names.get(u, u) for u in sorted(scen["pairs"][m_idx]))
+
+    def _antwoord(scen):
+        key = tuple(frozenset(p) for p in scen["pairs"])
+        pl = plan_by_s.get(key)
+        if pl:
+            st.markdown("Ons beste plan: **R1** " + _pairs_txt(pl["r1"], name_lookup_global))
+            st.caption(_r2_plan_txt(pl["r2"], name_lookup_global))
+            st.markdown(_impact_markdown(pl["enc"]))
+            return
+        best = scen.get("best")
+        if best:
+            st.markdown("Ons beste antwoord: " + _answer_txt(best, name_lookup_global))
+            st.markdown(_rotation_outcome_markdown(best["rot"]))
+            if is_final and best.get("enc"):
+                st.markdown(_impact_markdown(best["enc"]))
+
     kaarten = scenarios[:_SCENARIO_CARDS_N]
     cols = st.columns(len(kaarten))
     for idx, (col, scen) in enumerate(zip(cols, kaarten)):
@@ -2136,39 +2194,25 @@ def _render_opponent_scenario_cards(
                 st.write(f"Tegen M2: {_tegen(scen, 1)}")
                 if scen["reasons"]:
                     st.caption(" · ".join(scen["reasons"]))
-                best = scen.get("best")
-                if best:
-                    st.markdown("Ons beste antwoord: " + _answer_txt(best, name_lookup_global))
-                    st.markdown(_rotation_outcome_markdown(best["rot"]))
-                    if is_final and best.get("enc"):
-                        st.markdown(_impact_markdown(best["enc"]))
+                _antwoord(scen)
                 _knop(scen, f"opp_scen_{ploeg_id}_{next_rotation_num}_{idx}", "Gebruik dit scenario")
     rest = scenarios[_SCENARIO_CARDS_N:]
     if rest:
-        st.markdown("**Andere waarschijnlijke opstellingen**")
-        for idx, scen in enumerate(rest, start=_SCENARIO_CARDS_N):
-            c_kans, c_tegen, c_ons, c_uit, c_knop = st.columns([1, 4, 4, 3, 1.4])
-            with c_kans:
-                st.markdown(f"**{scen['prob'] * 100:.0f}%**")
-            with c_tegen:
-                gesp = f"  \n:blue[gespeeld op {', '.join(scen['played_on'])}]" if scen.get("played_on") else ""
-                st.markdown(f"M1 {_tegen(scen, 0)}  \nM2 {_tegen(scen, 1)}{gesp}")
-            best = scen.get("best")
-            with c_ons:
-                if best:
-                    st.markdown(_answer_txt(best, name_lookup_global).replace(" · ", "  \n"))
-            with c_uit:
-                if best:
-                    pp = best["enc"] if (is_final and best.get("enc")) else best["rot"]
-                    pref = "Ontmoeting" if (is_final and best.get("enc")) else "Rotatie"
-                    st.markdown(
-                        f"{pref}: :green[**{pp['p2'] * 100:.0f}%**] · :orange[**{pp['p1'] * 100:.0f}%**] · "
-                        f":red[**{pp['p0'] * 100:.0f}%**]"
-                    )
-            with c_knop:
-                _knop(scen, f"opp_scen_{ploeg_id}_{next_rotation_num}_{idx}", "Gebruik")
+        kans_rest = sum(sc["prob"] for sc in rest) * 100
+        with st.expander(f"Andere waarschijnlijke opstellingen ({len(rest)}, samen {kans_rest:.0f}% kans)", expanded=False):
+            for idx, scen in enumerate(rest, start=_SCENARIO_CARDS_N):
+                c_kans, c_tegen, c_ons, c_knop = st.columns([1, 4, 6, 1.4])
+                with c_kans:
+                    st.markdown(f"**{scen['prob'] * 100:.0f}%**")
+                with c_tegen:
+                    gesp = f"  \n:blue[gespeeld op {', '.join(scen['played_on'])}]" if scen.get("played_on") else ""
+                    st.markdown(f"M1 {_tegen(scen, 0)}  \nM2 {_tegen(scen, 1)}{gesp}")
+                with c_ons:
+                    _antwoord(scen)
+                with c_knop:
+                    _knop(scen, f"opp_scen_{ploeg_id}_{next_rotation_num}_{idx}", "Gebruik")
     robust = analysis.get("robust")
-    if robust:
+    if robust and not plan:
         st.success(
             f"**Robuust voorstel** (gewogen over deze {len(scenarios)} scenario's, samen "
             f"{analysis['coverage'] * 100:.0f}% kans): **{_pairs_txt(robust['pairs'], name_lookup_global)}** "
@@ -2178,6 +2222,240 @@ def _render_opponent_scenario_cards(
         if is_final and robust.get("enc"):
             st.markdown(_impact_markdown(robust["enc"]))
     st.divider()
+
+
+# -----------------------------------------------
+# PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03 - zie moduledocstring.
+# -----------------------------------------------
+_PLAN_R2_OPP_TOP = 8      # voorspelde tegenstander-opstellingen voor rotatie 2, per rotatie-1-scenario
+_SACRIFICE_WP = 0.35      # gemiddelde winkans onder deze grens = "opofferen"
+_PLAN_STRATEGIES = [
+    ("pts", "Meeste verwachte punten"),
+    ("win", "Grootste kans op winst"),
+    ("safe", "Minstens 1 punt"),
+]
+
+
+def _wins_dist(a, b) -> list:
+    a = 0.5 if a is None else a
+    b = 0.5 if b is None else b
+    return [(1 - a) * (1 - b), a * (1 - b) + b * (1 - a), a * b]
+
+
+def _final_outcome(k: int, jdist: list, half: float) -> list:
+    p2 = p1 = p0 = 0.0
+    for j, pj in enumerate(jdist):
+        t = k + j
+        if t > half:
+            p2 += pj
+        elif t == half:
+            p1 += pj
+        else:
+            p0 += pj
+    return [p2, p1, p0]
+
+
+def _plan_score(strategy: str, out: list) -> tuple:
+    p2, p1, _ = out
+    if strategy == "win":
+        return (p2, p1)
+    if strategy == "safe":
+        return (p2 + p1, p2)
+    return (2 * p2 + p1, p2)
+
+
+def _r2_plan_txt(r2_by_k: dict, name_lookup_global: dict) -> str:
+    stand = {2: "2-0", 1: "1-1", 0: "0-2"}
+    delen = []
+    for k in (2, 1, 0):
+        pairs = r2_by_k.get(k)
+        if pairs:
+            delen.append(f"na {stand[k]}: " + " · ".join(
+                "/".join(name_lookup_global.get(u, u) for u in sorted(p))
+                for p in pairs
+            ))
+    return "Rotatie 2 - " + " | ".join(delen) if delen else ""
+
+
+def _two_rotation_plan(
+    available_ids, synergy_fn, official_ranks_strict, player_ratings, opponent_ratings,
+    tournament_rules_dict, excluded_pairs, player_budget, analysis, unique_opp_players,
+    opp_excluded_pairs, s1_list, total_boards,
+) -> dict:
+    """PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03 - zie moduledocstring. `s1_list` = [(pairs, kans)]
+    voor de tegenstander in rotatie 1 (kansen worden hernormaliseerd)."""
+    stats = analysis["stats"]
+    opp_ranks = analysis.get("opp_ranks") or {}
+    opp_ps = analysis.get("opp_ps") or {}
+    half = int(total_boards) / 2.0
+    tot = sum(p for _, p in s1_list) or 1.0
+    s1_list = [(pairs, p / tot) for pairs, p in s1_list]
+
+    def _order(pairs):
+        return _rank_pairs_with_padelstat_tiebreak(pairs, opp_ranks, opp_ps)
+
+    wp_cache = {}
+
+    def wp(own_pair, opp_pair):
+        key = (frozenset(own_pair), frozenset(opp_pair))
+        if key not in wp_cache:
+            ours = [ll.effective_simulation_rating(u, player_ratings or {}, official_ranks_strict) for u in own_pair]
+            theirs = []
+            for u in opp_pair:
+                r = opp_ranks.get(u)
+                theirs.append(ll.effective_simulation_rating(u, opponent_ratings or {}, {u: float(r) if r is not None else None}))
+            ours = [v for v in ours if v is not None]
+            theirs = [v for v in theirs if v is not None]
+            wp_cache[key] = ll.estimate_win_probability(
+                sum(ours) / len(ours) if ours else None, sum(theirs) / len(theirs) if theirs else None,
+            )
+        return wp_cache[key]
+
+    own1, _, _ = _generate_rotation_candidates(
+        available_ids, synergy_fn, official_ranks_strict, excluded_pairs,
+        opponent_boards=None, player_ratings=player_ratings, opponent_ratings=opponent_ratings,
+        max_results=100_000, tournament_rules_dict=tournament_rules_dict,
+        rotation_number=1, player_budget=player_budget,
+    )
+    own1 = [c["ordered_pairs"] for c in own1]
+
+    r2_opp = []
+    for pairs, _ in s1_list:
+        pred = olm.predict_rotation_scenarios(
+            stats, unique_opp_players, _order, opp_ranks, rules=tournament_rules_dict,
+            excluded_pairs=set(opp_excluded_pairs or set()) | {frozenset(p) for p in pairs},
+            top_n=_PLAN_R2_OPP_TOP,
+        )["scenarios"]
+        t2 = sum(x["prob"] for x in pred) or 1.0
+        r2_opp.append([(x["pairs"], x["prob"] / t2) for x in pred])
+
+    own2_cache = {}
+
+    def own2(o1):
+        key = tuple(frozenset(p) for p in o1)
+        if key not in own2_cache:
+            budget2 = None
+            if player_budget is not None:
+                budget2 = dict(player_budget)
+                for p in o1:
+                    for u in p:
+                        budget2[str(u)] = budget2.get(str(u), 0) - 1
+            opts, _, _ = _generate_rotation_candidates(
+                available_ids, synergy_fn, official_ranks_strict,
+                set(excluded_pairs or set()) | {frozenset(p) for p in o1},
+                opponent_boards=None, player_ratings=player_ratings, opponent_ratings=opponent_ratings,
+                max_results=100_000, tournament_rules_dict=tournament_rules_dict,
+                rotation_number=2, player_budget=budget2,
+            )
+            own2_cache[key] = [c["ordered_pairs"] for c in opts]
+        return own2_cache[key]
+
+    results = []   # per o1: {"o1", "per_s": [...], "agg": {strat: [p2,p1,p0]}, "wp1": [m1, m2]}
+    for o1 in own1:
+        r2opts = own2(o1)
+        if not r2opts:
+            continue
+        per_s, agg = [], {k: [0.0, 0.0, 0.0] for k, _ in _PLAN_STRATEGIES}
+        wp1 = [0.0, 0.0]
+        for si, (s1, ps1) in enumerate(s1_list):
+            a, b = wp(o1[0], s1[0]), wp(o1[1], s1[1])
+            wp1[0] += ps1 * (0.5 if a is None else a)
+            wp1[1] += ps1 * (0.5 if b is None else b)
+            dk = _wins_dist(a, b)
+            jd = []
+            for o2 in r2opts:
+                mix = [0.0, 0.0, 0.0]
+                for s2, ps2 in r2_opp[si]:
+                    d = _wins_dist(wp(o2[0], s2[0]), wp(o2[1], s2[1]))
+                    for j in range(3):
+                        mix[j] += ps2 * d[j]
+                jd.append(mix)
+            res_s = {}
+            for strat, _ in _PLAN_STRATEGIES:
+                enc = [0.0, 0.0, 0.0]
+                r2 = {}
+                for k in range(3):
+                    best = None
+                    for idx, mix in enumerate(jd):
+                        out = _final_outcome(k, mix, half)
+                        sc = _plan_score(strat, out)
+                        if best is None or sc > best[0]:
+                            best = (sc, idx, out)
+                    for i in range(3):
+                        enc[i] += dk[k] * best[2][i]
+                    r2[k] = r2opts[best[1]]
+                res_s[strat] = {"enc": enc, "r2": r2}
+                for i in range(3):
+                    agg[strat][i] += ps1 * enc[i]
+            per_s.append(res_s)
+        results.append({"o1": o1, "per_s": per_s, "agg": agg, "wp1": wp1})
+    if not results:
+        return {}
+
+    def _as_pp(v):
+        return {"p2": v[0], "p1": v[1], "p0": v[2]}
+
+    cards = []
+    for strat, label in _PLAN_STRATEGIES:
+        best = max(results, key=lambda r: _plan_score(strat, r["agg"][strat]))
+        top_s = max(range(len(s1_list)), key=lambda i: s1_list[i][1])
+        cards.append({
+            "strategy": strat, "label": label, "r1": best["o1"], "enc": _as_pp(best["agg"][strat]),
+            "r2": best["per_s"][top_s][strat]["r2"], "wp1": best["wp1"],
+            "tag": "opofferen" if min(best["wp1"]) < _SACRIFICE_WP else "gespreid",
+        })
+    per_scenario = {}
+    for si, (s1, _) in enumerate(s1_list):
+        best = max(results, key=lambda r: _plan_score("pts", r["per_s"][si]["pts"]["enc"]))
+        per_scenario[tuple(frozenset(p) for p in s1)] = {
+            "r1": best["o1"], "r2": best["per_s"][si]["pts"]["r2"],
+            "enc": _as_pp(best["per_s"][si]["pts"]["enc"]),
+        }
+    return {"cards": cards, "per_scenario": per_scenario, "n_r1": len(results), "n_s1": len(s1_list)}
+
+
+def _render_plan_cards(plan: dict, name_lookup_global: dict, key_prefix: str, against_chosen: bool):
+    """PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: 3 plankaarten. Geeft de gekozen rotatie-1-
+    opstelling terug (of None)."""
+    cards = plan.get("cards") or []
+    if not cards:
+        return None
+    # dezelfde opstelling onder meerdere strategieen = 1 kaart
+    merged = []
+    for c in cards:
+        sleutel = tuple(frozenset(p) for p in c["r1"])
+        for m in merged:
+            if m["key"] == sleutel:
+                m["labels"].append(c["label"])
+                break
+        else:
+            merged.append({**c, "key": sleutel, "labels": [c["label"]]})
+    tegen = "tegen de gekozen tegenstander-opstelling" if against_chosen else (
+        f"gewogen over {plan.get('n_s1', 0)} waarschijnlijke tegenstander-opstellingen")
+    st.markdown("**Plan voor de volledige ontmoeting (rotatie 1 + 2)**")
+    st.caption(
+        f"Elke kaart is een volledig plan, {tegen}. Rotatie 2 is adaptief: die kies je pas na rotatie 1, "
+        "als je de stand kent - per stand staat de beste rotatie 2 (tegen hun waarschijnlijkste rotatie-1-"
+        "opstelling). Koppels die al speelden, het speelbudget en de puntengrens worden gerespecteerd. "
+        f"{plan.get('n_r1', 0)} eigen rotatie-1-opstellingen doorgerekend."
+    )
+    gekozen = None
+    cols = st.columns(len(merged))
+    for i, (col, c) in enumerate(zip(cols, merged)):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**{' + '.join(c['labels'])}**")
+                tag_kleur = "red" if c["tag"] == "opofferen" else "blue"
+                st.markdown(f"Rotatie 1 · :{tag_kleur}[{c['tag']}]")
+                for m_idx, (pair, w) in enumerate(zip(c["r1"], c["wp1"]), start=1):
+                    st.write(f"M{m_idx}: **{' / '.join(name_lookup_global.get(u, u) for u in sorted(pair))}** ({w * 100:.0f}%)")
+                st.markdown(_impact_markdown(c["enc"]))
+                st.caption(_r2_plan_txt(c["r2"], name_lookup_global))
+                if st.button("Kies rotatie 1 van dit plan", key=f"{key_prefix}_{i}", type="primary", use_container_width=True):
+                    gekozen = c["r1"]
+    return gekozen
+
+
 @st.fragment
 def _render_rotation_planner(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, opp,
@@ -2294,6 +2572,11 @@ def _render_rotation_planner(
         if len(gefilterd) >= 4:
             unique_opp_players = gefilterd
     rotation_opponent_boards = None
+    analysis = {}  # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03
+    plan_mode = (
+        olm is not None and total_boards is not None and int(total_boards) == 2 * MATCHES_PER_ROTATION
+        and next_rotation_num == 1
+    )
     if unique_opp_players:
         with st.expander(
             f"Wie stelt de tegenstander op in rotatie {next_rotation_num}?",
@@ -2337,6 +2620,25 @@ def _render_rotation_planner(
             geen_keuze = "- Kies een koppel -"
             paar_labels = [geen_keuze] + [_pair_label(p1, p2) for p1, p2 in alle_paren]
             paar_map = {_pair_label(p1, p2): (p1, p2) for p1, p2 in alle_paren}
+            # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: 4 speler-dropdowns i.p.v. 2 koppel-dropdowns.
+            opp_pick_prefix = f"rot_opp_pl_v1_{ploeg_id}_{next_rotation_num}"
+            opp_excluded_pairs_ui = set()
+            for rot_opp in locked_opponents:
+                for paar in rot_opp or []:
+                    _u = frozenset(str(x.get("user_id")) for x in paar if x.get("user_id"))
+                    if len(_u) == 2:
+                        opp_excluded_pairs_ui.add(_u)
+            _sel_uids = {str(p.get("user_id")) for p in unique_opp_players if p.get("user_id")}
+
+            def _fill_opp_from_scenario(scen) -> bool:
+                uids = [sorted(p) for p in scen["pairs"]]
+                if any(u not in _sel_uids for pair in uids for u in pair):
+                    return False
+                obj = {str(p.get("user_id")): p for p in unique_opp_players if p.get("user_id")}
+                for m in (0, 1):
+                    for i in (0, 1):
+                        st.session_state[f"{opp_pick_prefix}_{m}{i}"] = _opp_pick_label(obj[uids[m][i]])
+                return True
             key_i0 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_0"
             key_i1 = f"rot_opp_pick_pair_{ploeg_id}_{next_rotation_num}_1"
             # PADEL_ANALYSIS_ROTATION_PRESET_ORDER_BUG_2026-10-02: ID-gebaseerde
@@ -2401,66 +2703,78 @@ def _render_rotation_planner(
                 if analysis.get("error"):
                     st.caption(f"Scenario-voorspelling mislukt: {analysis['error']}")
                 elif analysis:
+                    # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: plan per scenario (2-rotatie-modus).
+                    scen_plan = None
+                    if plan_mode and analysis.get("scenarios"):
+                        plan_sig = (scen_sig, "all")
+                        pk = f"rot_plan_all_v1_{ploeg_id}"
+                        if st.session_state.get(pk + "_sig") != plan_sig:
+                            try:
+                                st.session_state[pk] = _two_rotation_plan(
+                                    available_ids, synergy_fn, official_ranks_strict, player_ratings,
+                                    opponent_ratings, tournament_rules_dict, excluded_pairs, player_budget,
+                                    analysis, unique_opp_players, opp_excluded_pairs,
+                                    [(sc["pairs"], sc["prob"]) for sc in analysis["scenarios"]], total_boards,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                st.session_state[pk] = {"error": f"{type(exc).__name__}: {exc}"}
+                            st.session_state[pk + "_sig"] = plan_sig
+                        scen_plan = st.session_state.get(pk) or None
+                        if scen_plan and scen_plan.get("error"):
+                            st.caption(f"Plan-berekening mislukt: {scen_plan['error']}")
+                            scen_plan = None
                     _render_opponent_scenario_cards(
-                        analysis, name_lookup_global, paar_label_by_uids,
-                        key_i0, key_i1, next_rotation_num, ploeg_id,
+                        analysis, name_lookup_global, _fill_opp_from_scenario,
+                        next_rotation_num, ploeg_id, plan=scen_plan,
                     )
             # PADEL_ANALYSIS_SCENARIO_LIST_2026-10-03: de aparte "Zoals op ..."-
             # snelkeuzes zijn opgegaan in de scenario-lijst hierboven (effectief
             # gespeelde opstellingen staan daar gemarkeerd). Zonder model
             # (olm niet beschikbaar) blijven de oude snelkeuzes de terugval.
-            if olm is None:
-                _render_opponent_quick_presets(
-                    bundle, next_rotation_num, paar_label_by_uids, key_i0, key_i1,
-                    paar_label_by_names=paar_label_by_names,
-                )
-            voorstel_idx = [0, 0]
-            if opponent_boards:
-                offset = (next_rotation_num - 1) * 2
-                for i in range(2):
-                    idx = offset + i
-                    if idx < len(opponent_boards):
-                        scenario_pair = (opponent_boards[idx].get("opponent_pair") or [])
-                        if len(scenario_pair) == 2:
-                            scenario_key = frozenset(str(x.get("user_id")) for x in scenario_pair)
-                            for j, (p1, p2) in enumerate(alle_paren, start=1):
-                                if frozenset({str(p1.get("user_id")), str(p2.get("user_id"))}) == scenario_key:
-                                    voorstel_idx[i] = j
-                                    break
-            def _opp_pair_uids(paar):
-                return {str(p.get("user_id")) for p in paar} if paar else set()
-            gekozen_paren = [None, None]
-            col_o1, col_o2 = st.columns(2)
-            cols = (col_o1, col_o2)
-            for i in range(2):
-                andere = 1 - i
-                uitgesloten_uids = _opp_pair_uids(gekozen_paren[andere])
-                if uitgesloten_uids:
-                    beschikbare_labels = [geen_keuze] + [
-                        _pair_label(p1, p2) for p1, p2 in alle_paren
-                        if not ({str(p1.get("user_id")), str(p2.get("user_id"))} & uitgesloten_uids)
-                    ]
+            # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: de oude "Zoals op ..."-terugval (zonder model)
+            # werkte op de verdwenen koppel-dropdowns en is uitgeschakeld.
+            # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: tegenstander PER SPELER kiezen - zie
+            # moduledocstring. Vervangt de 2 koppel-dropdowns.
+            uids_in_selectie = [str(p.get("user_id")) for p in unique_opp_players if p.get("user_id")]
+            speler_obj = {str(p.get("user_id")): p for p in unique_opp_players if p.get("user_id")}
+            label_van = {u: _opp_pick_label(speler_obj[u]) for u in uids_in_selectie}
+            appear = ((analysis or {}).get("stats") or {}).get("appear") or {}
+            volgorde = sorted(uids_in_selectie, key=lambda u: (-appear.get(u, 0), label_van[u]))
+            uid_van = {v: k for k, v in label_van.items()}
+            geen_speler = "- Kies speler -"
+            sleutels = {(m, i): f"{opp_pick_prefix}_{m}{i}" for m in (0, 1) for i in (0, 1)}
+            gekozen_uid = {}
+            for (m, i), key in sleutels.items():
+                v = st.session_state.get(key)
+                if v in uid_van:
+                    gekozen_uid[(m, i)] = uid_van[v]
+            kolommen = st.columns(4)
+            for slot_idx, ((m, i), key) in enumerate(sleutels.items()):
+                elders = {u for s_, u in gekozen_uid.items() if s_ != (m, i)}
+                partner = gekozen_uid.get((m, 1 - i))
+                opties = [geen_speler] + [
+                    label_van[u] for u in volgorde
+                    if u not in elders and not (partner and frozenset({u, partner}) in opp_excluded_pairs_ui)
+                ]
+                if st.session_state.get(key) not in opties:
+                    st.session_state[key] = geen_speler
+                with kolommen[slot_idx]:
+                    keuze = st.selectbox(f"Tegen M{m + 1} - speler {i + 1}", opties, key=key)
+                if keuze != geen_speler:
+                    gekozen_uid[(m, i)] = uid_van[keuze]
                 else:
-                    beschikbare_labels = paar_labels
-                key_i = key_i0 if i == 0 else key_i1
-                if key_i in st.session_state and st.session_state[key_i] not in beschikbare_labels:
-                    st.session_state[key_i] = geen_keuze
-                with cols[i]:
-                    keuze_lbl = st.selectbox(
-                        f"Tegenstander match {i + 1}", beschikbare_labels,
-                        index=min(voorstel_idx[i], len(beschikbare_labels) - 1),
-                        key=key_i,
-                    )
-                    if keuze_lbl != geen_keuze:
-                        gekozen_paren[i] = paar_map[keuze_lbl]
-            if gekozen_paren[0] and gekozen_paren[1]:
+                    gekozen_uid.pop((m, i), None)
+            if len(gekozen_uid) == 4:
+                gekozen_paren = [
+                    (speler_obj[gekozen_uid[(m, 0)]], speler_obj[gekozen_uid[(m, 1)]]) for m in (0, 1)
+                ]
                 rotation_opponent_boards = [
                     {"opponent_pair": list(gekozen_paren[0])},
                     {"opponent_pair": list(gekozen_paren[1])},
                 ]
-                st.caption("Winkansen hieronder zijn berekend tegen deze tegenstander-opstelling.")
-            elif gekozen_paren[0] or gekozen_paren[1]:
-                st.caption("Kies ook een koppel voor de andere match om de winkansen te herberekenen.")
+                st.caption("Winkansen en plannen hieronder zijn berekend tegen deze tegenstander-opstelling.")
+            elif gekozen_uid:
+                st.caption("Kies alle 4 tegenstander-spelers om de winkansen te herberekenen.")
     effective_opponent_boards = rotation_opponent_boards or opponent_boards
     # PADEL_ANALYSIS_ROTATION_CARDS_REQUIRE_OPPONENT_2026-10-02: bepaalt of
     # er voor DEZE rotatie al een tegenstander-opstelling gekend is - zie
@@ -2552,7 +2866,42 @@ def _render_rotation_planner(
     # betekenisloze 50/50-verdeling tonen (het is_neutral-label deed dat
     # eerder al zichtbaar, maar Kim geeft aan dat de kaarten dan beter
     # gewoon niet getoond worden i.p.v. getoond-maar-neutraal).
-    if not rot_boards_this_rotation:
+    # PADEL_ANALYSIS_TWO_ROTATION_PLAN_2026-10-03: in rotatie 1 van het najaarsformaat vervangen
+    # de 3 plankaarten (volledige ontmoeting) de kaarten per rotatie.
+    if plan_mode and analysis and not analysis.get("error") and analysis.get("scenarios"):
+        if rot_boards_this_rotation:
+            s1_list = [([frozenset(str(p.get("user_id")) for p in b.get("opponent_pair") or []) for b in rot_boards_this_rotation], 1.0)]
+            plan_tag = tuple(tuple(sorted(p)) for p in s1_list[0][0])
+        else:
+            s1_list = [(sc["pairs"], sc["prob"]) for sc in analysis["scenarios"]]
+            plan_tag = "all"
+        pk = f"rot_plan_cards_v1_{ploeg_id}"
+        sig = (rot_signature, plan_tag, len(analysis["scenarios"]))
+        if st.session_state.get(pk + "_sig") != sig:
+            try:
+                st.session_state[pk] = _two_rotation_plan(
+                    available_ids, synergy_fn, official_ranks_strict, player_ratings, opponent_ratings,
+                    tournament_rules_dict, excluded_pairs, player_budget, analysis, unique_opp_players,
+                    set(), s1_list, total_boards,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.session_state[pk] = {"error": f"{type(exc).__name__}: {exc}"}
+            st.session_state[pk + "_sig"] = sig
+        plan = st.session_state.get(pk) or {}
+        if plan.get("error"):
+            st.warning(f"Plan-berekening mislukt: {plan['error']}")
+        elif plan:
+            r1 = _render_plan_cards(plan, name_lookup_global, f"rot_plan_pick_{ploeg_id}", bool(rot_boards_this_rotation))
+            if r1 is not None:
+                wps = [None, None]
+                if rot_boards_this_rotation:
+                    comp = _compute_matchup(
+                        r1, rot_boards_this_rotation, synergy_fn, player_ratings or {},
+                        official_ranks_strict, opponent_ratings or {},
+                    )
+                    wps = [x.get("win_probability") for x in comp["assignment"]]
+                _bevestig_rotatie(r1, opp_pairs_voor_log, wps)
+    elif not rot_boards_this_rotation:
         st.info(
             "Kies hierboven eerst de tegenstander-opstelling voor deze rotatie (via een snelkeuze of "
             "de 2 dropdowns) om de 3 aanbevolen kaarten te zien - zonder gekende tegenstander is elke "

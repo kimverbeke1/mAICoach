@@ -6,47 +6,37 @@ scenario-matrix i.p.v. honderden matchups of 1 uitgevlakt gemiddelde.
 PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 (op verzoek van Kim: "gewoon
 overal hetzelfde gemiddelde zien is ook niet zinvol. Dus specifieke cases
 zijn wel interessant. Wat als ze spelen zoals in vorige matchen (meerdere),
-wat als ze hun beste spelers in match 1 van rotatie 1 zetten etc." + "We
-nemen bvb risico om hem toch te proberen te kloppen en 3-1 of 4-0 te
-winnen. of we gaan voor de veilige optie om maximum 2-2 te halen door
-slechtere spelers tegen die goeie te laten uitkomen")
+wat als ze hun beste spelers in match 1 van rotatie 1 zetten etc.")
 --------------------------------------------------------------------------
-WAAROM: de groepen in "Onze opstellingen" middelen elke eigen opstelling
-over (honderden) tegenstander-opstellingen. Daardoor komen alle eigen
-opstellingen op bijna dezelfde kans uit, en verdwijnt net wat interessant
-is: hoe goed een opstelling het doet tegen EEN SPECIFIEKE, plausibele
-tegenstander-opstelling.
+KOLOMMEN = benoemde tegenstander-opstellingen (volledige ontmoeting):
+  "Zoals op <datum>", "Meest waarschijnlijk (model)", "Statistisch #n",
+  "Sterkste duo op R1M1", "Sterkste duo in rotatie 2", "Zonder <beste speler>".
+RIJEN = eigen strategieen: Aanvallend / Veilig / Robuust / Counter op Sx.
+CELLEN = exacte kans tegen precies die ene opstelling.
 
-WAT DIT BESTAND DOET (volledige ontmoeting, alle rotaties samen):
-  1. KOLOMMEN = een handvol BENOEMDE tegenstander-scenario's:
-       - "Zoals op <datum>": elke opstelling die ze effectief speelden;
-       - "Meest waarschijnlijk": de top van het statistisch model
-         (opponent_lineup_model: deelname, vaste koppels, Match 1/2-voorkeur);
-       - "Sterkste duo op R1M1" en "Sterkste duo in rotatie 2": hun sterkste
-         koppel (gemiddelde speelsterkte) vooraan, resp. gespaard;
-       - "Zonder <sterkste speler>": als hun beste speler niet meespeelt.
-     Telkens de waarschijnlijkste volledige opstelling die aan die
-     voorwaarde voldoet. Identieke opstellingen worden samengevoegd.
-  2. RIJEN = eigen strategieen:
-       - Aanvallend: hoogste (gewogen) kans op 2 punten (3-1/4-0);
-       - Veilig: hoogste (gewogen) kans op minstens 1 punt (= desnoods
-         opofferen voor een 2-2);
-       - Robuust: hoogste kans op minstens 1 punt in het SLECHTSTE scenario;
-       - Counter op <scenario>: de beste opstelling tegen precies dat ene
-         scenario.
-     Dezelfde eigen opstelling onder meerdere labels = 1 rij.
-  3. CELLEN = exacte kans (geen gemiddelde over andere scenario's) op
-     winst / minstens 1 punt / verlies, te kiezen via een schakelaar.
-  4. DETAIL per (strategie, scenario): wie tegen wie, winkans per match,
-     en welke match een bewuste opoffermatch is.
-
-Gewicht per scenario (voor Aanvallend/Veilig en kolom "Gewogen") = de
-modelkans, hernormaliseerd over de getoonde scenario's. Zonder model:
-1 + aantal keer effectief gespeeld (lineup_rotation._opponent_lineup_weight).
-
-Rekent op dezelfde functies als de rest van de app (_compute_matchup,
-reglementaire eigen opstellingen via _enumerate_own_variant_combinations),
-dus de cijfers zijn consistent met de matchup-tabel en de rotatieplanner.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCENARIO_MATRIX_V2_2026-10-03 (feedback Kim: "kan je wat
+duiding geven over hoe je tot die kansen gekomen bent", "waarom is S4 0%",
+"als ik een speler wegklik [...] moet je die opstelling niet tonen", "ik zie
+maar 1 scenario van niet gespeelde matchen [...] via statistiek een paar
+combinaties maken", "minstens 1 punt")
+--------------------------------------------------------------------------
+1. DUIDING: de legende toont per scenario twee getallen:
+     - "Modelkans": de kans volgens het statistisch model op exact DEZE
+       volledige opstelling (alle rotaties samen), t.o.v. ALLE mogelijke
+       opstellingen. Is die kleiner dan 1%, dan staat er "<1%" (vroeger
+       afgerond naar 0%, wat leek alsof het onmogelijk was);
+     - "Gewicht": dezelfde modelkans, hernormaliseerd over de getoonde
+       scenario's - dat is het gewicht in de kolom "Gewogen".
+   Plus de redenen van het model ("X & Y speelden al 3x samen", ...).
+2. SELECTIE: scenario's met een speler die NIET in "Beschikbare
+   tegenstander-spelers" staat, worden weggelaten - ook effectief gespeelde
+   opstellingen (dat filter gebeurt in lineup_matchup_table.py, vóór het
+   model en deze matrix).
+3. STATISTISCHE SCENARIO'S: tot 3 waarschijnlijke, nog niet gespeelde
+   opstellingen ("Statistisch #1..3"), zodat er ook bij weinig gespeelde
+   ontmoetingen meer dan 1 niet-gespeeld scenario is.
+4. "Kans op minstens 1 punt" is nu de standaardweergave.
 """
 import streamlit as st
 
@@ -56,11 +46,17 @@ from lineup_rotation import (
     _compute_matchup, _opponent_lineup_weight, MATCHES_PER_ROTATION,
 )
 
-_MAX_SCENARIOS = 8
-_SACRIFICE_WP = 0.30  # winkans onder deze grens = "opoffermatch"
+try:
+    import opponent_lineup_model as olm
+except Exception:  # noqa: BLE001  pragma: no cover
+    olm = None
+
+_MAX_SCENARIOS = 9
+_N_STATISTICAL = 3
+_SACRIFICE_WP = 0.30
 _METRICS = {
-    "Kans op winst (2 punten)": "p2",
     "Kans op minstens 1 punt": "p_ge1",
+    "Kans op winst (2 punten)": "p2",
     "Kans op verlies (0 punten)": "p0",
 }
 
@@ -109,12 +105,32 @@ def _date_key(label: str):
     return d or (0, 0, 0)
 
 
+def _pct_txt(p: float) -> str:
+    if p is None:
+        return "-"
+    if p < 0.005:
+        return "<1%"
+    return f"{p * 100:.0f}%"
+
+
+def _reasons(model_stats, key) -> str:
+    if olm is None or not model_stats:
+        return ""
+    redenen = []
+    for r in range(0, len(key) - 1, MATCHES_PER_ROTATION):
+        try:
+            redenen += olm.explain_rotation(model_stats, key[r], key[r + 1], max_reasons=2)
+        except Exception:  # noqa: BLE001
+            pass
+    return " · ".join(list(dict.fromkeys(redenen))[:3])
+
+
 # ----------------------------------------------------- tegenstander-scenario's
 def build_opponent_scenarios(
     unique_opponent_lineups: dict, model_weights: dict, opponent_ratings: dict, total_boards: int,
 ) -> list:
     """Kiest de benoemde tegenstander-scenario's. Geeft een lijst van
-    {"key", "boards", "labels": [..], "weight"} terug (max _MAX_SCENARIOS)."""
+    {"key", "boards", "labels", "model_prob", "weight"} terug."""
     items = {
         k: v for k, v in unique_opponent_lineups.items()
         if len(v.get("boards") or []) == int(total_boards)
@@ -144,17 +160,20 @@ def build_opponent_scenarios(
         kandidaten = [k for k in items if pred(k)]
         return max(kandidaten, key=_w) if kandidaten else None
 
-    # 1. effectief gespeeld, meest recent eerst
     hist = [k for k, v in items.items() if v.get("is_historical")]
     hist.sort(key=lambda k: max(_date_key(l) for l in items[k]["historical_labels"]), reverse=True)
     for k in hist:
         _voeg_toe(k, "Zoals op " + ", ".join(items[k]["historical_labels"]))
 
-    # 2. meest waarschijnlijk volgens het model
     if model_weights:
         _voeg_toe(max(items, key=_w), "Meest waarschijnlijk (model)")
+        niet_gespeeld = sorted(
+            (k for k, v in items.items() if not v.get("is_historical") and k not in gekozen),
+            key=_w, reverse=True,
+        )
+        for i, k in enumerate(niet_gespeeld[:_N_STATISTICAL], start=1):
+            _voeg_toe(k, f"Statistisch #{i}")
 
-    # sterkste duo / speler over alle opstellingen heen
     paren, spelers = {}, {}
     for v in items.values():
         for b in v["boards"]:
@@ -185,6 +204,7 @@ def build_opponent_scenarios(
     out = list(gekozen.values())
     tot = sum(_w(s["key"]) for s in out) or 1.0
     for s in out:
+        s["model_prob"] = model_weights.get(s["key"], 0.0) if model_weights else None
         s["weight"] = _w(s["key"]) / tot
     return out
 
@@ -211,7 +231,6 @@ def build_own_options(available_ids, max_per_player, official_ranks_strict, play
 
 # ------------------------------------------------------------ berekening
 def compute_matrix(scenarios, own_options, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings):
-    """cells[o][s] = {"p2","p1","p0","p_ge1","assignment","ebw"}."""
     cells = []
     for pairs in own_options:
         rij = []
@@ -230,7 +249,6 @@ def compute_matrix(scenarios, own_options, synergy_fn, player_ratings, official_
 
 
 def pick_strategies(scenarios, cells) -> list:
-    """[(label, own_index)] - ontdubbeld op eigen opstelling (labels samengevoegd)."""
     if not cells or not scenarios:
         return []
     w = [s["weight"] for s in scenarios]
@@ -245,7 +263,7 @@ def pick_strategies(scenarios, cells) -> list:
         ("Robuust (beste slechtste geval)",
          max(idx, key=lambda o: (min(c["p_ge1"] for c in cells[o]), gew(o, "p2")))),
     ]
-    for s_idx, scen in enumerate(scenarios):
+    for s_idx in range(len(scenarios)):
         keuzes.append((
             f"Counter op S{s_idx + 1}",
             max(idx, key=lambda o: (cells[o][s_idx]["p2"], cells[o][s_idx]["p_ge1"])),
@@ -261,6 +279,7 @@ def render_scenario_matrix(
     unique_opponent_lineups: dict, model_weights: dict, available_ids: list, max_per_player: dict,
     total_boards: int, synergy_fn, player_ratings: dict, official_ranks_strict: dict,
     opponent_ratings: dict, tournament_rules_dict, name_lookup_global: dict, ploeg_key: str,
+    model_stats: dict = None,
 ) -> None:
     st.markdown(
         '<div class="section-header">Scenario-analyse: wat als de tegenstander ...?</div>',
@@ -270,7 +289,7 @@ def render_scenario_matrix(
         unique_opponent_lineups, model_weights, opponent_ratings, total_boards,
     )
     if not scenarios:
-        st.info("Nog geen tegenstander-opstellingen in dit formaat om scenario's mee te bouwen.")
+        st.info("Nog geen tegenstander-opstellingen in dit formaat (met de gekozen spelers) om scenario's mee te bouwen.")
         return
 
     sig = (
@@ -280,7 +299,7 @@ def render_scenario_matrix(
         tuple(sorted((opponent_ratings or {}).items())),
         tuple(sorted(tournament_rules_dict.items())) if tournament_rules_dict else None,
     )
-    cache_key, sig_key = f"scen_matrix_v1_{ploeg_key}", f"scen_matrix_sig_v1_{ploeg_key}"
+    cache_key, sig_key = f"scen_matrix_v2_{ploeg_key}", f"scen_matrix_sig_v2_{ploeg_key}"
     if st.session_state.get(sig_key) != sig:
         own_options = build_own_options(
             available_ids, max_per_player, official_ranks_strict, player_ratings, tournament_rules_dict,
@@ -296,25 +315,29 @@ def render_scenario_matrix(
         return
 
     st.caption(
-        "Elke kolom is EEN concrete opstelling van de tegenstander (geen gemiddelde). Elke rij is een "
-        "eigen opstelling, gekozen volgens een strategie. 'Aanvallend' zoekt de hoogste kans op 3-1/4-0; "
-        "'Veilig' de hoogste kans op minstens 2-2 (desnoods een zwakker koppel opofferen tegen hun "
-        "sterkste); 'Robuust' houdt het best stand in het slechtste scenario; 'Counter op Sx' is de beste "
-        "opstelling als je zeker weet dat ze scenario Sx spelen. 'Gewogen' weegt de scenario's met hun "
-        "kans hieronder."
+        "Elke kolom is EEN concrete opstelling van de tegenstander (geen gemiddelde), enkel met de "
+        "tegenstander-spelers die hierboven geselecteerd zijn. Elke rij is een eigen opstelling, gekozen "
+        "volgens een strategie: 'Aanvallend' = hoogste kans op 3-1/4-0; 'Veilig' = hoogste kans op minstens "
+        "2-2 (desnoods een zwakker koppel opofferen tegen hun sterkste); 'Robuust' = houdt het best stand in "
+        "het slechtste scenario; 'Counter op Sx' = beste opstelling als je zeker weet dat ze Sx spelen."
+    )
+    st.caption(
+        "Modelkans = kans volgens het statistisch model op exact deze volledige opstelling, t.o.v. ALLE "
+        "mogelijke opstellingen (het model combineert: wie speelt vaak mee, wie speelt vaak samen, wie speelt "
+        "meestal Match 1 of 2). Gewicht = diezelfde kans, herrekend over enkel de getoonde scenario's - dat is "
+        "het gewicht in de kolom 'Gewogen'. '<1%' betekent: mogelijk, maar het model verwacht het niet."
     )
 
     legenda = [{
         "Kolom": f"S{i + 1}", "Scenario": " / ".join(s["labels"]),
-        "Kans": round(s["weight"] * 100, 0), "Hun opstelling": _lineup_text_opp(s["boards"]),
+        "Modelkans": _pct_txt(s.get("model_prob")), "Gewicht": _pct_txt(s["weight"]),
+        "Waarom (model)": _reasons(model_stats, s["key"]),
+        "Hun opstelling": _lineup_text_opp(s["boards"]),
     } for i, s in enumerate(scenarios)]
-    st.dataframe(
-        legenda, use_container_width=True, hide_index=True,
-        column_config={"Kans": st.column_config.NumberColumn("Kans", format="%.0f%%", width="small")},
-    )
+    st.dataframe(legenda, use_container_width=True, hide_index=True)
 
     metric_label = st.radio(
-        "Toon in de matrix", list(_METRICS), horizontal=True, key=f"scen_matrix_metric_{ploeg_key}",
+        "Toon in de matrix", list(_METRICS), horizontal=True, key=f"scen_matrix_metric_v2_{ploeg_key}",
     )
     mk = _METRICS[metric_label]
     strategies = pick_strategies(scenarios, cells)
@@ -343,13 +366,13 @@ def render_scenario_matrix(
         with c1:
             r_sel = st.selectbox(
                 "Strategie", list(range(len(strategies))), format_func=lambda i: strategies[i][0],
-                key=f"scen_matrix_det_row_{ploeg_key}",
+                key=f"scen_matrix_det_row_v2_{ploeg_key}",
             )
         with c2:
             s_sel = st.selectbox(
                 "Scenario", list(range(len(scenarios))),
                 format_func=lambda i: f"S{i + 1} - {' / '.join(scenarios[i]['labels'])}",
-                key=f"scen_matrix_det_col_{ploeg_key}",
+                key=f"scen_matrix_det_col_v2_{ploeg_key}",
             )
         cel = cells[strategies[r_sel][1]][s_sel]
         st.markdown(
