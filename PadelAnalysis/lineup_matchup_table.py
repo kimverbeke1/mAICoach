@@ -1142,30 +1142,31 @@ def _render_all_valid_matchups(
                     st.session_state.pop(stale_key, None)
                 st.session_state[roster_sig_key] = roster_signature
             st.caption(
-                f"Max. aantal wedstrijden per tegenstander-speler (standaard gelijk verdeeld over {needed} "
+                f"Verwacht aantal wedstrijden per tegenstander-speler (verdeeld over {needed} "
                 "benodigde plaatsen - een speler mag, net als bij ons, meerdere matchen spelen met "
                 "verschillende partners, maar nooit 2 GELIJKTIJDIGE matchen binnen dezelfde rotatie). "
                 "Het voorstel is het VERWACHTE aantal matchen per speler (gemiddelde uit hun eerdere ontmoetingen, "
                 "herschaald naar het totaal) en wordt herberekend zodra je de selectie hierboven wijzigt:"
             )
-            opp_cols = st.columns(min(len(chosen_opp_ids), 6) or 1)
-            opponent_max_per_player = {}
-            for i, pid in enumerate(chosen_opp_ids):
-                with opp_cols[i % len(opp_cols)]:
-                    naam = next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid)
-                    rk = opponent_official_ranks.get(pid)
-                    ps = opponent_padelstat_ratings.get(pid)
-                    info = " · ".join(x for x in [
-                        f"P{int(rk)}" if rk is not None else "P?",
-                        f"ps {int(ps)}" if ps is not None else "",
-                    ] if x)
-                    # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: label met klassement/padelstat.
-                    opponent_max_per_player[pid] = st.number_input(
-                        f"{naam} ({info})",
-                        min_value=0, max_value=max_per_opp,
-                        value=min(default_opp_max.get(pid, 0), max_per_opp), step=1,
-                        key=f"opp_max_v2_{opp['ploeg_id']}_{pid}",
-                    )
+            # PADEL_ANALYSIS_OPP_MAX_DERIVED_2026-10-03 (Kim: "De maximum aantal wedstrijden
+            # bij de tegenstander is eigenlijk niet meer echt relevant omdat we met
+            # scenario's werken. Je kan die eventueel wel nog tonen"): geen invoervelden
+            # meer - het verwachte aantal matchen per speler wordt afgeleid (historiek,
+            # anders gelijk verdeeld) en enkel getoond.
+            opponent_max_per_player = {pid: int(default_opp_max.get(pid, 0)) for pid in chosen_opp_ids}
+            if sum(opponent_max_per_player.values()) != needed:
+                opponent_max_per_player = {
+                    pid: min(v, max_per_opp)
+                    for pid, v in _default_opponent_max_per_player(chosen_opp_ids, needed).items()
+                }
+            delen = []
+            for pid in sorted(chosen_opp_ids, key=lambda u: -opponent_max_per_player.get(u, 0)):
+                naam = next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid)
+                rk, ps = opponent_official_ranks.get(pid), opponent_padelstat_ratings.get(pid)
+                info = " · ".join(x for x in [f"P{int(rk)}" if rk is not None else "P?",
+                                              f"ps {int(ps)}" if ps is not None else ""] if x)
+                delen.append(f"{naam} ({info}): **{opponent_max_per_player.get(pid, 0)}**")
+            st.markdown("Verwacht aantal matchen per tegenstander-speler: " + " · ".join(delen))
             opp_total_slots = sum(opponent_max_per_player.values())
             if opp_total_slots != needed:
                 st.error(

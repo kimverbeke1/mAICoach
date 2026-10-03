@@ -37,6 +37,22 @@ combinaties maken", "minstens 1 punt")
    opstellingen ("Statistisch #1..3"), zodat er ook bij weinig gespeelde
    ontmoetingen meer dan 1 niet-gespeeld scenario is.
 4. "Kans op minstens 1 punt" is nu de standaardweergave.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03 (feedback Kim: "graag sorteren met
+grootste gewicht bovenaan en dat wordt dan S1", "'kolom' vervangen door
+'Scenario'", "de waarom kan beter opengeklikt worden", "hun opstelling mag
+leesbaarder", en de verwarring 52% (matrix) vs 24% (rotatieplanner))
+--------------------------------------------------------------------------
+1. Scenario's gesorteerd op gewicht (S1 = grootste gewicht).
+2. Legende: kolommen "Scenario", "Wat", "Gewicht", "Modelkans", "Rotatie 1",
+   "Rotatie 2" - hun opstelling per rotatie in een eigen kolom. Het "waarom"
+   staat in een inklapbaar blok.
+3. EEN BRON: de getoonde scenario's (met hun gewicht) worden bewaard in
+   st.session_state["scen_matrix_scen_v3_<ploeg>"]. Het planscherm in de
+   Rotatieplanner gebruikt EXACT deze lijst - S1 betekent dus overal
+   hetzelfde, met hetzelfde gewicht. Het verschil 52% vs 24% kwam doordat
+   de planner per ROTATIE een eigen kans berekende (andere noemer) - dat
+   valt weg.
 """
 import streamlit as st
 
@@ -206,7 +222,16 @@ def build_opponent_scenarios(
     for s in out:
         s["model_prob"] = model_weights.get(s["key"], 0.0) if model_weights else None
         s["weight"] = _w(s["key"]) / tot
+    # PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: grootste gewicht = S1.
+    out.sort(key=lambda s: s["weight"], reverse=True)
     return out
+def _rotation_text_opp(boards: list, rot_idx: int) -> str:
+    """PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: 'M1 A / B · M2 C / D' voor 1 rotatie."""
+    stuk = boards[rot_idx * MATCHES_PER_ROTATION:(rot_idx + 1) * MATCHES_PER_ROTATION]
+    return "  ·  ".join(
+        f"M{m + 1} " + " / ".join(p.get("name", "?") for p in (b.get("opponent_pair") or []))
+        for m, b in enumerate(stuk)
+    )
 
 
 # ------------------------------------------------------------ eigen opties
@@ -328,13 +353,27 @@ def render_scenario_matrix(
         "het gewicht in de kolom 'Gewogen'. '<1%' betekent: mogelijk, maar het model verwacht het niet."
     )
 
-    legenda = [{
-        "Kolom": f"S{i + 1}", "Scenario": " / ".join(s["labels"]),
-        "Modelkans": _pct_txt(s.get("model_prob")), "Gewicht": _pct_txt(s["weight"]),
-        "Waarom (model)": _reasons(model_stats, s["key"]),
-        "Hun opstelling": _lineup_text_opp(s["boards"]),
-    } for i, s in enumerate(scenarios)]
+    # PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: gedeelde bron voor het planscherm.
+    st.session_state[f"scen_matrix_scen_v3_{ploeg_key}"] = [
+        {"key": s["key"], "boards": s["boards"], "labels": list(s["labels"]),
+         "weight": s["weight"], "model_prob": s.get("model_prob")}
+        for s in scenarios
+    ]
+    n_rot = max(1, int(total_boards) // MATCHES_PER_ROTATION)
+    legenda = []
+    for i, s in enumerate(scenarios):
+        rij = {
+            "Scenario": f"S{i + 1}", "Wat": " / ".join(s["labels"]),
+            "Gewicht": _pct_txt(s["weight"]), "Modelkans": _pct_txt(s.get("model_prob")),
+        }
+        for r in range(n_rot):
+            rij[f"Rotatie {r + 1}"] = _rotation_text_opp(s["boards"], r)
+        legenda.append(rij)
     st.dataframe(legenda, use_container_width=True, hide_index=True)
+    with st.expander("Waarom deze kansen? (model)", expanded=False):
+        for i, s in enumerate(scenarios):
+            reden = _reasons(model_stats, s["key"])
+            st.markdown(f"**S{i + 1}** - {' / '.join(s['labels'])}: {reden or 'geen uitgesproken patroon'}")
 
     metric_label = st.radio(
         "Toon in de matrix", list(_METRICS), horizontal=True, key=f"scen_matrix_metric_v2_{ploeg_key}",

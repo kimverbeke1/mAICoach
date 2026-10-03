@@ -2577,6 +2577,21 @@ def _render_rotation_planner(
         olm is not None and total_boards is not None and int(total_boards) == 2 * MATCHES_PER_ROTATION
         and next_rotation_num == 1
     )
+    # PADEL_ANALYSIS_PLAN_SCREEN_2026-10-03: in het najaarsformaat vervangt het planscherm
+    # (beide rotaties samen, speler per speler, meteen eindresultaat) de kaarten per
+    # rotatie, de scenario-kaarten en "Zelf samenstellen" - zie lineup_plan_screen.py.
+    if plan_mode and unique_opp_players:
+        try:
+            from lineup_plan_screen import render_plan_screen
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Planscherm kon niet geladen worden ({type(exc).__name__}: {exc}) - oude planner wordt getoond.")
+        else:
+            render_plan_screen(
+                available_ids, synergy_fn, official_ranks_strict, name_lookup_global, ploeg_id,
+                player_ratings, opponent_ratings, tournament_rules_dict, max_per_player,
+                bundle, unique_opp_players,
+            )
+            return
     if unique_opp_players:
         with st.expander(
             f"Wie stelt de tegenstander op in rotatie {next_rotation_num}?",
@@ -2773,6 +2788,14 @@ def _render_rotation_planner(
                     {"opponent_pair": list(gekozen_paren[1])},
                 ]
                 st.caption("Winkansen en plannen hieronder zijn berekend tegen deze tegenstander-opstelling.")
+                # PADEL_ANALYSIS_PLAN_SCREEN_2026-10-03: puntengrens + art. 6.6 ook voor de tegenstander.
+                if tournament_rules_dict is not None:
+                    rk = [_cached_official_rank(u) for u in gekozen_uid.values()]
+                    if all(v is not None for v in rk):
+                        tot_r = sum(rk)
+                        lo_r, hi_r = tournament_rules_dict.get("punten_min"), tournament_rules_dict.get("punten_max")
+                        if (lo_r is not None and tot_r < lo_r) or (hi_r is not None and tot_r > hi_r):
+                            st.error(f"Tegenstander: {tot_r:.0f} punten - buiten de puntengrens ({lo_r}-{hi_r}).")
             elif gekozen_uid:
                 st.caption("Kies alle 4 tegenstander-spelers om de winkansen te herberekenen.")
     effective_opponent_boards = rotation_opponent_boards or opponent_boards
