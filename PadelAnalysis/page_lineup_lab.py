@@ -298,6 +298,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         before_date = (next_match or {}).get("date_text") or ""
     except Exception:
         before_date = ""
+    # PADEL_ANALYSIS_LINEUP_SNAPSHOT_2026-10-03: datum van de volgende ontmoeting, voor de
+    # momentopname die het planscherm bewaart (nabeschouwing met de waarden van toen).
+    st.session_state[f"next_match_date_{opp.get('ploeg_id')}"] = before_date
     with perf.step("_scout_team_all_fixtures (in fragment)"):
         full_opp_bundle = _scout_team_all_fixtures(
             fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,

@@ -70,11 +70,15 @@ except Exception:  # noqa: BLE001  pragma: no cover
 _MAX_SCENARIOS = 9
 _N_STATISTICAL = 3
 _SACRIFICE_WP = 0.30
+# PADEL_ANALYSIS_SCENARIO_MATRIX_V4_2026-10-03 (Kim: "eerst radio button met kans op winst
+# tonen en dan gelijk en dan verlies").
 _METRICS = {
-    "Kans op minstens 1 punt": "p_ge1",
     "Kans op winst (2 punten)": "p2",
+    "Kans op gelijk (1 punt)": "p1",
     "Kans op verlies (0 punten)": "p0",
+    "Kans op minstens 1 punt": "p_ge1",
 }
+_COUNTER_MIN_GAIN = 0.01  # counter enkel tonen als die op zijn scenario >= 1 procentpunt beter doet
 
 
 # ---------------------------------------------------------------- helpers
@@ -288,11 +292,16 @@ def pick_strategies(scenarios, cells) -> list:
         ("Robuust (beste slechtste geval)",
          max(idx, key=lambda o: (min(c["p_ge1"] for c in cells[o]), gew(o, "p2")))),
     ]
+    # PADEL_ANALYSIS_SCENARIO_MATRIX_V4_2026-10-03 (Kim: "Counter op S4 zou ik denken dat dan het
+    # beste resultaat geeft bij S4, maar alle strategieen zijn 24"): een counter wordt enkel
+    # getoond als die op ZIJN scenario echt beter doet (kans op winst, >= 1 procentpunt) dan
+    # de algemene strategieen hierboven - anders is er geen specifieke counter nodig.
+    algemeen = [o for _, o in keuzes]
     for s_idx in range(len(scenarios)):
-        keuzes.append((
-            f"Counter op S{s_idx + 1}",
-            max(idx, key=lambda o: (cells[o][s_idx]["p2"], cells[o][s_idx]["p_ge1"])),
-        ))
+        beste = max(idx, key=lambda o: (cells[o][s_idx]["p2"], cells[o][s_idx]["p_ge1"]))
+        referentie = max(cells[o][s_idx]["p2"] for o in algemeen)
+        if cells[beste][s_idx]["p2"] - referentie >= _COUNTER_MIN_GAIN:
+            keuzes.append((f"Counter op S{s_idx + 1}", beste))
     rijen: dict = {}
     for label, o in keuzes:
         rijen.setdefault(o, []).append(label)
@@ -393,12 +402,24 @@ def render_scenario_matrix(
         import pandas as _pd
         df = _pd.DataFrame(rows)
         cmap = "RdYlGn_r" if mk == "p0" else "RdYlGn"
-        styled = df.style.background_gradient(subset=num_cols, cmap=cmap, vmin=0, vmax=100).format(
-            {c: "{:.0f}%" for c in num_cols}
+        # PADEL_ANALYSIS_SCENARIO_MATRIX_V4_2026-10-03: beste cel per kolom in het vet + kader.
+        def _beste_cel(col):
+            doel = col.min() if mk == "p0" else col.max()
+            return ["font-weight: 800; border: 2px solid #222" if v == doel else "" for v in col]
+        styled = (
+            df.style.background_gradient(subset=num_cols, cmap=cmap, vmin=0, vmax=100)
+            .apply(_beste_cel, subset=num_cols)
+            .format({c: "{:.0f}%" for c in num_cols})
         )
         st.dataframe(styled, use_container_width=True, hide_index=True)
     except Exception:  # noqa: BLE001
         st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "Hoe lees je dit: 'Aanvallend' en 'Veilig' zijn gekozen op de kolom GEWOGEN (alle scenario's samen, "
+        "volgens hun gewicht). In een afzonderlijke kolom kan een andere rij dus hoger scoren - de beste cel per "
+        "kolom staat in het vet. Een 'Counter op Sx' verschijnt enkel als er tegen dat specifieke scenario een "
+        "opstelling bestaat die minstens 1 procentpunt meer kans op winst geeft dan de algemene strategieen."
+    )
 
     with st.expander("Detail: wie tegen wie in een strategie x scenario", expanded=False):
         c1, c2 = st.columns(2)
