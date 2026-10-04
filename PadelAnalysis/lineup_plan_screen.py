@@ -145,6 +145,48 @@ rotatie 1 zelf zetten en niet daarboven")
    ONDER de kop "Rotatie 1" zelf (vlak voor de 2 matchkaarten van rotatie
    1), in een lichte, omkaderde balk - dus niet langer "los" bovenaan,
    maar zichtbaar bij het onderdeel waar het betrekking op heeft.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04 (feedback Kim: "Als rotatie 1
+gespeeld is en je kiest dan de uitslag, dan kan het zijn dat de origineel
+gekozen opstelling niet meer de beste is [...] stel dat het 0-2 is (wij
+verliezen) dan moet onze strategie aangepast worden om alles op alles te
+zetten voor 2-2 wat dan uiteraard geen opofferingsmatch meer mag zijn [...]
+moet natuurlijk wel nog mogelijk zijn want als we maar 4 spelers hebben zijn
+er niet vele combinaties meer mogelijk" + "Onze ploeg staat nog steeds niet
+in mooi kader!")
+--------------------------------------------------------------------------
+1. HAALBAARHEID NA ROTATIE 1: met de echte tussenstand (0/1/2 gewonnen
+   matchen in rotatie 1) ligt het MAXIMAAL haalbare eindresultaat al vast:
+     - stand 0 (0-2): zelfs met 2 winsten in rotatie 2 kom je op 2 van de 4
+       - dus NOOIT winst (2 ploegpunten), hoogstens gelijk (1 punt) als we
+       BEIDE resterende matchen winnen. "Opofferen" is dan zinloos (er is
+       geen enkele match meer om bewust prijs te geven - beide MOETEN
+       gewonnen worden voor het enige nog haalbare resultaat).
+     - stand 2 (2-0): zelfs met 2 verliezen in rotatie 2 blijf je op 2 van
+       de 4 - dus NOOIT verlies, hoogstens gelijk. "Gespreid"/"Opofferen"
+       zijn dan evenmin zinvol: ELKE geldige rotatie 2 geeft hetzelfde
+       gegarandeerde minimum.
+     - stand 1 (1-1): het volledige bereik (winst/gelijk/verlies) blijft
+       open - hier blijven ALLE 4 presets (incl. Gespreid/Opofferen)
+       zinvolle, onderscheiden keuzes.
+   _forced_outcome_after_r1() berekent dit (louter telwerk op k en het
+   aantal resterende matchen, GEEN kansberekening nodig) en geeft een
+   duidelijke banner ("Winst is niet meer mogelijk - enige haalbare resultaat
+   is gelijkspel (2-2); beide resterende matchen moeten gewonnen worden.").
+   Bij stand 0 of 2 worden de rijen "Gespreid" en "Opofferen" NIET getoond
+   (ze zouden sowieso identiek zijn aan "Beste plan"/"Minstens 1 punt" via
+   _merge_duplicate_rows, of een nodeloos zwakkere, misleidende rij tonen) -
+   "Beste plan" optimaliseert in dat geval vanzelf voor het enige haalbare
+   doel (_score() reduceert immers naar "maximaliseer p1" als p2 structureel
+   0 is, en naar "p0 structureel 0" bij stand 2). Bij stand 1 verandert er
+   niets - alle 4 presets blijven zoals voorheen.
+   Met slechts 4 beschikbare spelers kan rotatie 2 maar op 1 (of een
+   handvol) manier(en) ingevuld worden - dat is in orde, _own_plans() geeft
+   dan gewoon een kortere (of lege) lijst terug; "Geen reglementair geldig
+   plan"-melding blijft ongewijzigd bestaan voor dat laatste geval.
+2. "ONZE PLOEG - VOORSTELLEN" IN EEN KADER: de volledige tabel (kop + alle
+   rijen) staat nu in st.container(border=True) - zelfde kadersstijl als de
+   matchkaarten eronder, i.p.v. kale kolommen zonder omlijning.
 """
 import datetime as _dt
 import traceback
@@ -209,6 +251,32 @@ def _points_with_offset(d2: list, k: int) -> dict:
         elif t == half:
             p1 += pj
     return {"p2": p2, "p1": p1, "p0": max(0.0, 1.0 - p2 - p1)}
+
+
+def _forced_outcome_after_r1(played_k):
+    """PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04 - zie moduledocstring.
+    Geeft (banner_tekst_of_None, toon_spread_en_sacrifice: bool) terug, op
+    basis van PUUR TELWERK (geen kans nodig): met `played_k` matchen al
+    gewonnen in rotatie 1 en MATCHES_PER_ROTATION matchen nog te spelen in
+    rotatie 2, wat is het bereik van het eindtotaal?"""
+    if played_k is None:
+        return None, True
+    half = (MATCHES_PER_ROTATION * _N_ROT) / 2.0
+    min_tot = played_k
+    max_tot = played_k + MATCHES_PER_ROTATION
+    if max_tot <= half:
+        return (
+            ":red[**Winst is niet meer mogelijk.**] Het enige nog haalbare resultaat is gelijkspel "
+            f"({int(half)}-{int(half)}) - dat vereist dat **beide** resterende matchen gewonnen worden. "
+            "'Gespreid' en 'Opofferen' zijn hier niet zinvol: er is geen match meer om bewust prijs te geven."
+        ), False
+    if min_tot >= half:
+        return (
+            ":green[**Verlies is niet meer mogelijk.**] We staan minstens op gelijkspel, ongeacht de uitslag "
+            "van rotatie 2. 'Gespreid' en 'Opofferen' geven hier hetzelfde gegarandeerde minimum als 'Beste "
+            "plan' - enkel 'Beste plan' optimaliseert nog voor de volle winst."
+        ), False
+    return None, True
 
 
 def _score(kind: str, pp: dict) -> tuple:
@@ -315,10 +383,17 @@ def _personal_avg_wp(plan: list, viewing_player_id: str, ctx: "_Ctx", opp_dist: 
     return (sum(probs) / len(probs)) if probs else None
 
 
-def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_id=None) -> dict:
+def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_id=None,
+                  include_spread_sacrifice=True) -> dict:
+    """PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: `include_spread_sacrifice`
+    laat "Gespreid"/"Opofferen" weg wanneer het eindresultaat na rotatie 1
+    al vastligt (zie _forced_outcome_after_r1 / moduledocstring) - die 2
+    presets zijn dan niet onderscheidend of zelfs misleidend."""
     out = {}
     scored = [(p, ctx.outcome(p, opp_dist, played_k)) for p in plans]
     for kind, _, _ in _PRESETS:
+        if kind in ("spread", "sacrifice") and not include_spread_sacrifice:
+            continue
         if kind == "spread":
             pool = [x for x in scored if weakest and all(weakest != pr for rot in x[0] for pr in rot)]
         elif kind == "sacrifice":
@@ -857,6 +932,12 @@ def _render_plan_screen(
         uitslag_opgeslagen = st.session_state.get(f"plan_r1_score_v2_{ploeg_id}", "2-0")
         played_k = {"2-0": 2, "1-1": 1, "0-2": 0}[uitslag_opgeslagen]
 
+    # PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: haalbaarheid na rotatie 1 -
+    # zie moduledocstring. Puur telwerk, geen kans nodig.
+    forced_banner, toon_spread_sacrifice = _forced_outcome_after_r1(played_k)
+    if forced_banner:
+        st.markdown(forced_banner)
+
     # ---- onze voorstellen
     fixed_r1 = None
     if played_k is not None:
@@ -880,57 +961,63 @@ def _render_plan_screen(
     # de actieve rij in de voorstellen-tabel te markeren.
     own_plan_now = _slots_to_plan(own_sel)
 
-    st.markdown("**Onze ploeg - voorstellen**" + (" (enkel rotatie 2)" if played_k is not None else ""))
-    if not opp_dist:
-        st.caption("Kies eerst een tegenstander-scenario of vul de tegenstander in.")
-    elif played_k is not None and fixed_r1 is None:
-        st.caption("Vul hieronder onze rotatie 1 in (wie speelde), dan wordt enkel rotatie 2 voorgesteld.")
-    elif not plans:
-        st.warning("Geen reglementair geldig plan met de huidige spelers, matchen per speler en puntengrens.")
-    else:
-        presets = _pick_presets(plans, opp_dist, ctx, weakest, played_k, viewing_player_id)
-        rijen = []
-        for kind, titel, uitleg in _PRESETS:
-            if kind in presets:
-                plan, pp = presets[kind]
-                rijen.append((kind, titel, uitleg, plan, pp))
-        if "self" in presets:
-            plan, pp = presets["self"]
-            naam = names_all.get(viewing_player_id, viewing_player_id)
-            rijen.append(("self", f"Beste voor {naam}", "hoogste persoonlijke winkans voor deze speler", plan, pp))
-        if not rijen:
-            st.warning("Geen enkel voorstel kon berekend worden met de huidige instellingen.")
+    # PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: de volledige voorstellen-
+    # sectie (kop + tabel) in 1 kader - zie moduledocstring.
+    with st.container(border=True):
+        st.markdown("**Onze ploeg - voorstellen**" + (" (enkel rotatie 2)" if played_k is not None else ""))
+        if not opp_dist:
+            st.caption("Kies eerst een tegenstander-scenario of vul de tegenstander in.")
+        elif played_k is not None and fixed_r1 is None:
+            st.caption("Vul hieronder onze rotatie 1 in (wie speelde), dan wordt enkel rotatie 2 voorgesteld.")
+        elif not plans:
+            st.warning("Geen reglementair geldig plan met de huidige spelers, matchen per speler en puntengrens.")
         else:
-            # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: identieke
-            # opstellingen samenvoegen tot 1 rij - zie moduledocstring.
-            rijen = _merge_duplicate_rows(rijen)
-            # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: enkel nog de vergelijkingstabel,
-            # NIET langer ingeklapt, met een "Kies"-knop per rij en een duidelijke
-            # markering van de rij die al actief is - zie moduledocstring.
-            kop = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
-            for c, h in zip(kop, ["Voorstel", "Plan", "Winst", "Gelijk", "Verlies", "Min. 1p", ""]):
-                c.markdown(f"**{h}**")
-            for kind, titel, uitleg, plan, pp in rijen:
-                is_active = own_plan_now is not None and own_plan_now == plan
-                rij = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
-                titel_txt = f"\u2713 **{titel}**" if is_active else f"**{titel}**"
-                rij[0].markdown(titel_txt)
-                rij[0].caption(uitleg)
-                rij[1].markdown(_plan_txt(plan, names_all))
-                rij[2].markdown(f":green[**{pp['p2'] * 100:.0f}%**]" if is_active else f"{pp['p2'] * 100:.0f}%")
-                rij[3].markdown(f"{pp['p1'] * 100:.0f}%")
-                rij[4].markdown(f"{pp['p0'] * 100:.0f}%")
-                rij[5].markdown(f"{(pp['p2'] + pp['p1']) * 100:.0f}%")
-                with rij[6]:
-                    if is_active:
-                        st.button("Actief \u2713", key=f"{own_prefix}_p_{kind}", disabled=True, use_container_width=True)
-                    elif st.button("Kies", key=f"{own_prefix}_p_{kind}", use_container_width=True):
-                        if _fill(own_prefix, plan, own_label, rotations=[1] if played_k is not None else range(_N_ROT)):
-                            st.rerun(scope="fragment")
-        if weakest:
-            st.caption("Onze 2 zwakste spelers (padelstat, anders klassement): "
-                       + " en ".join(names_all.get(u, u) for u in sorted(weakest))
-                       + (f". Tegenstander: {opp_bron}." if opp_bron else "."))
+            presets = _pick_presets(
+                plans, opp_dist, ctx, weakest, played_k, viewing_player_id,
+                include_spread_sacrifice=toon_spread_sacrifice,
+            )
+            rijen = []
+            for kind, titel, uitleg in _PRESETS:
+                if kind in presets:
+                    plan, pp = presets[kind]
+                    rijen.append((kind, titel, uitleg, plan, pp))
+            if "self" in presets:
+                plan, pp = presets["self"]
+                naam = names_all.get(viewing_player_id, viewing_player_id)
+                rijen.append(("self", f"Beste voor {naam}", "hoogste persoonlijke winkans voor deze speler", plan, pp))
+            if not rijen:
+                st.warning("Geen enkel voorstel kon berekend worden met de huidige instellingen.")
+            else:
+                # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: identieke
+                # opstellingen samenvoegen tot 1 rij - zie moduledocstring.
+                rijen = _merge_duplicate_rows(rijen)
+                # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: enkel nog de vergelijkingstabel,
+                # NIET langer ingeklapt, met een "Kies"-knop per rij en een duidelijke
+                # markering van de rij die al actief is - zie moduledocstring.
+                kop = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+                for c, h in zip(kop, ["Voorstel", "Plan", "Winst", "Gelijk", "Verlies", "Min. 1p", ""]):
+                    c.markdown(f"**{h}**")
+                for kind, titel, uitleg, plan, pp in rijen:
+                    is_active = own_plan_now is not None and own_plan_now == plan
+                    rij = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+                    titel_txt = f"\u2713 **{titel}**" if is_active else f"**{titel}**"
+                    rij[0].markdown(titel_txt)
+                    rij[0].caption(uitleg)
+                    rij[1].markdown(_plan_txt(plan, names_all))
+                    rij[2].markdown(f":green[**{pp['p2'] * 100:.0f}%**]" if is_active else f"{pp['p2'] * 100:.0f}%")
+                    rij[3].markdown(f"{pp['p1'] * 100:.0f}%")
+                    rij[4].markdown(f"{pp['p0'] * 100:.0f}%")
+                    rij[5].markdown(f"{(pp['p2'] + pp['p1']) * 100:.0f}%")
+                    with rij[6]:
+                        if is_active:
+                            st.button("Actief \u2713", key=f"{own_prefix}_p_{kind}", disabled=True, use_container_width=True)
+                        elif st.button("Kies", key=f"{own_prefix}_p_{kind}", use_container_width=True):
+                            if _fill(own_prefix, plan, own_label, rotations=[1] if played_k is not None else range(_N_ROT)):
+                                st.rerun(scope="fragment")
+            if weakest:
+                st.caption("Onze 2 zwakste spelers (padelstat, anders klassement): "
+                           + " en ".join(names_all.get(u, u) for u in sorted(weakest))
+                           + (f". Tegenstander: {opp_bron}." if opp_bron else "."))
     if st.button("Onze ploeg leegmaken", key=f"{own_prefix}_clear"):
         _clear(own_prefix)
         st.rerun(scope="fragment")
