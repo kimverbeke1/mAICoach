@@ -458,6 +458,10 @@ def predict_board(
         "our_sources": [s for _, s in our_vals], "their_sources": [s for _, s in their_vals],
         "actual_won": board.get("won"), "score": board.get("score"),
         "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
+        # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: id's meegeven, zodat
+        # _render_board_row() de individuele vorm van de tegenstander kan
+        # opzoeken (bv. Tim Van Rossom) - puur additief.
+        "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
         "match_date": date_text,
     }
 
@@ -560,10 +564,84 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
                 "their_avg": (sum(their_known) / len(their_known)) if their_known else None,
                 "actual_won": board.get("won"), "score": board.get("score"),
                 "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
+                # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: id's van de
+                # tegenstander-spelers meegeven (naast hun naam, die hierboven al
+                # stond) - nodig om compute_individual_form_index() hieronder een
+                # speler uniek te kunnen opbouwen (namen zijn geen betrouwbare
+                # sleutel bij gelijknamige spelers).
+                "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
                 "match_date": date_text,
                 "our_is_padelstat": our_is_padelstat, "their_is_padelstat": their_is_padelstat,
             })
     return raw
+
+
+# PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04 (op verzoek van Kim: "Tim
+# Van Rossom met een playing strength van 380 en dan ook nog ex-P300. Als je
+# zijn historische matchen bekijkt dan zie je 75% winst [...] misschien ook
+# wel goed om bij die spelers te kijken naar hun voorgaande matchen en tegen
+# wie en met hoeveel ze gewonnen hebben?")
+# --------------------------------------------------------------------------
+# ROOT CAUSE van Kim's observatie: de voorspelling gebruikt enkel padelstat/
+# officieel klassement - een vast, traag bijgewerkt getal. Een speler die
+# RECENT in topvorm speelt (of structureel beter presteert dan zijn officiele
+# klassement doet vermoeden) wordt daardoor systematisch onderschat, en GEEN
+# globale schaal- of bias-aanpassing kan dat voor 1 specifieke speler
+# corrigeren zonder alle andere voorspellingen te verstoren (zie Kim's eigen
+# observatie: scale=50 helpt deze ene match, maar verwoest de Brier-score
+# voor de rest, 0.310).
+# SCOPE VAN DEZE LEVERING (Kim, expliciet bevestigd: "voorstel voor nu is
+# ok"): ENKEL een DIAGNOSTISCHE weergave van iemands individuele winrate,
+# ter observatie - GEEN aanpassing van de voorspellingsformule zelf. Een
+# eventueel 3-signalen-model (rating + synergie + individuele vorm) is een
+# bewuste VOLGENDE stap, pas nadat dit diagnostisch beeld bevestigt dat het
+# de moeite waard is (overfitting-risico bij hoogstens 182-1667 matchen).
+# --------------------------------------------------------------------------
+# WAAROM DIT BEREKEND WORDT UIT `raw_rows` (i.p.v. een NIEUWE Firestore-
+# aanroep per speler): we hebben in `raw_rows` AL elk bord van ELKE bekende
+# ontmoeting (onze kant EN de tegenstander-kant, inclusief hun user_id's,
+# zie de uitbreiding hierboven). Een speler die als TEGENSTANDER optrad
+# (zoals Tim) heeft geen eigen "profiel" in onze database - we kennen hem
+# enkel via de matchrecords van ONZE spelers die tegen hem speelden. Door
+# simpelweg over ALLE borden te lopen en, voor elke speler die er ooit in
+# voorkwam (als eigen speler OF als tegenstander), een win/verlies-telling
+# bij te houden (tegenstanders krijgen het SPIEGELBEELD van actual_won - wij
+# winnen = zij verliezen), krijgen we een CONSISTENTE, voor iedereen
+# berekenbare vorm-index, zonder 1 extra Firestore-read.
+def compute_individual_form_index(raw_rows: list) -> Dict[str, dict]:
+    """Geeft {player_id: {"wins", "losses", "n", "winrate"}} terug, opgebouwd
+    uit ALLE `raw_rows` (zie gather_all_valid_match_data/gather_raw_match_
+    data) - zowel voor onze eigen spelers als voor tegenstanders. Een
+    tegenstander-speler krijgt het SPIEGELBEELD van `actual_won` (wij wonnen
+    -> zij verloren, en omgekeerd). Rijen zonder gekende `actual_won` worden
+    overgeslagen (tellen niet mee, in geen enkele richting)."""
+    tally: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # [wins, losses]
+    for r in raw_rows:
+        won = r.get("actual_won")
+        if won is None:
+            continue
+        for pid in r.get("pair") or ():
+            if pid is None:
+                continue
+            tally[str(pid)][0 if won else 1] += 1
+        for uid in (r.get("opp1_user_id"), r.get("opp2_user_id")):
+            if uid is None:
+                continue
+            tally[str(uid)][1 if won else 0] += 1
+    out: Dict[str, dict] = {}
+    for pid, (wins, losses) in tally.items():
+        n = wins + losses
+        out[pid] = {"wins": wins, "losses": losses, "n": n, "winrate": (wins / n) if n else None}
+    return out
+
+
+def _format_individual_form(form_index: Dict[str, dict], player_id, name: str) -> Optional[str]:
+    """Korte tekst voor 1 speler, bv. 'Tim (75% win, 9/12)' - None als er
+    geen enkele gekende match voor deze speler is."""
+    entry = form_index.get(str(player_id)) if player_id else None
+    if not entry or not entry.get("n"):
+        return None
+    return f"{name} ({entry['winrate'] * 100:.0f}% win, {entry['wins']}/{entry['n']})"
 
 
 # PADEL_ANALYSIS_RETRO_ALL_VALID_DATA_2026-10-04 - zie moduledocstring.
@@ -581,7 +659,10 @@ def gather_all_valid_match_data(profiles: list) -> dict:
     matchen gevonden" i.p.v. een foutpagina."""
     all_ids = sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")})
     if not all_ids:
-        return {"valid_rows": [], "n_total_boards": 0, "n_valid": 0, "player_ids": []}
+        return {
+            "valid_rows": [], "full_padelstat_rows": [], "n_total_boards": 0, "n_valid": 0,
+            "n_full_padelstat": 0, "n_fallback": 0, "form_index": {}, "player_ids": [],
+        }
     try:
         docs = ll.get_docs_for_players(all_ids)
     except Exception:  # noqa: BLE001
@@ -603,10 +684,16 @@ def gather_all_valid_match_data(profiles: list) -> dict:
     # opsplitsing tonen i.p.v. 1 vermengd totaal.
     n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
     n_fallback = len(valid_rows) - n_full_padelstat
+    full_padelstat_rows = [r for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat")]
+    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: EEN keer berekend over
+    # ALLE geldige rijen, herbruikt voor zowel de "Per match"-weergave als
+    # eventueel later model-gebruik - zie moduledocstring.
+    form_index = compute_individual_form_index(valid_rows)
     return {
-        "valid_rows": valid_rows, "n_total_boards": len(raw), "n_valid": len(valid_rows),
+        "valid_rows": valid_rows, "full_padelstat_rows": full_padelstat_rows,
+        "n_total_boards": len(raw), "n_valid": len(valid_rows),
         "n_full_padelstat": n_full_padelstat, "n_fallback": n_fallback,
-        "player_ids": all_ids,
+        "form_index": form_index, "player_ids": all_ids,
     }
 
 
@@ -811,16 +898,36 @@ def _outcome_color(predicted_wp, actual_won) -> str:
     return "green" if correct else "red"
 
 
-def _render_board_row(bp: dict, name_lookup: dict) -> None:
+def _source_is_padelstat(sources) -> bool:
+    """PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: zelfde onderscheid als
+    in gather_raw_match_data() (padelstat vs. officieel-klassement-terugval),
+    hier lokaal herhaald omdat _render_board_row() enkel `bp["our_sources"]`/
+    `bp["their_sources"]` (strings) ter beschikking heeft, geen nieuwe
+    Firestore-data nodig."""
+    return all(s is not None and "klassement" not in s and s != "onbekend" for s in (sources or []))
+
+
+def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str, dict]] = None) -> None:
+    """PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: `form_index` (zie
+    compute_individual_form_index()) is optioneel - ontbreekt ze, dan valt
+    deze functie gewoon terug op het oude gedrag (geen individuele vorm
+    getoond), nooit een crash."""
     p1, p2 = bp["pair"]
     ons = f"{name_lookup.get(p1, p1)} / {name_lookup.get(p2, p2)}"
     hen = f"{bp.get('opp1_name', '?')} / {bp.get('opp2_name', '?')}"
     kleur = _outcome_color(bp["win_probability"], bp["actual_won"])
     uitslag = "gewonnen" if bp["actual_won"] is True else ("verloren" if bp["actual_won"] is False else "onbekend")
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04: dezelfde padelstat/
+    # klassement-indicatie als de kalibratie-telling, nu ook hier (beantwoordt
+    # de eerdere vraag "moeten Per match en Beste alternatief ook deze
+    # indicatie krijgen?") - hergebruikt de al aanwezige bronlabels, geen
+    # nieuwe data nodig.
+    badge = "" if (_source_is_padelstat(bp.get("our_sources")) and _source_is_padelstat(bp.get("their_sources"))) \
+        else " \u00b7 :orange[deels klassement]"
     st.markdown(
         f"**{ons}** tegen **{hen}** ({bp.get('score') or '?'}) - "
         f"voorspeld :{kleur}[**{_pct(bp['win_probability'])}**] ({bp['risk_note']}), "
-        f"echt **{uitslag}**"
+        f"echt **{uitslag}**{badge}"
     )
     with st.expander("Op basis van welke waarden?", expanded=False):
         st.caption(
@@ -831,6 +938,22 @@ def _render_board_row(bp: dict, name_lookup: dict) -> None:
             (f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
              f"(gemiddeld {bp['their_avg']:.0f})") if bp.get("their_avg") is not None else "Tegenstander: onbekend"
         )
+        # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04 - zie moduledocstring:
+        # individuele winrate per speler, over ALLE gekende interclub-matchen
+        # (niet enkel deze ontmoeting) - laat zien of iemands padelstat-/
+        # klassementwaarde zijn werkelijke vorm goed weerspiegelt.
+        if form_index:
+            vorm_regels = []
+            for pid in (p1, p2):
+                txt = _format_individual_form(form_index, pid, name_lookup.get(pid, str(pid)))
+                if txt:
+                    vorm_regels.append(txt)
+            for uid, naam in ((bp.get("opp1_user_id"), bp.get("opp1_name")), (bp.get("opp2_user_id"), bp.get("opp2_name"))):
+                txt = _format_individual_form(form_index, uid, naam or "?")
+                if txt:
+                    vorm_regels.append(txt)
+            if vorm_regels:
+                st.caption("Individuele vorm (alle bekende interclub-matchen): " + " \u00b7 ".join(vorm_regels))
 
 
 def _apply_scale_callback(new_scale: float, new_bias: float = 0.0) -> None:
@@ -860,6 +983,24 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         if saved.get("scale") is not None:
             st.session_state["retro_scale"] = saved["scale"]
             st.session_state["retro_bias"] = saved.get("bias", 0.0)
+
+    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: gather_all_valid_match_
+    # data() wordt nu VOOR "Per match" aangeroepen (was voorheen pas bij de
+    # kalibratie-sectie onderaan) - haar "form_index" is nodig om iemands
+    # individuele vorm al bij elke match te tonen. Om dit niet trager te
+    # maken dan voorheen, wordt het resultaat nu ook gecached in
+    # st.session_state (dat bestond hiervoor niet - elke render deed dit
+    # werk opnieuw) op een signatuur van de profiel-id's; identiek patroon
+    # aan de bestaande raw_key-caching elders in de codebase.
+    all_ids_sig = tuple(sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")}))
+    all_data_key = "retro_all_valid_data"
+    if st.session_state.get(all_data_key + "_sig") != all_ids_sig:
+        with perf.step("retro: alle geldige matchdata verzamelen (gather_all_valid_match_data)"):
+            with st.spinner("Alle gekende matchen doorzoeken..."):
+                st.session_state[all_data_key] = gather_all_valid_match_data(profiles)
+        st.session_state[all_data_key + "_sig"] = all_ids_sig
+    all_data = st.session_state[all_data_key]
+    form_index = all_data.get("form_index") or {}
 
     # PADEL_ANALYSIS_RETRO_SIMPLIFY_2026-10-04: geen teamgenoten-keuze meer -
     # zie moduledocstring. Enkel de matchen van sel_player_id zelf.
@@ -917,7 +1058,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.success("Een eerdere momentopname van deze ontmoeting werd gevonden - de waarden van toen zijn exact.")
     st.markdown("#### Per match: voorspeld tegenover echt")
     for bp in pred["boards"]:
-        _render_board_row(bp, name_lookup)
+        _render_board_row(bp, name_lookup, form_index=form_index)
 
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
@@ -925,8 +1066,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     if n_known_boards < 2 or n_known_boards % 2 != 0:
         st.caption(
             f"We kennen {n_known_boards} van de borden van deze ontmoeting - te weinig (of een oneven "
-            "aantal, wat altijd op een ontbrekend bord wijst) voor een betrouwbaar eindresultaat. Voeg "
-            "hierboven bij 'Analyseer ook de matchen van' meer teamgenoten van die dag toe."
+            "aantal, wat altijd op een ontbrekend bord wijst) voor een betrouwbaar eindresultaat. Dit "
+            f"gebeurt als enkel {sel_naam}'s eigen bord(en) van die dag bekend zijn, niet die van "
+            "teamgenoten."
         )
     else:
         encounter_pp = _combine_boards_to_point_probs([bp["win_probability"] for bp in pred["boards"]])
@@ -956,7 +1098,8 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     if alt.get("reason") == "too_few_players":
         st.caption(
             f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige "
-            "4) - voeg hierboven bij 'Analyseer ook de matchen van' meer teamgenoten van die dag toe."
+            f"4) - we kennen hier enkel {sel_naam}'s eigen bord(en) van die dag, niet de rest van de "
+            "ploegopstelling."
         )
     elif alt.get("reason") == "no_valid_combinations":
         st.caption(
@@ -986,6 +1129,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     # PADEL_ANALYSIS_RETRO_ALL_VALID_DATA_2026-10-04: kalibratie over ALLE
     # geldige matchdata in de database - niet langer afhankelijk van de
     # spelerskeuze hierboven. Zie moduledocstring.
+    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: `all_data` is hierboven
+    # al EENMALIG berekend (en gecached) - hier enkel hergebruikt, geen 2e
+    # gather_all_valid_match_data()-aanroep meer nodig.
     st.divider()
     st.markdown("#### Kalibratie over alle gekende matchen (van iedereen)")
     st.caption(
@@ -993,10 +1139,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         "spelers ALS voor de tegenstander ALS de echte uitslag kennen - ongeacht wie je hierboven koos. Dat "
         "geeft het meest betrouwbare beeld van hoe goed de winkans-formule werkelijk voorspelt."
     )
-    with perf.step("retro: alle geldige matchdata verzamelen (gather_all_valid_match_data)"):
-        with st.spinner("Alle gekende matchen doorzoeken..."):
-            all_data = gather_all_valid_match_data(profiles)
-    raw_rows = all_data["valid_rows"]
     # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 - zie moduledocstring:
     # 3 aparte tellingen i.p.v. 1 vermengd getal, zodat zichtbaar is hoeveel
     # van de "bruikbare" matchen op ECHTE padelstat steunen en hoeveel op de
@@ -1022,7 +1164,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "volledig af - meestal omdat er voor minstens 1 speler helemaal geen rating gekend is, of de "
             "uitslag onbekend is."
         )
-    if not raw_rows:
+    all_rows = all_data["valid_rows"]
+    full_rows = all_data.get("full_padelstat_rows") or []
+    if not all_rows:
         st.info("Nog geen enkele match met zowel een gekende rating voor beide kanten als een gekende uitslag.")
         return
 
@@ -1039,12 +1183,57 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.caption(f"Bij 100 punten verschil: {_pct(ll.estimate_win_probability(0, -100, scale=scale))} winkans.")
     if bias:
         st.caption(f"Actieve bias-correctie: **{bias:+.0f}** (zie 'Model met bias' verderop).")
-    with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
-        scored = score_raw_at_scale(raw_rows, scale, bias=bias)
-        stats = calibration_stats(scored)
+
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_ONLY_TOGGLE_2026-10-04 (op verzoek van Kim:
+    # "ik vraag me af of het niet beter is om enkel de 182 padelstat matchen te
+    # gebruiken voor het model" + "zorg wel dat we eventueel later gemakkelijk
+    # een keuze kunnen maken voor enkel padelstat") - zie moduledocstring.
+    # Toont ALTIJD beide Brier-scores naast elkaar (zodat het verschil meteen
+    # meetbaar is, i.p.v. te moeten gokken), EN een schakelaar die bepaalt op
+    # welke subset de schuifregelaar/het-model-zoeken hieronder werken.
+    with perf.step("retro: kalibratie herberekenen (score_raw_at_scale, 2 subsets)"):
+        stats_all = calibration_stats(score_raw_at_scale(all_rows, scale, bias=bias))
+        stats_full = calibration_stats(score_raw_at_scale(full_rows, scale, bias=bias)) if full_rows else None
+    st.markdown("##### Vergelijking: alle matchen tegenover enkel-padelstat-matchen")
+    c_cmp1, c_cmp2 = st.columns(2)
+    with c_cmp1:
+        st.markdown(f"**Alle {len(all_rows)} bruikbare matchen**")
+        if stats_all:
+            st.metric("Brier-score", f"{stats_all['brier']:.3f}")
+            st.caption(f"Accuraatheid {stats_all['accuracy'] * 100:.0f}%")
+    with c_cmp2:
+        st.markdown(f"**Enkel de {len(full_rows)} volledige-padelstat-matchen**")
+        if stats_full:
+            st.metric("Brier-score", f"{stats_full['brier']:.3f}")
+            st.caption(f"Accuraatheid {stats_full['accuracy'] * 100:.0f}%")
+        else:
+            st.caption("Nog geen enkele match met padelstat voor alle 4 spelers.")
+    if stats_all and stats_full:
+        verschil = stats_all["brier"] - stats_full["brier"]
+        if abs(verschil) < 0.005:
+            st.caption("Het verschil tussen beide subsets is klein - de klassement-terugval lijkt het model hier niet sterk te vertekenen.")
+        elif verschil > 0:
+            st.caption(f"De enkel-padelstat-matchen scoren {verschil:.3f} beter (lagere Brier) - de klassement-terugval lijkt hier wel ruis toe te voegen.")
+        else:
+            st.caption(f"De enkel-padelstat-matchen scoren {-verschil:.3f} slechter - mogelijk door de kleinere steekproef ({len(full_rows)} matchen) eerder dan door de databron zelf.")
+
+    gebruik_enkel_padelstat = st.checkbox(
+        "Gebruik hieronder enkel de volledige-padelstat-matchen (voor de schuifregelaar en 'Beste model zoeken')",
+        value=st.session_state.get("retro_padelstat_only", False), key="retro_padelstat_only",
+        help="Staat dit UIT, dan werken de schuifregelaar en 'Beste model zoeken' op ALLE bruikbare matchen "
+             "(incl. klassement-terugval). AAN = enkel op de subset met padelstat voor alle 4 spelers - "
+             "kleiner maar mogelijk betrouwbaarder. Verandert niets aan de 2 vergelijkingscijfers hierboven, "
+             "die tonen altijd beide.",
+    )
+    raw_rows = full_rows if gebruik_enkel_padelstat else all_rows
+    if gebruik_enkel_padelstat and not full_rows:
+        st.warning("Geen enkele match met padelstat voor alle 4 spelers - val terug op alle matchen.")
+        raw_rows = all_rows
+    stats = stats_full if (gebruik_enkel_padelstat and stats_full) else stats_all
     if not stats:
         st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
+    st.markdown(f"##### Kansklassen-detail ({'enkel padelstat' if (gebruik_enkel_padelstat and stats_full) else 'alle matchen'})")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Brier-score", f"{stats['brier']:.3f}", help="Lager = beter. 0.25 = niet beter dan een muntstuk.")
