@@ -678,28 +678,55 @@ def compute_form_adjustment(raw_rows: list, scale: float, bias: float = 0.0) -> 
 # PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05: deze functie wordt NIET
 # meer automatisch aangeroepen bij elke render - zie moduledocstring. Enkel
 # nog via de "Bereken kalibratie"-knop in render_retrospective_tab().
-def gather_all_valid_match_data(profiles: list) -> dict:
+def gather_all_valid_match_data(profiles: list, debug_timings: Optional[list] = None) -> dict:
     """Bouwt de SCHAAL-ONAFHANKELIJKE ruwe matchdata over ALLE profielen in
     de database. `full_padelstat_rows` is de subset waarvoor de kalibratie
-    ONVOORWAARDELIJK gebruikt wordt."""
+    ONVOORWAARDELIJK gebruikt wordt.
+    --------------------------------------------------------------------
+    PADEL_ANALYSIS_RETRO_VISIBLE_TELEMETRY_2026-10-05 (op verzoek van Kim,
+    na meermaals herhaalde snelheidsklachten ondanks eerdere fixes: "lost
+    het op door voldoende debug info toe te voegen. ofwel echt gigantisch
+    veel data aan het bekijken ofwel ergens in een loop?")
+    --------------------------------------------------------------------
+    In plaats van NOG EEN KEER blind te "repareren" op basis van een
+    vermoeden, meet deze functie nu met WALL-CLOCK TIJD (time.perf_counter,
+    niet enkel het perf_timing-paneel dat soms over het hoofd gezien wordt)
+    elke deelstap EN telt expliciet hoeveel data er in-/uitgaat. Geeft dit
+    door via het optionele `debug_timings`-argument (een lijst die deze
+    functie VULT met {"label", "seconds", "count"}-dicts) - de aanroeper
+    (render_retrospective_tab()) toont deze ONMIDDELLIJK, zichtbaar en
+    rechtstreeks in de pagina (niet enkel in het aparte, inklapbare
+    debug-paneel onderaan) zodra de berekening klaar is. Dit beantwoordt
+    Kim's vraag "waar blijft het hangen" met HARDE CIJFERS i.p.v. een
+    5e vermoeden."""
+    import time as _time
+
+    def _mark(label, t0, count=None):
+        if debug_timings is not None:
+            debug_timings.append({"label": label, "seconds": _time.perf_counter() - t0, "count": count})
+
     all_ids = sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")})
     if not all_ids:
         return {
             "valid_rows": [], "full_padelstat_rows": [], "n_total_boards": 0, "n_valid": 0,
             "n_full_padelstat": 0, "n_fallback": 0, "form_index": {}, "player_ids": [],
         }
-    # PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05: apart meetpunt rond
-    # PRECIES deze ene aanroep (het VOLLEDIGE matchdocument van ELK profiel
-    # in de database) - dit was voorheen inbegrepen in de grotere "alle
-    # geldige matchdata verzamelen"-stap en dus niet apart zichtbaar. Dit
-    # is de meest verdachte, nog NIET expliciet bevestigde bottleneck.
+    t0 = _time.perf_counter()
     with perf.step(f"retro: get_docs_for_players (ALLE {len(all_ids)} profielen)"):
         try:
             docs = ll.get_docs_for_players(all_ids)
         except Exception:  # noqa: BLE001
             docs = {}
+    _mark(f"1. get_docs_for_players ({len(all_ids)} profielen opgevraagd)", t0, len(all_ids))
+
+    t0 = _time.perf_counter()
     index = build_retro_encounter_index(docs, allowed_player_ids=None)
+    n_encounters = len(index)
+    n_boards_seen = sum(len(v) for v in index.values())
+    _mark(f"2. encounter-index bouwen ({n_encounters} ontmoetingen, {n_boards_seen} matchrecords)", t0, n_boards_seen)
+
     relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
+    t0 = _time.perf_counter()
     current_official_ranks = {}
     with perf.step(f"retro: officieel klassement (kalibratie, {len(relevant_ids)} spelers)"):
         try:
@@ -708,15 +735,28 @@ def gather_all_valid_match_data(profiles: list) -> dict:
             current_official_ranks = _build_own_official_ranks_strict(list(relevant_ids)) or {}
         except Exception:  # noqa: BLE001
             pass
+    _mark(f"3. officieel klassement ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
+
+    t0 = _time.perf_counter()
     with perf.step(f"retro: padelstat-historiek (kalibratie, {len(relevant_ids)} spelers)"):
         ratings_cache = _load_padelstat_histories(relevant_ids)
+    _mark(f"4. padelstat-historiek ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
+
+    t0 = _time.perf_counter()
     with perf.step("retro: gather_raw_match_data (per-bord-voorspelling, kalibratie)"):
         raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
+    _mark(f"5. per-bord voorspelling berekenen ({len(raw)} borden)", t0, len(raw))
+
+    t0 = _time.perf_counter()
     valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
     n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
     n_fallback = len(valid_rows) - n_full_padelstat
     full_padelstat_rows = [r for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat")]
     form_index = compute_individual_form_index(valid_rows)
+    _mark(
+        f"6. filteren/samenvatten ({len(valid_rows)} geldig, waarvan {n_full_padelstat} volledig padelstat)",
+        t0, len(valid_rows),
+    )
     return {
         "valid_rows": valid_rows, "full_padelstat_rows": full_padelstat_rows,
         "n_total_boards": len(raw), "n_valid": len(valid_rows),
@@ -1025,32 +1065,29 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     eigen_boards = reconstruct_boards_with_rankings(eigen_entries)
     gekende_tegenstanders = _known_opponent_ids(eigen_boards)
 
-    # PADEL_ANALYSIS_RETRO_TEAMMATE_SCAN_COST_2026-10-05 - zie moduledocstring
-    # bij _resolve_encounter_teammates(): dit is NIET MEER automatisch - een
-    # knop, zodat "Per match" NOOIT op deze (mogelijk dure) scan wacht. Eens
-    # aangevraagd voor deze ontmoeting, blijft het resultaat gecached (zie
-    # de functie zelf) zolang de sessie loopt.
-    teammate_cache_key = f"retro_teammates_cache_{sel_player_id}_{gekozen_key}"
-    c_tm1, c_tm2 = st.columns([3, 1])
-    with c_tm2:
-        if st.button("Zoek teamgenoten", key=f"retro_find_teammates_{gekozen_key}"):
-            with perf.step("retro: teamgenoten van deze ontmoeting zoeken"):
-                _resolve_encounter_teammates(
-                    sel_player_id, gekozen_key, profiles, exclude_ids=gekende_tegenstanders,
-                )
-            st.rerun()
-    teammate_docs = st.session_state.get(teammate_cache_key) or {}
-    with c_tm1:
-        if teammate_docs:
-            st.caption(
-                f"{len(teammate_docs)} teamgenoot/teamgenoten van deze ontmoeting mee opgenomen: "
-                + ", ".join(name_lookup.get(pid, pid) for pid in teammate_docs)
-            )
-        else:
-            st.caption(
-                f"Toont nu enkel {sel_naam}'s eigen bord(en) van deze ontmoeting. Klik 'Zoek "
-                "teamgenoten' om ook de borden van eventuele teamgenoten te vinden (kan even duren)."
-            )
+    # PADEL_ANALYSIS_RETRO_TEAMMATES_AUTO_AGAIN_2026-10-05 (op verzoek van
+    # Kim: "we zitten terug met hetzelfde probleem dat enkel mijn eigen
+    # matchen van de ontmoeting getoond worden [...] ik wil dus ALTIJD de 4
+    # matchen zien van de ontmoeting") - DRAAIT WEER AUTOMATISCH, net als
+    # voor PADEL_ANALYSIS_RETRO_TEAMMATE_SCAN_COST_2026-10-05 de knop
+    # invoerde. Het verschil met toen: het resultaat wordt nu PER ONTMOETING
+    # (sel_player_id + gekozen_key) gecached in st.session_state, dus de
+    # (potentieel dure) scan van kandidaat-profielen gebeurt nog maar 1x
+    # zolang je dezelfde ontmoeting bekijkt - niet bij elke rerun (en een
+    # rerun gebeurt op Streamlit bij vrijwel elke widget-interactie, ook in
+    # een ANDERE sectie van de pagina). Wissel je naar een ANDERE ontmoeting,
+    # dan draait de scan 1x opnieuw voor die nieuwe ontmoeting.
+    # _resolve_encounter_teammates() cachet intern al per (sel_player_id,
+    # gekozen_key) - deze aanroep is dus goedkoop bij een herhaalde render
+    # van dezelfde ontmoeting, en draait maar 1x echt bij een nieuwe keuze.
+    teammate_docs = _resolve_encounter_teammates(
+        sel_player_id, gekozen_key, profiles, exclude_ids=gekende_tegenstanders,
+    )
+    if teammate_docs:
+        st.caption(
+            f"{len(teammate_docs)} teamgenoot/teamgenoten van deze ontmoeting automatisch mee opgenomen: "
+            + ", ".join(name_lookup.get(pid, pid) for pid in teammate_docs)
+        )
     docs_encounter = dict(docs)
     docs_encounter.update(teammate_docs)
     index_encounter = build_retro_encounter_index(
@@ -1158,10 +1195,42 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         f"{sel_naam}) - kan bij een grote database even duren. Druk op de knop om te berekenen."
     )
     if st.button("Bereken kalibratie (over alle gekende matchen)", key="retro_compute_calibration"):
+        # PADEL_ANALYSIS_RETRO_VISIBLE_TELEMETRY_2026-10-05 - zie
+        # moduledocstring bij gather_all_valid_match_data(): wall-clock tijd
+        # PER DEELSTAP, zichtbaar getoond na de klik - geen gok meer nodig
+        # over waar de tijd zit.
+        import time as _time
+        debug_timings: list = []
+        _t_totaal = _time.perf_counter()
         with perf.step("retro: alle geldige matchdata verzamelen (gather_all_valid_match_data)"):
             with st.spinner("Alle gekende matchen doorzoeken - dit kan even duren bij een grote database..."):
-                st.session_state["retro_all_valid_data"] = gather_all_valid_match_data(profiles)
+                st.session_state["retro_all_valid_data"] = gather_all_valid_match_data(
+                    profiles, debug_timings=debug_timings,
+                )
+        st.session_state["retro_calibration_debug"] = {
+            "steps": debug_timings, "total_seconds": _time.perf_counter() - _t_totaal,
+            "n_profiles": len(profiles),
+        }
         st.rerun()
+
+    debug_info = st.session_state.get("retro_calibration_debug")
+    if debug_info:
+        with st.expander(
+            f"Debug: laatste berekening duurde {debug_info['total_seconds']:.1f}s "
+            f"({debug_info['n_profiles']} profielen in de database)", expanded=True,
+        ):
+            st.dataframe(
+                [{"Stap": s["label"], "Tijd (s)": f"{s['seconds']:.2f}",
+                  "Aandeel": f"{(s['seconds'] / debug_info['total_seconds'] * 100):.0f}%" if debug_info["total_seconds"] else "-"}
+                 for s in debug_info["steps"]],
+                use_container_width=True, hide_index=True,
+            )
+            traagste = max(debug_info["steps"], key=lambda s: s["seconds"]) if debug_info["steps"] else None
+            if traagste and debug_info["total_seconds"] > 3:
+                st.warning(
+                    f"Traagste stap: **{traagste['label']}** ({traagste['seconds']:.1f}s, "
+                    f"{traagste['seconds'] / debug_info['total_seconds'] * 100:.0f}% van de totale tijd)."
+                )
 
     if all_data is None:
         st.info("Nog niet berekend in deze sessie - klik hierboven op de knop.")
