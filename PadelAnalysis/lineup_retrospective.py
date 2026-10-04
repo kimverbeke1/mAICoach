@@ -148,6 +148,70 @@ specifiek afgevlakt moeten worden) - dat vereist een fundamenteel ander
 soort model (bv. isotone regressie of Platt scaling per segment) dan de
 huidige schaal+bias-aanpak. Dat is een grotere, aparte beslissing en wordt
 hier bewust niet ongevraagd gebouwd - enkel gesignaleerd in de UI-caption.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04 (op verzoek van Kim, met
+meting: "Totaal deze render: 29.67s [...] Zwaarste eigen tijd: Firestore:
+parallel voorophalen (2003 reads) - 24.83s")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de meting: gather_all_valid_match_data() loopt
+over ALLE profielen in de database (bewust, zie PADEL_ANALYSIS_RETRO_ALL_
+VALID_DATA_2026-10-04 hierboven) en haalt daarvoor de padelstat-historiek
+van ELKE speler op die ooit als eigen speler OF tegenstander voorkwam -
+2003 unieke spelers in Kim's data. De bestaande parallelle prefetch
+(_parallel_prefetch_padelstat, ongewijzigd) gebruikte een vaste pool van
+16 workers: 2003 reads / 16 workers x ~0.2s/read = exact de gemeten ~25s.
+"Parallel" loste dit dus niet vanzelf op bij zo'n grote batch - 16
+gelijktijdige reads is voor een kleine batch (tientallen spelers, de
+andere aanroepplekken in dit bestand) ruim voldoende, maar bij 2000+ wordt
+de pool zelf de bottleneck.
+Bovendien gebeurde dit bij ELKE "koude" sessie opnieuw: @st.cache_data
+cachet enkel BINNEN hetzelfde Streamlit-proces (en maximaal 5 minuten) -
+een nieuwe sessie (andere gebruiker, of de app herstart) betaalt de volle
+~25s opnieuw, ook al is de onderliggende data nauwelijks veranderd.
+FIX, twee delen:
+  1. _parallel_prefetch_padelstat() gebruikt nu een GROTERE workerpool
+     voor grote batches (tot 64 workers vanaf 200+ spelers, anders
+     ongewijzigd 16) - bij 2003 spelers/64 workers x ~0.2s = ~6s i.p.v.
+     ~25s. Firestore's client-bibliotheek is hiertegen bestand (het zijn
+     onafhankelijke, korte reads); een hogere pool-grootte dan dit wordt
+     bewust vermeden om geen aggressieve bursts richting Firestore te
+     sturen.
+  2. gather_all_valid_match_data() wordt nu ZELF ook persistent gecached
+     in Firestore (collectie "app_settings", document
+     "retro_all_valid_cache"), met een TTL van 1 uur - een NIEUWE sessie
+     (cold start) leest dan dat opgeslagen resultaat (1 document-read,
+     vrijwel instant) i.p.v. de volledige, dure berekening opnieuw te
+     doen. Enkel de SCHAAL-ONAFHANKELIJKE ruwe rijen worden opgeslagen
+     (our_avg/their_avg/actual_won/bron-indicatie e.d. - geen win_
+     probability, die hangt af van de gekozen factor en wordt nog steeds
+     live herberekend). Is de cache verlopen of leeg, dan wordt alles
+     opnieuw berekend EN meteen opnieuw weggeschreven - dus de eerste
+     gebruiker na het verlopen van de cache betaalt de volle kost, alle
+     volgende (binnen het uur) niet. Faalt de Firestore-opslag/-lezing om
+     welke reden ook, dan valt dit stil terug op "altijd vers berekenen" -
+     nooit een crash.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PADELSTAT_ONLY_DEFAULT_2026-10-04 (op verzoek van Kim:
+"het is duidelijk dat ik met de padelstat waarde moet rekenen. Dus
+verwijder die zaken om alle bruikbare matchen te gebruiken")
+--------------------------------------------------------------------------
+ROOT CAUSE/AANLEIDING: Kim's eigen meting toonde een ondubbelzinnig verschil
+(Brier 0.342 op alle 1667 matchen tegenover 0.186 op de 182 volledige-
+padelstat-matchen, resp. 56% en 76% accuraatheid) - de officieel-klassement-
+terugval voegt aantoonbaar ruis toe aan het model.
+FIX: de vergelijkingssectie ("Vergelijking: alle matchen tegenover enkel-
+padelstat-matchen", met de 2 metriek-kolommen naast elkaar) EN de
+schakelaar "Gebruik hieronder enkel de volledige-padelstat-matchen" zijn
+VERWIJDERD. De kalibratie, de schuifregelaar en "Beste model zoeken"
+gebruiken nu ONVOORWAARDELIJK full_padelstat_rows (de subset met padelstat
+voor alle 4 spelers) - geen keuze meer nodig. De 3 tellingen bovenaan
+("Bruikbare matchen (totaal)" / "...met padelstat voor alle 4" / "...met
+min. 1 klassement-terugval") blijven WEL staan: dat blijft nuttige,
+informatieve context over de dataomvang, los van welke subset het model nu
+effectief gebruikt. Is full_padelstat_rows leeg (nog geen enkele volledige-
+padelstat-match), dan valt de kalibratie-sectie terug op alle rijen, met
+een expliciete melding - zodat de pagina nooit leeg/kapot overkomt zolang
+de padelstat-historiek nog opgebouwd wordt.
 """
 import datetime as _dt
 import math
@@ -174,6 +238,9 @@ except Exception:  # noqa: BLE001  pragma: no cover
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _CALIBRATION_SETTINGS_COLLECTION = "app_settings"
 _CALIBRATION_SETTINGS_DOC = "retro_calibration"
+# PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04 - zie moduledocstring.
+_ALL_VALID_CACHE_DOC = "retro_all_valid_cache"
+_ALL_VALID_CACHE_TTL_SECONDS = 3600
 _DEFAULT_SCALE = ll.DEFAULT_WIN_PROBABILITY_SCALE
 _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
 _SCALE_SEARCH_RANGE = list(range(50, 801, 5))
@@ -181,6 +248,11 @@ _SCALE_SEARCH_RANGE = list(range(50, 801, 5))
 # (scale x bias) - fijner zou te traag worden; dit blijft puur rekenwerk, geen I/O.
 _SCALE_BIAS_SEARCH_SCALES = list(range(50, 801, 20))
 _BIAS_SEARCH_RANGE = list(range(-150, 151, 10))
+# PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04: grotere workerpool vanaf deze
+# batchgrootte - zie moduledocstring.
+_LARGE_BATCH_THRESHOLD = 200
+_LARGE_BATCH_WORKERS = 64
+_SMALL_BATCH_WORKERS = 16
 
 
 # --------------------------------------------------------------- datums
@@ -313,13 +385,26 @@ def _collect_relevant_player_ids(index: dict) -> set:
 
 
 def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
+    """PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04: gebruikt een GROTERE
+    workerpool vanaf _LARGE_BATCH_THRESHOLD spelers - zie moduledocstring
+    voor de bevestigde root cause (vaste pool van 16 workers was de
+    bottleneck bij 2003 spelers, niet de "parallel" aanpak zelf)."""
     if not player_ids:
         return
+    n_workers = _LARGE_BATCH_WORKERS if len(player_ids) >= _LARGE_BATCH_THRESHOLD else _SMALL_BATCH_WORKERS
     prefetch = getattr(fb, "_fs_prefetch", None)
     if callable(prefetch):
         try:
-            prefetch(("get_padelstat_rating",), list(player_ids))
+            prefetch(("get_padelstat_rating",), list(player_ids), max_workers=n_workers)
             return
+        except TypeError:
+            # Oudere _fs_prefetch-signatuur zonder max_workers-parameter -
+            # nog steeds parallel, enkel zonder de grotere pool voor deze batch.
+            try:
+                prefetch(("get_padelstat_rating",), list(player_ids))
+                return
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             pass
     try:
@@ -331,7 +416,7 @@ def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-        with ThreadPoolExecutor(max_workers=min(16, len(player_ids))) as ex:
+        with ThreadPoolExecutor(max_workers=min(n_workers, len(player_ids))) as ex:
             list(ex.map(_warm, player_ids))
     except Exception:  # noqa: BLE001
         pass
@@ -458,9 +543,6 @@ def predict_board(
         "our_sources": [s for _, s in our_vals], "their_sources": [s for _, s in their_vals],
         "actual_won": board.get("won"), "score": board.get("score"),
         "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
-        # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: id's meegeven, zodat
-        # _render_board_row() de individuele vorm van de tegenstander kan
-        # opzoeken (bv. Tim Van Rossom) - puur additief.
         "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
         "match_date": date_text,
     }
@@ -541,17 +623,6 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
             # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04: bron per
             # kant bijhouden (echte padelstat vs. officieel-klassement-
             # terugval) - zie moduledocstring.
-            # LET OP (bevestigde fout tijdens testen): een naieve "padelstat"
-            # in label-substring-check faalt, want de FALLBACK-labels zelf
-            # bevatten de tekst "... geen padelstat gekend" - dus "padelstat"
-            # komt OOK voor in labels die GEEN padelstat gebruikten. De
-            # correcte check is net het omgekeerde: een waarde is
-            # padelstat-gebaseerd DAN EN SLECHTS DAN ALS het label NIET over
-            # "klassement" gaat en niet "onbekend" is (alle 4 echte
-            # padelstat-labels - "padelstat-historiek (op datum)", "meest
-            # recente padelstat-historiek (...)", "padelstat (nog geen
-            # historiek ...)", "momentopname (padelstat)" - bevatten nooit
-            # het woord "klassement").
             our_is_padelstat = all(
                 s is not None and "klassement" not in s and s != "onbekend" for _, s in our_vals
             ) if our_vals else False
@@ -564,11 +635,6 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
                 "their_avg": (sum(their_known) / len(their_known)) if their_known else None,
                 "actual_won": board.get("won"), "score": board.get("score"),
                 "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
-                # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: id's van de
-                # tegenstander-spelers meegeven (naast hun naam, die hierboven al
-                # stond) - nodig om compute_individual_form_index() hieronder een
-                # speler uniek te kunnen opbouwen (namen zijn geen betrouwbare
-                # sleutel bij gelijknamige spelers).
                 "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
                 "match_date": date_text,
                 "our_is_padelstat": our_is_padelstat, "their_is_padelstat": their_is_padelstat,
@@ -582,39 +648,12 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
 # wel goed om bij die spelers te kijken naar hun voorgaande matchen en tegen
 # wie en met hoeveel ze gewonnen hebben?")
 # --------------------------------------------------------------------------
-# ROOT CAUSE van Kim's observatie: de voorspelling gebruikt enkel padelstat/
-# officieel klassement - een vast, traag bijgewerkt getal. Een speler die
-# RECENT in topvorm speelt (of structureel beter presteert dan zijn officiele
-# klassement doet vermoeden) wordt daardoor systematisch onderschat, en GEEN
-# globale schaal- of bias-aanpassing kan dat voor 1 specifieke speler
-# corrigeren zonder alle andere voorspellingen te verstoren (zie Kim's eigen
-# observatie: scale=50 helpt deze ene match, maar verwoest de Brier-score
-# voor de rest, 0.310).
-# SCOPE VAN DEZE LEVERING (Kim, expliciet bevestigd: "voorstel voor nu is
-# ok"): ENKEL een DIAGNOSTISCHE weergave van iemands individuele winrate,
-# ter observatie - GEEN aanpassing van de voorspellingsformule zelf. Een
-# eventueel 3-signalen-model (rating + synergie + individuele vorm) is een
-# bewuste VOLGENDE stap, pas nadat dit diagnostisch beeld bevestigt dat het
-# de moeite waard is (overfitting-risico bij hoogstens 182-1667 matchen).
-# --------------------------------------------------------------------------
-# WAAROM DIT BEREKEND WORDT UIT `raw_rows` (i.p.v. een NIEUWE Firestore-
-# aanroep per speler): we hebben in `raw_rows` AL elk bord van ELKE bekende
-# ontmoeting (onze kant EN de tegenstander-kant, inclusief hun user_id's,
-# zie de uitbreiding hierboven). Een speler die als TEGENSTANDER optrad
-# (zoals Tim) heeft geen eigen "profiel" in onze database - we kennen hem
-# enkel via de matchrecords van ONZE spelers die tegen hem speelden. Door
-# simpelweg over ALLE borden te lopen en, voor elke speler die er ooit in
-# voorkwam (als eigen speler OF als tegenstander), een win/verlies-telling
-# bij te houden (tegenstanders krijgen het SPIEGELBEELD van actual_won - wij
-# winnen = zij verliezen), krijgen we een CONSISTENTE, voor iedereen
-# berekenbare vorm-index, zonder 1 extra Firestore-read.
 def compute_individual_form_index(raw_rows: list) -> Dict[str, dict]:
     """Geeft {player_id: {"wins", "losses", "n", "winrate"}} terug, opgebouwd
-    uit ALLE `raw_rows` (zie gather_all_valid_match_data/gather_raw_match_
-    data) - zowel voor onze eigen spelers als voor tegenstanders. Een
-    tegenstander-speler krijgt het SPIEGELBEELD van `actual_won` (wij wonnen
-    -> zij verloren, en omgekeerd). Rijen zonder gekende `actual_won` worden
-    overgeslagen (tellen niet mee, in geen enkele richting)."""
+    uit ALLE `raw_rows` - zowel voor onze eigen spelers als voor
+    tegenstanders. Een tegenstander-speler krijgt het SPIEGELBEELD van
+    `actual_won` (wij wonnen -> zij verloren, en omgekeerd). Rijen zonder
+    gekende `actual_won` worden overgeslagen."""
     tally: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # [wins, losses]
     for r in raw_rows:
         won = r.get("actual_won")
@@ -644,54 +683,121 @@ def _format_individual_form(form_index: Dict[str, dict], player_id, name: str) -
     return f"{name} ({entry['winrate'] * 100:.0f}% win, {entry['wins']}/{entry['n']})"
 
 
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04 - zie moduledocstring:
+# persistente cache (Firestore) voor het resultaat van
+# gather_all_valid_match_data(), zodat een koude sessie niet telkens de
+# volledige 2000+-speler-batch opnieuw moet opbouwen.
+# --------------------------------------------------------------------------
+def _read_all_valid_cache(player_ids_sig: tuple) -> Optional[dict]:
+    """Geeft het opgeslagen resultaat terug ALS de spelerslijst-signatuur
+    overeenkomt EN de cache niet verlopen is, anders None. Faalt stil."""
+    try:
+        doc = fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_ALL_VALID_CACHE_DOC).get()
+        data = doc.to_dict() if doc is not None and getattr(doc, "exists", True) else None
+        if not data:
+            return None
+        if tuple(data.get("player_ids_sig") or []) != player_ids_sig:
+            return None
+        saved_at = data.get("saved_at_epoch")
+        if saved_at is None or (_dt.datetime.now(_dt.timezone.utc).timestamp() - float(saved_at)) > _ALL_VALID_CACHE_TTL_SECONDS:
+            return None
+        rows = data.get("valid_rows")
+        if not isinstance(rows, list):
+            return None
+        for r in rows:
+            r["pair"] = tuple(r.get("pair") or ())
+        return {
+            "valid_rows": rows,
+            "n_total_boards": int(data.get("n_total_boards") or 0),
+            "n_valid": len(rows),
+            "player_ids": list(data.get("player_ids") or []),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_all_valid_cache(player_ids_sig: tuple, result: dict) -> None:
+    """Schrijft de SCHAAL-ONAFHANKELIJKE ruwe rijen weg (geen win_
+    probability - die hangt af van de gekozen factor). Faalt stil."""
+    try:
+        payload = {
+            "player_ids_sig": list(player_ids_sig),
+            "player_ids": result.get("player_ids") or [],
+            "valid_rows": [
+                {
+                    "pair": list(r.get("pair") or ()),
+                    "our_avg": r.get("our_avg"), "their_avg": r.get("their_avg"),
+                    "actual_won": r.get("actual_won"), "score": r.get("score"),
+                    "opp1_name": r.get("opp1_name"), "opp2_name": r.get("opp2_name"),
+                    "opp1_user_id": r.get("opp1_user_id"), "opp2_user_id": r.get("opp2_user_id"),
+                    "match_date": r.get("match_date"),
+                    "our_is_padelstat": r.get("our_is_padelstat"), "their_is_padelstat": r.get("their_is_padelstat"),
+                }
+                for r in result.get("valid_rows") or []
+            ],
+            "n_total_boards": result.get("n_total_boards", 0),
+            "saved_at_epoch": _dt.datetime.now(_dt.timezone.utc).timestamp(),
+            "saved_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_ALL_VALID_CACHE_DOC).set(payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # PADEL_ANALYSIS_RETRO_ALL_VALID_DATA_2026-10-04 - zie moduledocstring.
 def gather_all_valid_match_data(profiles: list) -> dict:
     """Bouwt de SCHAAL-ONAFHANKELIJKE ruwe matchdata over ALLE profielen in
     de database (geen speler-/teamgenoten-keuze nodig). Geeft
-    {"valid_rows", "n_total_boards", "n_valid", "player_ids"} terug:
-      - "valid_rows": enkel rijen waar our_avg EN their_avg EN actual_won
-        gekend zijn ("geldige matchdata", Kim's exacte vraag);
-      - "n_total_boards": totaal aantal GEZIENE borden (incl. onvolledige -
-        zodat zichtbaar is hoeveel data er potentieel bestaat);
-      - "n_valid": len(valid_rows), kortheidshalve apart.
+    {"valid_rows", "full_padelstat_rows", "n_total_boards", "n_valid",
+    "n_full_padelstat", "n_fallback", "form_index", "player_ids"} terug.
+    PADEL_ANALYSIS_RETRO_PERF_BIGBATCH_2026-10-04: probeert EERST de
+    persistente Firestore-cache (zie hierboven) - enkel bij een cache-miss
+    wordt de volledige, dure berekening gedaan (en meteen weer opgeslagen).
     Faalt een stap (bv. geen Firestore-verbinding), dan geeft deze functie
-    lege resultaten terug i.p.v. te crashen - de aanroeper toont dan "0
-    matchen gevonden" i.p.v. een foutpagina."""
+    lege resultaten terug i.p.v. te crashen."""
     all_ids = sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")})
     if not all_ids:
         return {
             "valid_rows": [], "full_padelstat_rows": [], "n_total_boards": 0, "n_valid": 0,
             "n_full_padelstat": 0, "n_fallback": 0, "form_index": {}, "player_ids": [],
         }
-    try:
-        docs = ll.get_docs_for_players(all_ids)
-    except Exception:  # noqa: BLE001
-        docs = {}
-    # Geen allowed_player_ids-filter: ELK profiel se matchen tellen mee.
-    index = build_retro_encounter_index(docs, allowed_player_ids=None)
-    current_official_ranks = {}
-    try:
-        from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
-        prefetch_own_player_reads(all_ids)
-        current_official_ranks = _build_own_official_ranks_strict(all_ids) or {}
-    except Exception:  # noqa: BLE001
-        pass
-    relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
-    ratings_cache = _load_padelstat_histories(relevant_ids)
-    raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
-    valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
-    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 - zie moduledocstring:
-    # opsplitsing tonen i.p.v. 1 vermengd totaal.
+    sig = tuple(all_ids)
+    with perf.step("retro: alle geldige matchdata - cache lezen"):
+        cached = _read_all_valid_cache(sig)
+    if cached is not None:
+        valid_rows = cached["valid_rows"]
+        n_total_boards = cached["n_total_boards"]
+    else:
+        try:
+            docs = ll.get_docs_for_players(all_ids)
+        except Exception:  # noqa: BLE001
+            docs = {}
+        # Geen allowed_player_ids-filter: ELK profiel se matchen tellen mee.
+        index = build_retro_encounter_index(docs, allowed_player_ids=None)
+        current_official_ranks = {}
+        try:
+            from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
+            prefetch_own_player_reads(all_ids)
+            current_official_ranks = _build_own_official_ranks_strict(all_ids) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
+        ratings_cache = _load_padelstat_histories(relevant_ids)
+        raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
+        valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
+        n_total_boards = len(raw)
+        with perf.step("retro: alle geldige matchdata - cache wegschrijven"):
+            _write_all_valid_cache(sig, {
+                "player_ids": all_ids, "valid_rows": valid_rows, "n_total_boards": n_total_boards,
+            })
     n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
     n_fallback = len(valid_rows) - n_full_padelstat
     full_padelstat_rows = [r for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat")]
-    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: EEN keer berekend over
-    # ALLE geldige rijen, herbruikt voor zowel de "Per match"-weergave als
-    # eventueel later model-gebruik - zie moduledocstring.
     form_index = compute_individual_form_index(valid_rows)
     return {
         "valid_rows": valid_rows, "full_padelstat_rows": full_padelstat_rows,
-        "n_total_boards": len(raw), "n_valid": len(valid_rows),
+        "n_total_boards": n_total_boards, "n_valid": len(valid_rows),
         "n_full_padelstat": n_full_padelstat, "n_fallback": n_fallback,
         "form_index": form_index, "player_ids": all_ids,
     }
@@ -802,9 +908,7 @@ def logistic_curve(scale: float, diffs=None) -> list:
 # --------------------------------------------------------------- winkansfactor opslaan
 def _load_saved_scale() -> dict:
     """Leest de laatst opgeslagen winkansfactor EN bias uit Firestore.
-    PADEL_ANALYSIS_RETRO_BIAS_MODEL_2026-10-04: geeft nu een dict terug
-    i.p.v. enkel een float, met een nieuw "bias"-veld (0.0 als er nog
-    nooit een bias werd opgeslagen). Faalt stil."""
+    Faalt stil."""
     try:
         doc = fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_CALIBRATION_SETTINGS_DOC).get()
         data = doc.to_dict() if doc is not None and getattr(doc, "exists", True) else None
@@ -899,29 +1003,22 @@ def _outcome_color(predicted_wp, actual_won) -> str:
 
 
 def _source_is_padelstat(sources) -> bool:
-    """PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: zelfde onderscheid als
-    in gather_raw_match_data() (padelstat vs. officieel-klassement-terugval),
-    hier lokaal herhaald omdat _render_board_row() enkel `bp["our_sources"]`/
-    `bp["their_sources"]` (strings) ter beschikking heeft, geen nieuwe
-    Firestore-data nodig."""
+    """Zelfde onderscheid als in gather_raw_match_data() (padelstat vs.
+    officieel-klassement-terugval), hier lokaal herhaald omdat
+    _render_board_row() enkel `bp["our_sources"]`/`bp["their_sources"]`
+    (strings) ter beschikking heeft, geen nieuwe Firestore-data nodig."""
     return all(s is not None and "klassement" not in s and s != "onbekend" for s in (sources or []))
 
 
 def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str, dict]] = None) -> None:
-    """PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: `form_index` (zie
-    compute_individual_form_index()) is optioneel - ontbreekt ze, dan valt
-    deze functie gewoon terug op het oude gedrag (geen individuele vorm
-    getoond), nooit een crash."""
+    """`form_index` (zie compute_individual_form_index()) is optioneel -
+    ontbreekt ze, dan valt deze functie gewoon terug op het oude gedrag
+    (geen individuele vorm getoond), nooit een crash."""
     p1, p2 = bp["pair"]
     ons = f"{name_lookup.get(p1, p1)} / {name_lookup.get(p2, p2)}"
     hen = f"{bp.get('opp1_name', '?')} / {bp.get('opp2_name', '?')}"
     kleur = _outcome_color(bp["win_probability"], bp["actual_won"])
     uitslag = "gewonnen" if bp["actual_won"] is True else ("verloren" if bp["actual_won"] is False else "onbekend")
-    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04: dezelfde padelstat/
-    # klassement-indicatie als de kalibratie-telling, nu ook hier (beantwoordt
-    # de eerdere vraag "moeten Per match en Beste alternatief ook deze
-    # indicatie krijgen?") - hergebruikt de al aanwezige bronlabels, geen
-    # nieuwe data nodig.
     badge = "" if (_source_is_padelstat(bp.get("our_sources")) and _source_is_padelstat(bp.get("their_sources"))) \
         else " \u00b7 :orange[deels klassement]"
     st.markdown(
@@ -938,10 +1035,6 @@ def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str
             (f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
              f"(gemiddeld {bp['their_avg']:.0f})") if bp.get("their_avg") is not None else "Tegenstander: onbekend"
         )
-        # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04 - zie moduledocstring:
-        # individuele winrate per speler, over ALLE gekende interclub-matchen
-        # (niet enkel deze ontmoeting) - laat zien of iemands padelstat-/
-        # klassementwaarde zijn werkelijke vorm goed weerspiegelt.
         if form_index:
             vorm_regels = []
             for pid in (p1, p2):
@@ -984,14 +1077,10 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.session_state["retro_scale"] = saved["scale"]
             st.session_state["retro_bias"] = saved.get("bias", 0.0)
 
-    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: gather_all_valid_match_
-    # data() wordt nu VOOR "Per match" aangeroepen (was voorheen pas bij de
-    # kalibratie-sectie onderaan) - haar "form_index" is nodig om iemands
-    # individuele vorm al bij elke match te tonen. Om dit niet trager te
-    # maken dan voorheen, wordt het resultaat nu ook gecached in
-    # st.session_state (dat bestond hiervoor niet - elke render deed dit
-    # werk opnieuw) op een signatuur van de profiel-id's; identiek patroon
-    # aan de bestaande raw_key-caching elders in de codebase.
+    # gather_all_valid_match_data() wordt 1x per sessie berekend (en nu ook
+    # persistent in Firestore gecached, zie PADEL_ANALYSIS_RETRO_PERF_
+    # BIGBATCH_2026-10-04) - haar "form_index" is nodig om iemands
+    # individuele vorm al bij elke match te tonen.
     all_ids_sig = tuple(sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")}))
     all_data_key = "retro_all_valid_data"
     if st.session_state.get(all_data_key + "_sig") != all_ids_sig:
@@ -1002,12 +1091,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     all_data = st.session_state[all_data_key]
     form_index = all_data.get("form_index") or {}
 
-    # PADEL_ANALYSIS_RETRO_SIMPLIFY_2026-10-04: geen teamgenoten-keuze meer -
-    # zie moduledocstring. Enkel de matchen van sel_player_id zelf.
     with perf.step("retro: eigen matchen ophalen"):
         with st.spinner(f"Matchen van {sel_naam} ophalen..."):
             docs = ll.get_docs_for_players([sel_player_id])
-
     st.caption(
         f"Vergelijkt, voor **{sel_naam}**, de voorspelde winkans met de echte uitslag van eerder gespeelde "
         "interclub-matchen, MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. "
@@ -1016,7 +1102,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         f"{sel_naam}."
     )
     gekozen_ids = {sel_player_id}
-
     with perf.step("retro: encounter-index bouwen"):
         index = build_retro_encounter_index(docs, allowed_player_ids=gekozen_ids)
     encounters = list_retro_encounters(index)
@@ -1128,21 +1213,19 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
 
     # PADEL_ANALYSIS_RETRO_ALL_VALID_DATA_2026-10-04: kalibratie over ALLE
     # geldige matchdata in de database - niet langer afhankelijk van de
-    # spelerskeuze hierboven. Zie moduledocstring.
-    # PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04: `all_data` is hierboven
-    # al EENMALIG berekend (en gecached) - hier enkel hergebruikt, geen 2e
-    # gather_all_valid_match_data()-aanroep meer nodig.
+    # spelerskeuze hierboven.
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_ONLY_DEFAULT_2026-10-04 - zie
+    # moduledocstring: gebruikt nu ONVOORWAARDELIJK full_padelstat_rows,
+    # geen "alle matchen"-vergelijking of schakelaar meer.
     st.divider()
     st.markdown("#### Kalibratie over alle gekende matchen (van iedereen)")
     st.caption(
-        "Deze sectie gebruikt ALLE interclub-matchen in de database waarvoor we ZOWEL een rating voor onze "
-        "spelers ALS voor de tegenstander ALS de echte uitslag kennen - ongeacht wie je hierboven koos. Dat "
-        "geeft het meest betrouwbare beeld van hoe goed de winkans-formule werkelijk voorspelt."
+        "Deze sectie gebruikt ALLE interclub-matchen in de database waarvoor we ZOWEL een echte padelstat-"
+        "waarde voor onze spelers ALS voor de tegenstander ALS de echte uitslag kennen - ongeacht wie je "
+        "hierboven koos. Dat geeft het meest betrouwbare beeld van hoe goed de winkans-formule werkelijk "
+        "voorspelt (het officiele-klassement-alternatief bleek aantoonbaar minder betrouwbaar: een hogere "
+        "Brier-score en lagere accuraatheid)."
     )
-    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 - zie moduledocstring:
-    # 3 aparte tellingen i.p.v. 1 vermengd getal, zodat zichtbaar is hoeveel
-    # van de "bruikbare" matchen op ECHTE padelstat steunen en hoeveel op de
-    # officieel-klassement-terugval.
     c_n1, c_n2, c_n3 = st.columns(3)
     with c_n1:
         st.metric("Bruikbare matchen (totaal)", all_data["n_valid"])
@@ -1152,10 +1235,8 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.metric("... met min. 1 klassement-terugval", all_data.get("n_fallback", 0))
     st.caption(
         "'Bruikbare matchen' telt elk bord waarvoor we, via padelstat OF het officiele klassement van "
-        "toen, een rating hebben voor beide kanten EN de echte uitslag kennen. De 2 kolommen ernaast "
-        "splitsen dat op: hoeveel daarvan STEUNEN VOLLEDIG op padelstat (de meest betrouwbare bron), en "
-        "hoeveel voor minstens 1 kant terugvielen op het officiele klassement (bv. omdat die speler nog "
-        "geen padelstat-rating bij ons heeft)."
+        "toen, een rating hebben voor beide kanten EN de echte uitslag kennen. De kalibratie hieronder "
+        "gebruikt enkel de middelste kolom (volledig padelstat) - de betrouwbaarste subset."
     )
     if all_data["n_total_boards"] > 0 and all_data["n_valid"] < all_data["n_total_boards"]:
         ontbrekend = all_data["n_total_boards"] - all_data["n_valid"]
@@ -1164,11 +1245,19 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "volledig af - meestal omdat er voor minstens 1 speler helemaal geen rating gekend is, of de "
             "uitslag onbekend is."
         )
-    all_rows = all_data["valid_rows"]
+
     full_rows = all_data.get("full_padelstat_rows") or []
-    if not all_rows:
+    all_rows = all_data["valid_rows"]
+    if not full_rows and not all_rows:
         st.info("Nog geen enkele match met zowel een gekende rating voor beide kanten als een gekende uitslag.")
         return
+    if not full_rows:
+        st.warning(
+            "Nog geen enkele match met padelstat voor alle 4 spelers - de kalibratie hieronder valt tijdelijk "
+            f"terug op alle {len(all_rows)} bruikbare matchen (incl. officieel-klassement-terugval), minder "
+            "betrouwbaar. Zodra er volledige-padelstat-matchen bijkomen, schakelt dit automatisch om."
+        )
+    raw_rows = full_rows or all_rows
 
     c_slider, c_curve = st.columns([2, 1])
     with c_slider:
@@ -1184,56 +1273,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     if bias:
         st.caption(f"Actieve bias-correctie: **{bias:+.0f}** (zie 'Model met bias' verderop).")
 
-    # PADEL_ANALYSIS_RETRO_PADELSTAT_ONLY_TOGGLE_2026-10-04 (op verzoek van Kim:
-    # "ik vraag me af of het niet beter is om enkel de 182 padelstat matchen te
-    # gebruiken voor het model" + "zorg wel dat we eventueel later gemakkelijk
-    # een keuze kunnen maken voor enkel padelstat") - zie moduledocstring.
-    # Toont ALTIJD beide Brier-scores naast elkaar (zodat het verschil meteen
-    # meetbaar is, i.p.v. te moeten gokken), EN een schakelaar die bepaalt op
-    # welke subset de schuifregelaar/het-model-zoeken hieronder werken.
-    with perf.step("retro: kalibratie herberekenen (score_raw_at_scale, 2 subsets)"):
-        stats_all = calibration_stats(score_raw_at_scale(all_rows, scale, bias=bias))
-        stats_full = calibration_stats(score_raw_at_scale(full_rows, scale, bias=bias)) if full_rows else None
-    st.markdown("##### Vergelijking: alle matchen tegenover enkel-padelstat-matchen")
-    c_cmp1, c_cmp2 = st.columns(2)
-    with c_cmp1:
-        st.markdown(f"**Alle {len(all_rows)} bruikbare matchen**")
-        if stats_all:
-            st.metric("Brier-score", f"{stats_all['brier']:.3f}")
-            st.caption(f"Accuraatheid {stats_all['accuracy'] * 100:.0f}%")
-    with c_cmp2:
-        st.markdown(f"**Enkel de {len(full_rows)} volledige-padelstat-matchen**")
-        if stats_full:
-            st.metric("Brier-score", f"{stats_full['brier']:.3f}")
-            st.caption(f"Accuraatheid {stats_full['accuracy'] * 100:.0f}%")
-        else:
-            st.caption("Nog geen enkele match met padelstat voor alle 4 spelers.")
-    if stats_all and stats_full:
-        verschil = stats_all["brier"] - stats_full["brier"]
-        if abs(verschil) < 0.005:
-            st.caption("Het verschil tussen beide subsets is klein - de klassement-terugval lijkt het model hier niet sterk te vertekenen.")
-        elif verschil > 0:
-            st.caption(f"De enkel-padelstat-matchen scoren {verschil:.3f} beter (lagere Brier) - de klassement-terugval lijkt hier wel ruis toe te voegen.")
-        else:
-            st.caption(f"De enkel-padelstat-matchen scoren {-verschil:.3f} slechter - mogelijk door de kleinere steekproef ({len(full_rows)} matchen) eerder dan door de databron zelf.")
-
-    gebruik_enkel_padelstat = st.checkbox(
-        "Gebruik hieronder enkel de volledige-padelstat-matchen (voor de schuifregelaar en 'Beste model zoeken')",
-        value=st.session_state.get("retro_padelstat_only", False), key="retro_padelstat_only",
-        help="Staat dit UIT, dan werken de schuifregelaar en 'Beste model zoeken' op ALLE bruikbare matchen "
-             "(incl. klassement-terugval). AAN = enkel op de subset met padelstat voor alle 4 spelers - "
-             "kleiner maar mogelijk betrouwbaarder. Verandert niets aan de 2 vergelijkingscijfers hierboven, "
-             "die tonen altijd beide.",
-    )
-    raw_rows = full_rows if gebruik_enkel_padelstat else all_rows
-    if gebruik_enkel_padelstat and not full_rows:
-        st.warning("Geen enkele match met padelstat voor alle 4 spelers - val terug op alle matchen.")
-        raw_rows = all_rows
-    stats = stats_full if (gebruik_enkel_padelstat and stats_full) else stats_all
+    with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
+        stats = calibration_stats(score_raw_at_scale(raw_rows, scale, bias=bias))
     if not stats:
         st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
-    st.markdown(f"##### Kansklassen-detail ({'enkel padelstat' if (gebruik_enkel_padelstat and stats_full) else 'alle matchen'})")
+    st.markdown(f"##### Kansklassen-detail ({len(raw_rows)} volledig-padelstat-matchen)")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Brier-score", f"{stats['brier']:.3f}", help="Lager = beter. 0.25 = niet beter dan een muntstuk.")
@@ -1276,9 +1321,10 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.divider()
     st.markdown("##### Beste model zoeken (2 parameters: schaal + bias)")
     st.caption(
-        "Zoekt ZOWEL een schaalfactor ALS een vaste verschuiving (bias) van het ratingverschil. Een bias "
-        "corrigeert een SYSTEMATISCHE afwijking (bv. als de formule structureel te optimistisch is voor "
-        "underdogs) - iets wat een loutere factor niet kan. Experimenteel: wijzigt enkel deze weergave."
+        "Zoekt ZOWEL een schaalfactor ALS een vaste verschuiving (bias) van het ratingverschil, op de "
+        f"{len(raw_rows)} volledig-padelstat-matchen hierboven. Een bias corrigeert een SYSTEMATISCHE "
+        "afwijking (bv. als de formule structureel te optimistisch is voor underdogs) - iets wat een "
+        "loutere factor niet kan. Experimenteel: wijzigt enkel deze weergave."
     )
     if st.button("Zoek beste model (schaal + bias)", key="retro_find_best_scale_bias"):
         with perf.step("retro: beste model zoeken (find_best_scale_and_bias)"):
