@@ -160,6 +160,18 @@ bundle (ontdubbeld). Die kopie gaat naar de matchup-tabel en de
 Rotatieplanner. `bundle` zelf (scout-header, AI-rapport, "vorige
 ontmoetingen") blijft ONGEWIJZIGD. Een caption toont hoeveel ontmoetingen
 de planning gebruikt, zodat dit voortaan controleerbaar is.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 (op verzoek van Kim: "het zou ook
+handig zijn om al gespeelde matchen ook nog te kunnen analyseren maar dan
+met de padelstat waardes van toen")
+--------------------------------------------------------------------------
+Nieuwe sectie "Nabeschouwing" (SECTION_RETRO), zie lineup_retrospective.py
+voor de volledige toelichting. Draait, net als de andere secties sinds
+PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28, UITSLUITEND wanneer de gebruiker
+deze sectie effectief kiest - geen enkele impact op de laadtijd van de
+andere secties. Faalt de import van lineup_retrospective.py (bv. tijdens
+een gefaseerde uitrol), dan toont de sectie een duidelijke melding i.p.v.
+de hele pagina te laten crashen.
 """
 import streamlit as st
 from dashboard_common import (
@@ -188,6 +200,13 @@ from lineup_rotation import (
 from lineup_matchup_table import _render_all_valid_matchups
 # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: lineup_whatif en lineup_sandbox
 # zijn NIET MEER GEIMPORTEERD - zie moduledocstring.
+# PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: lazy/defensief - zie moduledocstring.
+_retro_import_error = None
+try:
+    from lineup_retrospective import render_retrospective_tab
+except Exception as e:  # noqa: BLE001  pragma: no cover
+    render_retrospective_tab = None
+    _retro_import_error = f"{type(e).__name__}: {e}"
 # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
 # Faalt de import, dan draait de pagina gewoon door zonder metingen.
 try:
@@ -221,7 +240,8 @@ SECTION_ANALYSE = "Analyseren"
 SECTION_RANG = "Rangschikking"
 SECTION_POULE = "Andere ploegen"
 SECTION_SAVED = "Opgeslagen analyses"
-_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED]
+SECTION_RETRO = "Nabeschouwing"  # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03
+_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED, SECTION_RETRO]
 def _fixture_key(fx_bundle: dict):
     """PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03: sleutel om dezelfde
     ontmoeting uit 2 bundels te herkennen."""
@@ -652,6 +672,21 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
         st.divider()
         with perf.step("oa.render_ai_section (enkel UI, geen AI-call)"):
             oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
+def _render_retrospective_section(profiles) -> None:
+    """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 - zie moduledocstring en
+    lineup_retrospective.py. Draait enkel wanneer de gebruiker deze sectie
+    effectief kiest (zelfde lui-ladingspatroon als de andere secties)."""
+    if render_retrospective_tab is None:
+        st.warning(
+            "Kon de module 'lineup_retrospective' niet laden - controleer of "
+            "lineup_retrospective.py in dezelfde map staat als de andere "
+            f"PadelAnalysis-bestanden. Details: `{_retro_import_error}`."
+        )
+        return
+    try:
+        render_retrospective_tab(profiles)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Kon de nabeschouwing niet tonen: {type(exc).__name__}: {exc}")
 def page_lineup_lab():
     # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: metingen van de VORIGE render
     # wissen. Moet de allereerste regel zijn, vóór elke perf.step().
@@ -710,6 +745,11 @@ def page_lineup_lab():
     elif section == SECTION_SAVED:
         with perf.step("SECTIE Opgeslagen analyses"):
             _render_saved_lineup_analyses(name_lookup_global)
+    elif section == SECTION_RETRO:
+        # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: hangt NIET af van de scout-
+        # keten - werkt rechtstreeks op de al gescrapete eigen matchdata.
+        with perf.step("SECTIE Nabeschouwing"):
+            _render_retrospective_section(profiles)
     # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: het meetpaneel staat bewust
     # HELEMAAL onderaan, zodat het de metingen van de volledige render kan
     # tonen. Zet perf_timing.PERF_ENABLED = False om het uit te schakelen.
