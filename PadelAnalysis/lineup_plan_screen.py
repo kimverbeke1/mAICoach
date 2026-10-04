@@ -187,8 +187,37 @@ in mooi kader!")
 2. "ONZE PLOEG - VOORSTELLEN" IN EEN KADER: de volledige tabel (kop + alle
    rijen) staat nu in st.container(border=True) - zelfde kadersstijl als de
    matchkaarten eronder, i.p.v. kale kolommen zonder omlijning.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 (op verzoek van Kim: "Ik zie ook
+rare fenomenen als ik van speler wil wisselen. soms verdwijnt een speler
+terug automatisch op kies. Dat wil ik nooit. Je mag wel op rood zetten als
+er iets niet klopt.")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de code na te lezen: _slot_box() herstelde een
+opgeslagen keuze die niet meer letterlijk in de (herberekende) optielijst
+voorkwam door te zoeken naar een optie die BEGINT MET de volledige oude
+tekst (inclusief een eventuele " - al bij M<x>"-toevoeging). Die toevoeging
+hangt af van wat er op dat moment in de ANDERE match van dezelfde rotatie
+staat (zie PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04 hierboven) en kan dus
+van render tot render VERSCHIJNEN of VERDWIJNEN, zonder dat de speler zelf
+ergens anders naartoe verhuisde. Verdween de toevoeging (bv. omdat de
+andere match nu een andere speler bevat), dan matchte de oude, LANGERE
+opgeslagen tekst niet meer met de nieuwe, KORTERE optie (geen exacte match,
+en de oude tekst "begint" ook niet met de nieuwe, kortere optie) - de
+functie viel dan terug op "- Kies -" en de speler verdween, hoewel hij nog
+perfect geldig was.
+FIX: zowel de opgeslagen waarde als elke kandidaat-optie worden nu eerst
+ONTDAAN van een eventuele " - al bij M<x>"-toevoeging (_strip_suffix())
+voor ze vergeleken worden. Verdwijnt of verschijnt de toevoeging, dan blijft
+de speler nu gewoon staan - enkel de zichtbare suffix wijzigt mee.
+Is de speler ECHT niet meer beschikbaar (bv. volledig weggeklikt uit de
+tegenstander-selectie, dus zijn basisnaam komt ook na het strippen nergens
+in de optielijst voor), dan wordt het veld nog steeds leeggemaakt - maar
+NOOIT meer stilzwijgend: een rode melding ("X is niet meer beschikbaar -
+kies opnieuw.") verschijnt dan net boven het veld, zoals gevraagd.
 """
 import datetime as _dt
+import re
 import traceback
 
 import streamlit as st
@@ -216,6 +245,18 @@ _PRESETS = [
     ("safe", "Minstens 1 punt", "hoogste kans op winst of gelijk"),
 ]
 _SLOTS = [(r, m, i) for r in range(_N_ROT) for m in range(MATCHES_PER_ROTATION) for i in range(2)]
+# PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 - zie moduledocstring.
+_SUFFIX_RE = re.compile(r" - al bij M\d+$")
+
+
+def _strip_suffix(label: str) -> str:
+    """PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04: verwijdert een eventuele
+    " - al bij M<x>"-toevoeging, zodat de ONDERLIGGENDE spelerskeuze
+    vergeleken kan worden ongeacht of die toevoeging er nu wel/niet bij
+    staat - zie moduledocstring voor de bevestigde root cause."""
+    if not label:
+        return label
+    return _SUFFIX_RE.sub("", label)
 
 
 # ---------------------------------------------------------------- rekenkern
@@ -579,18 +620,27 @@ def _options_for(slot, sel, volgorde, label_of) -> list:
 
 
 def _slot_box(prefix, slot, sel, volgorde, label_of, label_txt):
+    """PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 - zie moduledocstring: een
+    opgeslagen keuze wordt nu vergeleken ZONDER een eventuele " - al bij
+    M<x>"-toevoeging - die toevoeging mag vrij verschijnen/verdwijnen tussen
+    renders zonder de onderliggende spelerskeuze te verliezen. Enkel als de
+    speler ECHT nergens meer in de optielijst voorkomt (ook niet na het
+    strippen van de toevoeging), wordt het veld geleegd - en dan NOOIT
+    stilzwijgend: een rode melding verschijnt erboven."""
     key = f"{prefix}_{slot[0]}{slot[1]}{slot[2]}"
     opties = _options_for(slot, sel, volgorde, label_of)
-    # PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: de opgeslagen keuze draagt
-    # geen " - al bij M<x>"-suffix, maar de optielijst nu soms wel - zoek de
-    # bijpassende, eventueel ge-suffixte optie terug i.p.v. die te verliezen.
     huidige = st.session_state.get(key)
-    if huidige not in opties:
-        match = next((o for o in opties if o == huidige or o.startswith(f"{huidige} - ")), None)
-        st.session_state[key] = match or _GEEN
+    if huidige is not None and huidige != _GEEN and huidige not in opties:
+        basis_huidige = _strip_suffix(huidige)
+        match = next((o for o in opties if _strip_suffix(o) == basis_huidige), None)
+        if match is not None:
+            st.session_state[key] = match
+        else:
+            st.markdown(f":red[{basis_huidige} is niet meer beschikbaar - kies opnieuw.]")
+            st.session_state[key] = _GEEN
     keuze = st.selectbox(label_txt, opties, key=key)
     uid_of = {v: k for k, v in label_of.items()}
-    basis = keuze.split(" - al bij M")[0]
+    basis = _strip_suffix(keuze)
     if keuze != _GEEN:
         sel[slot] = uid_of.get(basis)
     else:

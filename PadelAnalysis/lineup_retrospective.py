@@ -3,7 +3,6 @@ lineup_retrospective.py - Nabeschouwing: per eerder gespeelde ontmoeting de
 voorspelde winkans tegenover de echte uitslag, MET de padelstat-/officiële
 klassementwaarden van TOEN (niet de huidige), plus een kalibratieblok over
 alle gespeelde matchen samen met een instelbare winkansfactor.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 (op verzoek van Kim: "het zou ook
 handig zijn om al gespeelde matchen ook nog te kunnen analyseren maar dan
@@ -109,14 +108,14 @@ te hebben ipv dat ik die manueel moet gaan verschuiven en dan (lang)
 wachten om te zien of het beter is. Gewoon bvb met 1 knop een berekening
 starten die een voorstel doet voor aanpassing die je dan kan bevestigen?")
 --------------------------------------------------------------------------
-find_best_scale(raw_rows) doorzoekt een reeks kandidaat-factoren (50 t.e.m.
-400, stappen van 5) en berekent voor ELK de Brier-score - dankzij de
-ontkoppeling hierboven is dit PUUR rekenwerk op de al opgehaalde ruwe data,
-dus snel genoeg voor een knop-klik i.p.v. een aparte achtergrondtaak. De UI
-toont het voorstel (nieuwe factor + Brier-score, naast de huidige) met een
-aparte "Toepassen"-knop - de schuifregelaar verspringt dus nooit vanzelf,
-Kim bevestigt expliciet voor de nieuwe waarde ingesteld wordt. Dit wijzigt,
-net als de schuifregelaar zelf, ENKEL deze weergave - niet de globale
+find_best_scale(raw_rows) doorzoekt een reeks kandidaat-factoren en
+berekent voor ELK de Brier-score - dankzij de ontkoppeling hierboven is dit
+PUUR rekenwerk op de al opgehaalde ruwe data, dus snel genoeg voor een
+knop-klik i.p.v. een aparte achtergrondtaak. De UI toont het voorstel
+(nieuwe factor + Brier-score, naast de huidige) met een aparte "Toepassen"-
+knop - de schuifregelaar verspringt dus nooit vanzelf, Kim bevestigt
+expliciet voor de nieuwe waarde ingesteld wordt. Dit wijzigt, net als de
+schuifregelaar zelf, ENKEL deze weergave - niet de globale
 DEFAULT_WIN_PROBABILITY_SCALE.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04 (op verzoek van Kim,
@@ -255,6 +254,64 @@ FIX: de functie geeft nu ALTIJD een dict terug (nooit None) met een
 "reason"-veld ("too_few_players" / "no_valid_combinations" / None bij
 succes) en "n_players" - de UI toont per geval de juiste, specifieke
 tekst i.p.v. 1 vaste aanname.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 (op verzoek van Kim, met
+meting: "Totaal deze render: 28.02s [...] Zwaarste eigen tijd: SECTIE
+Nabeschouwing - 5.19s" en een export met 99x "Firestore: get_padelstat_
+rating" (~17s) + 18x "get_official_klassement_via_padelstat" + 10x
+"get_player" - allemaal na elkaar, zoals bevestigd door Kim's herhaalde
+metingen)
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de code zelf na te lezen (geen gok): ondanks de
+toelichting bij PADEL_ANALYSIS_RETRO_PERF_2026-10-04 hierboven ("EEN
+fb.get_padelstat_rating() per UNIEKE speler") bleef _load_padelstat_
+histories() dit in een GEWONE, SEQUENTIELE Python-for-lus doen:
+    for pid in player_ids:
+        data = fb.get_padelstat_rating(pid) or {}
+Met tot ~100 unieke spelers (alle tegenstanders over alle seizoenen heen -
+_collect_relevant_player_ids() verzamelt immers OOK alle tegenstander-id's,
+niet enkel het eigen gekozen peloton) en ~0.15-0.19s per synchrone
+Firestore-read, gaf dat exact de gemeten ~13-17s "eigen tijd" - en zonder
+een enkele onderliggende perf_timing-stap zichtbaar, want dit bestand
+importeerde perf_timing tot nu toe NIET.
+FIX, twee delen:
+  1. _load_padelstat_histories() roept nu EERST fb._fs_prefetch(("get_
+     padelstat_rating",), player_ids) aan - DEZELFDE, reeds overal elders
+     in de app gebruikte parallelle-voorophaal-infrastructuur (zie
+     dashboard_common.py/PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29 en
+     page_lineup_lab.py's prefetch_own_player_reads). Dat haalt alle
+     ~100 reads in parallelle threads op en vult de gedeelde Firestore-
+     leescache; de for-lus erna leest dan uit die warme cache (vrijwel 0s
+     per iteratie) i.p.v. elk opnieuw een synchrone Firestore-aanroep te
+     doen. Is fb._fs_prefetch om een of andere reden niet beschikbaar
+     (bv. standalone gebruik buiten de volledige app), dan valt de functie
+     terug op een LOKALE ThreadPoolExecutor rond fb.get_padelstat_rating -
+     functioneel identiek resultaat, enkel zonder de gedeelde cache.
+  2. perf_timing wordt nu (optioneel, defensief) geïmporteerd en rond elke
+     potentieel zware stap in render_retrospective_tab() gelegd (docs
+     ophalen, encounter-index bouwen, klassement-terugval, padelstat-
+     historiek laden, ruwe data verzamelen, per-ontmoeting voorspelling,
+     "beste alternatief"). Zo toont het laadtijd-paneel voortaan WEL een
+     opsplitsing onder "SECTIE Nabeschouwing" i.p.v. 1 ondoorzichtig blok -
+     nodig om een volgend prestatieprobleem in deze sectie meteen te
+     kunnen lokaliseren zonder opnieuw te moeten gokken.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04 (op verzoek van Kim: "het
+lijkt of de factor 400 die nu maximum is te klein is voor de berekening van
+de Brier score [...] boven de 50 redelijk goed maar kan ook nog iets beter"
+- met een screenshot waarin "Zoek beste winkansfactor" exact 400 (de
+bovengrens van het toen doorzochte bereik) als beste voorstelde)
+--------------------------------------------------------------------------
+ROOT CAUSE: _SCALE_SEARCH_RANGE stopte hard bij 400. Een gevonden "beste"
+factor die toevallig exact op de RAND van het doorzochte bereik ligt, is
+geen bevestigd optimum - de werkelijke beste factor kan net zo goed
+daarboven liggen; het doorzoeken stopte simpelweg te vroeg om dat te weten.
+FIX: het bereik is verruimd naar 50-800 (nog steeds pure in-memory
+berekening, dus nog steeds vrijwel instant). find_best_scale() geeft er
+bovendien een "at_upper_edge"-vlag bij terug zodra het gevonden optimum
+exact op de bovengrens van het doorzochte bereik ligt; de UI toont dan een
+expliciete waarschuwing i.p.v. het voorstel als een bevestigd optimum te
+presenteren.
 """
 import math
 import re
@@ -262,13 +319,27 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 
 import streamlit as st
+
 import lineup_lab as ll
 import firebase_service as fb
+
+# PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 - zie moduledocstring.
+try:
+    import perf_timing as perf
+except Exception:  # noqa: BLE001  pragma: no cover
+    class _PerfNoop:
+        @staticmethod
+        def step(_label):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    perf = _PerfNoop()
 
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _DEFAULT_SCALE = ll.DEFAULT_WIN_PROBABILITY_SCALE
 _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
-_SCALE_SEARCH_RANGE = list(range(50, 401, 5))  # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04
+# PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04: verruimd van 50-400 naar 50-800.
+_SCALE_SEARCH_RANGE = list(range(50, 801, 5))
 
 
 # --------------------------------------------------------------- datums
@@ -438,6 +509,41 @@ def _collect_relevant_player_ids(index: dict) -> set:
     return ids
 
 
+def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
+    """PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 - zie moduledocstring.
+    Haalt alle padelstat-ratings voor `player_ids` PARALLEL op, zodat de
+    gewone (sequentiele) for-lus in _load_padelstat_histories() erna uit een
+    warme cache leest i.p.v. elke keer een synchrone Firestore-read te doen.
+    Faalt dit (om het even welke reden), dan doet de for-lus erna het
+    gewoon zelf, sequentieel - functioneel identiek resultaat, enkel
+    trager. Deze functie mag dus NOOIT een uitzondering laten ontsnappen."""
+    if not player_ids:
+        return
+    prefetch = getattr(fb, "_fs_prefetch", None)
+    if callable(prefetch):
+        try:
+            prefetch(("get_padelstat_rating",), list(player_ids))
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    # Terugval: geen gedeelde prefetch-infrastructuur beschikbaar - lokale
+    # parallelle reads, zonder de gedeelde cache te vullen (elke aanroeper
+    # betaalt dan zelf 1x, maar WEL parallel i.p.v. 1-voor-1).
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _warm(pid):
+            try:
+                fb.get_padelstat_rating(pid)
+            except Exception:  # noqa: BLE001
+                pass
+
+        with ThreadPoolExecutor(max_workers=min(16, len(player_ids))) as ex:
+            list(ex.map(_warm, player_ids))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_padelstat_histories(player_ids: tuple) -> Dict[str, dict]:
     """PADEL_ANALYSIS_RETRO_PERF_2026-10-04 - zie moduledocstring: EEN
@@ -448,7 +554,11 @@ def _load_padelstat_histories(player_ids: tuple) -> Dict[str, dict]:
     speler een dict {"history": [...], "flat_rating", "flat_fetched_at"}
     terug i.p.v. enkel de "history"-lijst - zie moduledocstring voor
     waarom het vlakke "rating"-veld (spelers nog niet ge-migreerd naar
-    de historiek) anders stil verloren ging."""
+    de historiek) anders stil verloren ging.
+    PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: haalt eerst ALLES
+    parallel voor (_parallel_prefetch_padelstat) - zie moduledocstring voor
+    de bevestigde root cause (99 sequentiele reads, ~17s) en de fix."""
+    _parallel_prefetch_padelstat(player_ids)
     out: Dict[str, dict] = {}
     for pid in player_ids:
         try:
@@ -743,9 +853,13 @@ def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
 def find_best_scale(raw_rows: list, scale_range=None) -> dict:
     """PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
     Berekent de Brier-score voor elke kandidaat-factor in `scale_range`,
-    PUUR in-memory (geen Firestore) - geeft {"best": {"scale", "brier"},
-    "curve": [{"scale", "brier", "n"}, ...]} terug. "best" is None als er
-    nergens genoeg data is om een Brier-score te berekenen."""
+    PUUR in-memory (geen Firestore) - geeft {"best": {"scale", "brier",
+    "at_upper_edge"}, "curve": [{"scale", "brier", "n"}, ...]} terug. "best"
+    is None als er nergens genoeg data is om een Brier-score te berekenen.
+    PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04: "at_upper_edge" is
+    True zodra het gevonden optimum exact op de bovengrens van het
+    doorzochte bereik ligt - dan is het GEEN bevestigd optimum, enkel het
+    beste binnen de grenzen die tot nu toe bekeken zijn."""
     scale_range = scale_range or _SCALE_SEARCH_RANGE
     curve = []
     best = None
@@ -756,6 +870,8 @@ def find_best_scale(raw_rows: list, scale_range=None) -> dict:
         curve.append({"scale": s, "brier": stats["brier"], "n": stats["n"]})
         if best is None or stats["brier"] < best["brier"]:
             best = {"scale": s, "brier": stats["brier"]}
+    if best is not None:
+        best["at_upper_edge"] = (best["scale"] == max(scale_range))
     return {"best": best, "curve": curve}
 
 
@@ -876,7 +992,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: toont nu standaard ook de
     matchen van gedetecteerde teamgenoten (aanpasbaar via multiselect) -
     zie moduledocstring voor waarom dit de "Beste alternatief altijd
-    leeg"-klacht oplost en meer kalibratiedata oplevert."""
+    leeg"-klacht oplost en meer kalibratiedata oplevert.
+    PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: perf.step()-meetpunten
+    toegevoegd rond elke potentieel zware stap - zie moduledocstring."""
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
     sel_player_id = str(sel_player_id)
     name_lookup = {str(p.get("player_id")): (p.get("display_name") or str(p.get("player_id"))) for p in profiles}
@@ -885,8 +1003,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     # PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: eerst een goedkope lookup van
     # ENKEL sel_player_id om teamgenoten te detecteren (voorstel voor de
     # multiselect hieronder) - zie moduledocstring.
-    with st.spinner(f"Matchen van {sel_naam} ophalen..."):
-        sel_docs = ll.get_docs_for_players([sel_player_id])
+    with perf.step("retro: eigen matchen ophalen (teamgenoten detecteren)"):
+        with st.spinner(f"Matchen van {sel_naam} ophalen..."):
+            sel_docs = ll.get_docs_for_players([sel_player_id])
     teammates = _detect_teammates(sel_docs, sel_player_id)
     teammate_options = [p for p in profiles if str(p.get("player_id")) in teammates]
     other_options = [p for p in profiles if str(p.get("player_id")) not in teammates
@@ -912,14 +1031,15 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
              "een match komt enkel mee als een van de hier gekozen spelers hem ECHT speelde.",
     )
     gekozen_ids = {label_to_id[lbl] for lbl in gekozen_labels if lbl in label_to_id} | {sel_player_id}
-
     if gekozen_ids == {sel_player_id}:
         docs = sel_docs
     else:
-        with st.spinner("Matchen van de gekozen spelers ophalen..."):
-            docs = ll.get_docs_for_players(sorted(gekozen_ids))
+        with perf.step("retro: matchen van gekozen spelers ophalen"):
+            with st.spinner("Matchen van de gekozen spelers ophalen..."):
+                docs = ll.get_docs_for_players(sorted(gekozen_ids))
 
-    index = build_retro_encounter_index(docs, allowed_player_ids=gekozen_ids)
+    with perf.step("retro: encounter-index bouwen"):
+        index = build_retro_encounter_index(docs, allowed_player_ids=gekozen_ids)
     encounters = list_retro_encounters(index)
     if not encounters:
         st.info(f"Nog geen gespeelde interclub-ontmoetingen gevonden voor {sel_naam}.")
@@ -933,23 +1053,28 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             if m.get("partner_user_id"):
                 own_side_ids.add(str(m["partner_user_id"]))
     current_official_ranks = {}
-    try:
-        from lineup_scout import _build_own_official_ranks_strict
-        current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
-    except Exception:  # noqa: BLE001
-        pass
+    with perf.step("retro: officieel klassement terugval ophalen"):
+        try:
+            from lineup_scout import _build_own_official_ranks_strict
+            current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
+        except Exception:  # noqa: BLE001
+            pass
 
     # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler,
     # 5 minuten gecached - geen Firestore-reads meer per bord/match hierna.
+    # PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: die batch-read gebeurt nu
+    # zelf ook parallel (zie _load_padelstat_histories) i.p.v. sequentieel.
     player_ids = tuple(sorted(_collect_relevant_player_ids(index)))
-    ratings_cache = _load_padelstat_histories(player_ids)
+    with perf.step(f"retro: padelstat-historiek laden ({len(player_ids)} spelers)"):
+        ratings_cache = _load_padelstat_histories(player_ids)
 
     # Schaal-ONAFHANKELIJKE ruwe data - 1x verzameld per sessie (hergebruikt bij
     # schuifregelaar-bewegingen en de "beste factor zoeken"-knop hieronder).
     raw_sig = (tuple(sorted(gekozen_ids)), player_ids)
     raw_key = f"retro_raw_{sel_player_id}"
     if st.session_state.get(raw_key + "_sig") != raw_sig:
-        st.session_state[raw_key] = gather_raw_match_data(index, current_official_ranks, ratings_cache)
+        with perf.step("retro: ruwe matchdata verzamelen (gather_raw_match_data)"):
+            st.session_state[raw_key] = gather_raw_match_data(index, current_official_ranks, ratings_cache)
         st.session_state[raw_key + "_sig"] = raw_sig
     raw_rows = st.session_state[raw_key]
 
@@ -961,7 +1086,8 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     gekozen_key = key_by_label[gekozen_label]
     boards = reconstruct_boards_with_rankings(index[gekozen_key])
     scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
-    pred = predict_encounter(boards, current_official_ranks, ratings_cache, scale=scale)
+    with perf.step("retro: ontmoeting voorspellen (predict_encounter)"):
+        pred = predict_encounter(boards, current_official_ranks, ratings_cache, scale=scale)
     if pred["snapshot_used"]:
         st.success("Een eerdere momentopname van deze ontmoeting werd gevonden - de waarden van toen zijn exact.")
     st.markdown("#### Per match: voorspeld tegenover echt")
@@ -1004,8 +1130,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
 
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
-    with st.spinner("Alternatieven doorrekenen..."):
-        alt = best_alternative_for_encounter(boards, docs, current_official_ranks, ratings_cache, scale=scale)
+    with perf.step("retro: beste alternatief doorrekenen"):
+        with st.spinner("Alternatieven doorrekenen..."):
+            alt = best_alternative_for_encounter(boards, docs, current_official_ranks, ratings_cache, scale=scale)
     if alt.get("reason") == "too_few_players":
         st.caption(
             f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige "
@@ -1050,15 +1177,16 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     with c_slider:
         scale = st.slider(
             "Winkansfactor (hoe gevoelig de winkans reageert op het ratingverschil)",
-            min_value=50, max_value=400, value=int(scale), step=5, key="retro_scale",
+            min_value=50, max_value=800, value=int(scale), step=5, key="retro_scale",
             help=f"Huidige app-standaard: {_DEFAULT_SCALE:.0f}. Een KLEINERE factor maakt elk ratingverschil "
                  "impactvoller (steilere curve); een GROTERE factor maakt de winkans voorzichtiger "
                  "(vlakkere curve). Dit wijzigt ENKEL de berekening hieronder, niet de rest van de app.",
         )
     with c_curve:
         st.caption(f"Bij 100 punten verschil: {_pct(ll.estimate_win_probability(0, -100, scale=scale))} winkans.")
-    scored = score_raw_at_scale(raw_rows, scale)
-    stats = calibration_stats(scored)
+    with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
+        scored = score_raw_at_scale(raw_rows, scale)
+        stats = calibration_stats(scored)
     if not stats:
         st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
@@ -1091,6 +1219,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "systematisch verschil (bv. bij lage kansklassen te hoog, bij hoge te laag) wijst op een "
             "factor die scherper of voorzichtiger zou moeten staan."
         )
+
     # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
     st.divider()
     st.markdown("##### Beste winkansfactor automatisch zoeken")
@@ -1100,13 +1229,14 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         "bevestigt zelf voor het wordt toegepast; de schuifregelaar springt nooit vanzelf."
     )
     if st.button("Zoek beste winkansfactor", key="retro_find_best_scale"):
-        with st.spinner("Factoren doorrekenen..."):
-            st.session_state["retro_best_scale_result"] = find_best_scale(raw_rows)
+        with perf.step("retro: beste winkansfactor zoeken (find_best_scale)"):
+            with st.spinner("Factoren doorrekenen..."):
+                st.session_state["retro_best_scale_result"] = find_best_scale(raw_rows)
     result = st.session_state.get("retro_best_scale_result")
     if result and result.get("best"):
         best = result["best"]
         if best["scale"] == int(scale):
-            st.success(f"De huidige factor ({scale:.0f}) is al de beste in het doorzochte bereik (50-400, stap 5) - Brier {best['brier']:.3f}.")
+            st.success(f"De huidige factor ({scale:.0f}) is al de beste in het doorzochte bereik ({min(_SCALE_SEARCH_RANGE)}-{max(_SCALE_SEARCH_RANGE)}, stap 5) - Brier {best['brier']:.3f}.")
         else:
             richting = "gevoeliger voor het ratingverschil (kleiner getal)" if best["scale"] < scale else "voorzichtiger (groter getal)"
             st.info(
@@ -1119,6 +1249,15 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.button(
                 f"Toepassen: zet factor op {best['scale']}", key="retro_apply_best_scale",
                 on_click=_apply_best_scale_callback, args=(best["scale"],),
+            )
+        # PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04 - zie moduledocstring:
+        # een optimum exact op de rand van het doorzochte bereik is GEEN bevestigd
+        # optimum - waarschuw expliciet i.p.v. het als eindresultaat te presenteren.
+        if best.get("at_upper_edge"):
+            st.warning(
+                f"Dit is de BOVENGRENS van het doorzochte bereik (tot {max(_SCALE_SEARCH_RANGE)}) - de "
+                "werkelijke beste factor kan nog hoger liggen. Dit is dus geen bevestigd optimum, enkel "
+                "het beste binnen wat tot nu toe bekeken is."
             )
     elif result is not None:
         st.warning("Kon geen enkele factor beoordelen - onvoldoende matchen met een gekende uitslag.")
