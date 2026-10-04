@@ -8,68 +8,89 @@ alle gespeelde matchen samen met een instelbare winkansfactor.
 volledige toelichting bij: brondata-prioriteit padelstat/klassement,
 parallelle Firestore-batches, snapshot-cache, persistente winkansfactor,
 eindresultaat-vergelijking, "beste alternatief", individuele-vorm-index,
-automatische teamgenoten-resolutie, sterkte-gecorrigeerd vorm-model.)
+automatische teamgenoten-resolutie, sterkte-gecorrigeerd vorm-model,
+vereenvoudigde kalibratie (enkel padelstat, geen schuifregelaar).)
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_CALIBRATION_SIMPLIFY_2026-10-05 (op verzoek van Kim,
-na het testen van de vorige versie: "oei. dat is minder. ik wil wel de
-snelheidsfix en geen vergelijkingssectie. enkel padelstat gebruiken")
+PADEL_ANALYSIS_RETRO_PREFETCH_SCOPE_FIX_2026-10-05 (op verzoek van Kim, met
+meting: "dat laadprobleem is helemaal terug [...] Firestore: parallel
+voorophalen (2003 reads) - 27.27s")
 --------------------------------------------------------------------------
-De vorige levering toonde 3 tellingen ("Bruikbare matchen (totaal)" / "...
-met padelstat voor alle 4" / "... met min. 1 klassement-terugval") plus een
-2-koloms "Vergelijking: alle matchen tegenover enkel-padelstat-matchen"-
-sectie en een AAN/UIT-schakelaar om te kiezen welke subset de kalibratie
-gebruikt. Kim vond dit te veel ("dat is minder") en wil simpelweg: de
-kalibratie gebruikt ALTIJD enkel de matchen met padelstat voor alle 4
-spelers - geen keuze, geen vergelijking, geen tellingen-blok.
-FIX: de 3-tellingen-metrics, de volledige vergelijkingssectie (c_cmp1/
-c_cmp2 + de "klein verschil"/"scoort beter"/"scoort slechter"-captions) en
-de "Gebruik hieronder enkel de volledige-padelstat-matchen"-checkbox zijn
-VERWIJDERD. De kalibratie (schuifloos: zie PADEL_ANALYSIS_RETRO_NO_SLIDER_
-2026-10-05 hieronder) werkt nu ONVOORWAARDELIJK op `full_padelstat_rows`
-(gather_all_valid_match_data() berekent deze subset nog steeds intern,
-enkel de UI errond is vereenvoudigd). Is die subset leeg (nog geen enkele
-match met padelstat voor alle 4 spelers), dan toont de sectie een duidelijke
-melding i.p.v. een lege of verwarrende tabel.
-De automatische teamgenoten-resolutie (PADEL_ANALYSIS_RETRO_FULL_
-ENCOUNTER_2026-10-05, "snelheid is opgelost" - Kim's eigen bevestiging)
-blijft ONGEWIJZIGD - dat is de snelheidsfix die Kim expliciet wil behouden.
+ROOT CAUSE, bevestigd in de meegestuurde CSV-export: gather_all_valid_
+match_data() riep `prefetch_own_player_reads(all_ids)` EN
+`_build_own_official_ranks_strict(all_ids)` aan met `all_ids` = ALLE
+profielen in de HELE clubdatabase (bevestigd: 2003 reads = ~667 profielen
+x 3 leestypes uit lineup_scout._OWN_PLAYER_READS) - in plaats van enkel de
+`relevant_ids` (~99 spelers die ECHT in interclub-matchen voorkomen), die
+een paar regels verderop WEL al correct gebruikt wordt voor de padelstat-
+historiek. Deze "all_ids-i.p.v.-relevant_ids"-fout zat er al sinds de
+EERSTE versie van deze functie (PADEL_ANALYSIS_RETRO_ALL_VALID_DATA_
+2026-10-04) en is nooit opgemerkt omdat eerdere metingen de CSV niet
+gedetailleerd genoeg doorlichtten.
+FIX: de volgorde is omgedraaid - EERST wordt de encounter-index gebouwd
+(waarvoor `ll.get_docs_for_players(all_ids)` nog steeds nodig is, dat is
+een andere, al goedkope batch-read), DAARUIT wordt `relevant_ids` bepaald,
+en PAS DAN gebeurt de prefetch/klassement-opbouw - nu met `relevant_ids`
+i.p.v. `all_ids`. Dat brengt de 2003 reads terug naar ongeveer hetzelfde
+aantal als de padelstat-historiek-stap (~99 spelers x 3 = ~300), een factor
+~7 minder.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_FULL_ENCOUNTER_2026-10-05 (op verzoek van Kim: "ik zie
-bij de nabeschouwing terug van mijn ontmoeting dat enkel mijn matchen
-getoond worden en niet de matchen van mijn ploegmakkers waar ik niet aan
-meegedaan heb. Ik wil dus wel alle 4 die matchen zien van de ontmoeting. Je
-kan dan ook echt eindresultaat vergelijken met voorspeld eindresultaat")
+PADEL_ANALYSIS_RETRO_OPPONENT_LEAK_FIX_2026-10-05 (op verzoek van Kim, met
+screenshot: "ik sta daar bij Tim Van Rossom. Dat is een speler van de
+tegenpartij" + "ik zie voorspeld bvb 94% en 71% bij Tim van Rossom. Maar ik
+veronderstel dat dat in het perspectief van de thuisploeg is? Ik zou het
+liever in mijn perspectief zien" + het onzinnige "Beste alternatief" met
+Kim/Tim- en Tim/Boerjan-koppels)
 --------------------------------------------------------------------------
-_resolve_encounter_teammates(sel_player_id, date, encounter, profiles) zoekt,
-ENKEL voor de GEKOZEN ontmoeting (niet voor alle ontmoetingen - dat zou de
-performance-bottleneck van PADEL_ANALYSIS_RETRO_PERF_2026-10-04 terugbrengen),
-AUTOMATISCH welke andere profielen een interclub-match hebben op DEZELFDE
-(match_date, encounter)-sleutel, en voegt enkel HUN matchdocumenten toe aan
-`docs` - geen handmatige keuzelijst meer nodig.
+ROOT CAUSE, bevestigd via het screenshot: _resolve_encounter_teammates()
+(PADEL_ANALYSIS_RETRO_FULL_ENCOUNTER_2026-10-05) zoekt ALLE profielen met
+een interclub-matchrecord op DEZELFDE (match_date, encounter)-sleutel, MAAR
+controleert niet van WELK TEAM ze zijn. Als een TEGENSTANDER (hier: Tim Van
+Rossom) OOK een eigen profiel heeft in de database (bv. omdat hij ooit voor
+een andere ploeg van dezelfde club speelde), dan heeft HIJ voor diezelfde
+fysieke ontmoeting een EIGEN matchrecord met EXACT dezelfde (datum,
+ontmoeting)-sleutel - maar vanuit ZIJN perspectief is ZIJN team "onze kant"
+en is Kim's team "de tegenstander". _resolve_encounter_teammates() pikte
+dit matchrecord dus ten onrechte op als een "teamgenoot" van Kim.
+GEVOLG, nu volledig verklaard (1 root cause, 3 zichtbare symptomen):
+  1. Boards met Tim op "onze kant" (het eerste gemelde probleem).
+  2. "Voorspeld 94%/71%" voelde aan als "verkeerd perspectief" - in
+     werkelijkheid werd die ene rij berekend vanuit TIM'S kant als "wij"
+     (zijn matchrecord had HEM als partner_user_id en Kim's spelers als
+     opp1/opp2) - geen apart perspectief-probleem, hetzelfde lek.
+  3. "Beste alternatief" kreeg Tim mee in de lijst van "onze spelers" en
+     stelde dus onzinnige koppels voor (Kim/Tim, Tim/Boerjan, ...).
+FIX: VOOR enige teamgenoot wordt toegevoegd, worden EERST Kim's EIGEN
+bord(en) gereconstrueerd (met enkel zijn eigen matchdocument). Daaruit
+wordt de set "gekende tegenstanders" opgebouwd (alle opp1_user_id/
+opp2_user_id). _resolve_encounter_teammates() aanvaardt een kandidaat NIET
+meer als diens EIGEN speler-id al in die gekende-tegenstanders-set zit -
+zo wordt Tim (die al als tegenstander in Kim's eigen bord voorkomt)
+expliciet geweigerd, ongeacht of hij toevallig ook een eigen profiel heeft.
+Legitieme teamgenoten (zoals Nico, die NOOIT als Kim's tegenstander
+voorkwam) blijven gewoon aanvaard.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_NO_SLIDER_2026-10-05 (op verzoek van Kim: "die slider
-met die winkansfactor mag weg. Bedoeling is dat je gewoon via de knop
-werkt")
+PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05 (op verzoek van Kim: "bij
+de match van mezelf en Nico vind ik 90% wel heel hoog. Ga daar eens in
+detail op in")
 --------------------------------------------------------------------------
-st.slider("Winkansfactor...") is VERWIJDERD. De huidige factor (en bias)
-staat nu als vaste tekst; de ENIGE manier om deze te wijzigen is nog de
-bestaande "Zoek beste model (schaal + bias + vorm)"-knop + "Toepassen".
---------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_FORM_MODEL_2026-10-05 (op verzoek van Kim: "Hou je
-eigenlijk ook rekening bij die winpercentages van iedereen tegen wie ze
-gewonnen hebben? [...] Ik vraag me af of die info het model niet nog beter
-kan maken?")
---------------------------------------------------------------------------
-compute_individual_form_index() toont, per speler, ZOWEL zijn ruwe winrate
-ALS het gemiddelde ratingniveau van wie hij versloeg/van wie hij verloor
-(diagnose). compute_form_adjustment() gaat verder: het gemiddelde VERSCHIL
-tussen "verwachte kans volgens rating" en "werkelijk gewonnen" over al zijn
-matchen - een speler die vooral van zwakkeren wint (zijn rating voorspelde
-dat al) scoort hier dicht bij 0; een speler die STRUCTUREEL beter speelt
-dan zijn rating scoort hier duidelijk positief. find_best_scale_and_bias()
-doorzoekt een 3e, optionele parameter (form_weight) - form_weight=0 zit
-altijd in de zoekruimte, dus dit kan nooit slechter zijn dan het 2-
-parameter-model.
+ROOT CAUSE, bevestigd door de code na te lezen: "Per match" en "Beste
+alternatief" (predict_board/predict_encounter/best_alternative_for_
+encounter) gebruikten ENKEL `scale` (ll.estimate_win_probability), terwijl
+de kalibratie-sectie eronder `scale` + `bias` + `form_weight` gebruikt
+(score_raw_at_scale). Had Kim ooit "Zoek beste model" toegepast met een
+niet-nul bias/vorm-gewicht, dan week de per-match-voorspelling STILZWIJGEND
+af van wat het "beste model" eigenlijk zou voorspellen - 2 verschillende
+modellen naast elkaar, zonder dat dat zichtbaar was.
+FIX: predict_board()/predict_encounter()/best_alternative_for_encounter()
+accepteren nu optioneel `bias`/`form_weight`/`form_adjustment` en gebruiken
+- indien meegegeven - DEZELFDE _estimate_win_probability_with_bias()-
+formule als de kalibratie. render_retrospective_tab() geeft nu overal het
+VOLLEDIGE, actief ingestelde model door (scale+bias+form_weight, met
+form_adjustment berekend over all_data - dezelfde data als de kalibratie
+gebruikt). Hierdoor voorspellen "Per match", "Beste alternatief" en
+"Kalibratie" voortaan ALTIJD hetzelfde, consistente model. Staat bias/
+form_weight op 0 (de standaardsituatie, nooit een "beste model" toegepast),
+dan is dit gedrag IDENTIEK aan voorheen (enkel scale) - geen regressie.
 """
 import datetime as _dt
 import math
@@ -194,16 +215,37 @@ def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
     return list(seen.values())
 
 
-# PADEL_ANALYSIS_RETRO_FULL_ENCOUNTER_2026-10-05 - zie moduledocstring.
+# PADEL_ANALYSIS_RETRO_OPPONENT_LEAK_FIX_2026-10-05 - zie moduledocstring.
+def _known_opponent_ids(boards: list) -> set:
+    """Verzamelt alle tegenstander-speler-id's uit een lijst borden (zoals
+    teruggegeven door reconstruct_boards_with_rankings())."""
+    out = set()
+    for b in boards:
+        for uid in (b.get("opp1_user_id"), b.get("opp2_user_id")):
+            if uid:
+                out.add(str(uid))
+    return out
+
+
 def _resolve_encounter_teammates(
-    sel_player_id: str, encounter_key: tuple, profiles: list, max_candidates: int = 200,
+    sel_player_id: str, encounter_key: tuple, profiles: list,
+    exclude_ids: Optional[set] = None, max_candidates: int = 200,
 ) -> Dict[str, dict]:
     """Zoekt, UITSLUITEND voor de ENE ontmoeting `encounter_key` (match_date,
     encounter), welke andere profielen een interclub-matchrecord hebben op
-    DIEZELFDE sleutel, en geeft hun VOLLEDIGE matchdocument terug."""
+    DIEZELFDE sleutel, en geeft hun VOLLEDIGE matchdocument terug.
+    PADEL_ANALYSIS_RETRO_OPPONENT_LEAK_FIX_2026-10-05: `exclude_ids` (zie
+    _known_opponent_ids()) sluit kandidaten uit die REEDS bekend zijn als
+    TEGENSTANDER van sel_player_id in deze ontmoeting - zonder deze check
+    zou een tegenstander die toevallig ook een eigen profiel heeft (bv.
+    omdat hij voor een andere ploeg speelde) ten onrechte als "teamgenoot"
+    aanvaard worden, met zijn EIGEN kant van de ontmoeting als "onze kant"."""
+    exclude_ids = {str(x) for x in (exclude_ids or set())}
     other_ids = sorted({
         str(p.get("player_id")) for p in profiles
-        if p.get("player_id") and str(p.get("player_id")) != str(sel_player_id)
+        if p.get("player_id")
+        and str(p.get("player_id")) != str(sel_player_id)
+        and str(p.get("player_id")) not in exclude_ids
     })[:max_candidates]
     if not other_ids:
         return {}
@@ -378,10 +420,38 @@ def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
     )
 
 
+# PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05 - zie moduledocstring.
+def _effective_win_probability(
+    our_avg, their_avg, our_ids, their_ids, scale: float, bias: float = 0.0,
+    form_weight: float = 0.0, form_adjustment: Optional[Dict[str, dict]] = None,
+) -> Optional[float]:
+    """EEN enkele, gedeelde formule - gebruikt door ZOWEL predict_board()
+    (per match) ALS score_raw_at_scale() (kalibratie), zodat beide ALTIJD
+    hetzelfde model gebruiken. Zonder bias/form_weight is dit IDENTIEK aan
+    ll.estimate_win_probability() - geen regressie bij scale-only gebruik."""
+    if our_avg is None or their_avg is None:
+        return None
+    effective_bias = bias
+    if form_weight and form_adjustment:
+        our_res = [form_adjustment[str(p)]["avg_residual"] for p in (our_ids or ()) if p and str(p) in form_adjustment]
+        their_res = [form_adjustment[str(p)]["avg_residual"] for p in (their_ids or ()) if p and str(p) in form_adjustment]
+        if our_res or their_res:
+            our_m = sum(our_res) / len(our_res) if our_res else 0.0
+            their_m = sum(their_res) / len(their_res) if their_res else 0.0
+            effective_bias = bias + (our_m - their_m) * scale * form_weight
+    if effective_bias:
+        return _estimate_win_probability_with_bias(our_avg, their_avg, scale=scale, bias=effective_bias)
+    return ll.estimate_win_probability(our_avg, their_avg, scale=scale)
+
+
 def predict_board(
     board: dict, current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, snapshot: Optional[dict] = None,
+    bias: float = 0.0, form_weight: float = 0.0, form_adjustment: Optional[Dict[str, dict]] = None,
 ) -> dict:
+    """PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05: `bias`/`form_weight`/
+    `form_adjustment` zijn OPTIONEEL - standaard 0.0/None, dus ONGEWIJZIGD
+    gedrag tenzij expliciet meegegeven (zie render_retrospective_tab())."""
     date_text = board.get("match_date")
     p1, p2 = tuple(board["pair"])
     snap_own = (snapshot or {}).get("own_players") or {}
@@ -395,7 +465,10 @@ def predict_board(
     their_known = [v for v, _ in their_vals if v is not None]
     our_avg = sum(our_known) / len(our_known) if our_known else None
     their_avg = sum(their_known) / len(their_known) if their_known else None
-    wp = ll.estimate_win_probability(our_avg, their_avg, scale=scale)
+    wp = _effective_win_probability(
+        our_avg, their_avg, (p1, p2), (board.get("opp1_user_id"), board.get("opp2_user_id")),
+        scale=scale, bias=bias, form_weight=form_weight, form_adjustment=form_adjustment,
+    )
     return {
         "pair": (p1, p2), "our_avg": our_avg, "their_avg": their_avg,
         "win_probability": wp, "risk_note": ll.risk_note_for_probability(wp),
@@ -410,12 +483,19 @@ def predict_board(
 def predict_encounter(
     boards: list, current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, use_snapshot: bool = True,
+    bias: float = 0.0, form_weight: float = 0.0, form_adjustment: Optional[Dict[str, dict]] = None,
 ) -> dict:
     snapshot = None
     if use_snapshot and boards:
         opp_ids = {b.get("opp1_user_id") for b in boards} | {b.get("opp2_user_id") for b in boards}
         snapshot = _find_snapshot_for(boards[0].get("match_date"), opp_ids)
-    predictions = [predict_board(b, current_official_ranks, ratings_cache, scale=scale, snapshot=snapshot) for b in boards]
+    predictions = [
+        predict_board(
+            b, current_official_ranks, ratings_cache, scale=scale, snapshot=snapshot,
+            bias=bias, form_weight=form_weight, form_adjustment=form_adjustment,
+        )
+        for b in boards
+    ]
     return {"boards": predictions, "snapshot_used": snapshot is not None}
 
 
@@ -583,8 +663,11 @@ def compute_form_adjustment(raw_rows: list, scale: float, bias: float = 0.0) -> 
 def gather_all_valid_match_data(profiles: list) -> dict:
     """Bouwt de SCHAAL-ONAFHANKELIJKE ruwe matchdata over ALLE profielen in
     de database. `full_padelstat_rows` is de subset waarvoor de kalibratie
-    hieronder ONVOORWAARDELIJK gebruikt wordt - zie PADEL_ANALYSIS_RETRO_
-    CALIBRATION_SIMPLIFY_2026-10-05."""
+    ONVOORWAARDELIJK gebruikt wordt.
+    PADEL_ANALYSIS_RETRO_PREFETCH_SCOPE_FIX_2026-10-05 - zie moduledocstring:
+    de prefetch/klassement-opbouw gebeurt nu op `relevant_ids` (de spelers
+    die ECHT in interclub-matchen voorkomen), NIET op `all_ids` (ELK profiel
+    in de database) - dat laatste veroorzaakte de "2003 reads"-bottleneck."""
     all_ids = sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")})
     if not all_ids:
         return {
@@ -596,14 +679,17 @@ def gather_all_valid_match_data(profiles: list) -> dict:
     except Exception:  # noqa: BLE001
         docs = {}
     index = build_retro_encounter_index(docs, allowed_player_ids=None)
+    # PADEL_ANALYSIS_RETRO_PREFETCH_SCOPE_FIX_2026-10-05: relevant_ids EERST
+    # bepalen, en DAARNA pas de (potentieel dure) prefetch/klassement-opbouw
+    # doen - enkel voor deze veel kleinere set.
+    relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
     current_official_ranks = {}
     try:
         from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
-        prefetch_own_player_reads(all_ids)
-        current_official_ranks = _build_own_official_ranks_strict(all_ids) or {}
+        prefetch_own_player_reads(list(relevant_ids))
+        current_official_ranks = _build_own_official_ranks_strict(list(relevant_ids)) or {}
     except Exception:  # noqa: BLE001
         pass
-    relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
     ratings_cache = _load_padelstat_histories(relevant_ids)
     raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
     valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
@@ -621,24 +707,16 @@ def gather_all_valid_match_data(profiles: list) -> dict:
 
 def score_raw_at_scale(raw_rows: list, scale: float, bias: float = 0.0, form_weight: float = 0.0,
                        form_adjustment: Optional[Dict[str, dict]] = None) -> list:
-    """Vult elke rij uit gather_raw_match_data() aan met win_probability."""
+    """Vult elke rij uit gather_raw_match_data() aan met win_probability -
+    gebruikt nu dezelfde gedeelde _effective_win_probability() als
+    predict_board() (PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05)."""
     out = []
     for r in raw_rows:
-        our_avg, their_avg = r["our_avg"], r["their_avg"]
-        effective_bias = bias
-        if form_weight and form_adjustment and our_avg is not None and their_avg is not None:
-            our_pair = r.get("pair") or ()
-            their_pair = (r.get("opp1_user_id"), r.get("opp2_user_id"))
-            our_res = [form_adjustment[str(p)]["avg_residual"] for p in our_pair if str(p) in form_adjustment]
-            their_res = [form_adjustment[str(p)]["avg_residual"] for p in their_pair if p and str(p) in form_adjustment]
-            if our_res or their_res:
-                our_m = sum(our_res) / len(our_res) if our_res else 0.0
-                their_m = sum(their_res) / len(their_res) if their_res else 0.0
-                effective_bias = bias + (our_m - their_m) * scale * form_weight
-        if effective_bias or form_weight:
-            wp = _estimate_win_probability_with_bias(our_avg, their_avg, scale=scale, bias=effective_bias)
-        else:
-            wp = ll.estimate_win_probability(our_avg, their_avg, scale=scale)
+        wp = _effective_win_probability(
+            r["our_avg"], r["their_avg"], r.get("pair"),
+            (r.get("opp1_user_id"), r.get("opp2_user_id")),
+            scale=scale, bias=bias, form_weight=form_weight, form_adjustment=form_adjustment,
+        )
         out.append({**r, "win_probability": wp})
     return out
 
@@ -891,6 +969,18 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     all_data = st.session_state[all_data_key]
     form_index = all_data.get("form_index") or {}
 
+    # PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05: het ACTIEVE model
+    # (scale+bias+form_weight), EENMAAL opgehaald en overal hergebruikt -
+    # "Per match", "Beste alternatief" EN "Kalibratie" gebruiken voortaan
+    # ALTIJD hetzelfde model, i.p.v. 2 stilzwijgend verschillende.
+    scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
+    bias = st.session_state.get("retro_bias", 0.0)
+    form_weight = st.session_state.get("retro_form_weight", 0.0)
+    form_adjustment = (
+        compute_form_adjustment(all_data.get("full_padelstat_rows") or [], scale=_DEFAULT_SCALE, bias=0.0)
+        if form_weight else {}
+    )
+
     with perf.step("retro: eigen matchen ophalen"):
         with st.spinner(f"Matchen van {sel_naam} ophalen..."):
             docs = ll.get_docs_for_players([sel_player_id])
@@ -917,8 +1007,18 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     )
     gekozen_key = key_by_label[gekozen_label]
 
+    # PADEL_ANALYSIS_RETRO_OPPONENT_LEAK_FIX_2026-10-05 - zie moduledocstring:
+    # EERST sel_player_id's EIGEN bord(en) reconstrueren (zonder teamgenoten),
+    # om daaruit de gekende TEGENSTANDERS te bepalen - DIE worden dan expliciet
+    # uitgesloten als kandidaat-teamgenoot.
+    eigen_entries = index.get(gekozen_key, [])
+    eigen_boards = reconstruct_boards_with_rankings(eigen_entries)
+    gekende_tegenstanders = _known_opponent_ids(eigen_boards)
+
     with perf.step("retro: teamgenoten van deze ontmoeting zoeken"):
-        teammate_docs = _resolve_encounter_teammates(sel_player_id, gekozen_key, profiles)
+        teammate_docs = _resolve_encounter_teammates(
+            sel_player_id, gekozen_key, profiles, exclude_ids=gekende_tegenstanders,
+        )
     docs_encounter = dict(docs)
     docs_encounter.update(teammate_docs)
     if teammate_docs:
@@ -931,6 +1031,11 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     )
     entries_encounter = index_encounter.get(gekozen_key, [])
     boards = reconstruct_boards_with_rankings(entries_encounter)
+    # Defensieve 2e controle: een bord waarvan de EIGEN kant een reeds gekende
+    # tegenstander bevat, kan nooit correct zijn (zou wijzen op een lek dat de
+    # bovenstaande exclude_ids-filter toch miste) - zo'n bord wordt genegeerd
+    # i.p.v. de pagina een onzinnig resultaat te laten tonen.
+    boards = [b for b in boards if not (set(b["pair"]) & gekende_tegenstanders)]
 
     own_side_ids = {sel_player_id} | set(teammate_docs.keys())
     for _pid, m in entries_encounter:
@@ -950,11 +1055,11 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     with perf.step(f"retro: padelstat-historiek laden ({len(player_ids)} spelers)"):
         ratings_cache = _load_padelstat_histories(player_ids)
 
-    scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
-    bias = st.session_state.get("retro_bias", 0.0)
-    form_weight = st.session_state.get("retro_form_weight", 0.0)
     with perf.step("retro: ontmoeting voorspellen (predict_encounter)"):
-        pred = predict_encounter(boards, current_official_ranks, ratings_cache, scale=scale)
+        pred = predict_encounter(
+            boards, current_official_ranks, ratings_cache, scale=scale,
+            bias=bias, form_weight=form_weight, form_adjustment=form_adjustment,
+        )
     if pred["snapshot_used"]:
         st.success("Een eerdere momentopname van deze ontmoeting werd gevonden - de waarden van toen zijn exact.")
     st.markdown("#### Per match: voorspeld tegenover echt")
@@ -1020,15 +1125,11 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         elif alt["actual"] is not None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
 
-    # PADEL_ANALYSIS_RETRO_CALIBRATION_SIMPLIFY_2026-10-05 - zie moduledocstring:
-    # GEEN tellingen-blok, GEEN vergelijkingssectie, GEEN keuzeschakelaar meer -
-    # de kalibratie gebruikt ONVOORWAARDELIJK de volledige-padelstat-subset.
     st.divider()
     st.markdown("#### Kalibratie over alle gekende matchen (enkel padelstat)")
     st.caption(
         "Gebruikt ALLE interclub-matchen in de database waarvoor we ECHTE padelstat-waarden hebben voor "
-        "alle 4 spelers EN de echte uitslag kennen - dit is de betrouwbaarste subset (het officiele "
-        "klassement verandert traag en in grove stappen, en vertekent anders het beeld)."
+        "alle 4 spelers EN de echte uitslag kennen - dit is de betrouwbaarste subset."
     )
     raw_rows = all_data.get("full_padelstat_rows") or []
     if not raw_rows:
@@ -1041,13 +1142,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     form_txt = f", vorm-gewicht {form_weight:+.2f}" if form_weight else ""
     st.markdown(f"Huidige instelling: **factor {scale:.0f}**, **bias {bias:+.0f}**{form_txt}.")
     st.caption(
-        "Wijzig dit uitsluitend via 'Zoek beste model' hieronder + 'Toepassen' - geen handmatige "
-        "schuifregelaar meer."
+        "Deze instelling geldt OOK voor 'Per match' en 'Beste alternatief' hierboven - overal hetzelfde "
+        "model. Wijzig uitsluitend via 'Zoek beste model' hieronder + 'Toepassen'."
     )
 
     with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
-        form_adj_cache = compute_form_adjustment(raw_rows, scale=_DEFAULT_SCALE, bias=0.0) if form_weight else {}
-        stats = calibration_stats(score_raw_at_scale(raw_rows, scale, bias=bias, form_weight=form_weight, form_adjustment=form_adj_cache))
+        stats = calibration_stats(score_raw_at_scale(raw_rows, scale, bias=bias, form_weight=form_weight, form_adjustment=form_adjustment))
     if not stats:
         st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
@@ -1086,7 +1186,8 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.caption(
         "Zoekt een schaalfactor, een vaste bias-verschuiving EN hoeveel gewicht de sterkte-gecorrigeerde "
         "individuele vorm van elke speler krijgt. form_weight=0 zit altijd in de zoekruimte, dus dit kan "
-        "nooit slechter zijn dan zonder vorm-term."
+        "nooit slechter zijn dan zonder vorm-term. Een toegepast resultaat geldt meteen OOK voor 'Per "
+        "match' en 'Beste alternatief' hierboven."
     )
     if st.button("Zoek beste model (schaal + bias + vorm)", key="retro_find_best_scale_bias"):
         with perf.step("retro: beste model zoeken (find_best_scale_and_bias)"):
