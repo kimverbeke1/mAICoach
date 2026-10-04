@@ -53,7 +53,86 @@ schuifregelaar herberekent deze cijfers LIVE voor een gekozen factor, maar
 wijzigt NERGENS de globale DEFAULT_WIN_PROBABILITY_SCALE die de rest van de
 app gebruikt (lineup_lab.py, lineup_rotation.py) - dat blijft een BEWUSTE,
 aparte stap mocht Kim de uitkomst willen overnemen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 (op verzoek van Kim: "ik wil
+daar enkel matchen zien die de geselecteerde speler gespeeld heeft" - in de
+vorige versie verschenen ook matchen van ANDERE spelers uit de club, bv.
+damesmatchen, omdat render_retrospective_tab() docs ophaalde voor ALLE
+profielen (tot 40) en de encounter-index over AL die spelers samen bouwde,
+i.p.v. enkel de speler die bovenaan de pagina gekozen is)
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd: `render_retrospective_tab(profiles)` bouwde
+`docs = ll.get_docs_for_players([alle 40 profile-ids])` en
+`build_retro_encounter_index(docs)` groepeerde dan ALLE matchrecords van AL
+die spelers samen, puur op (datum, encounter) - zonder te filteren op WIE
+die match speelde. Zodra 2 verschillende spelers toevallig dezelfde
+datum/encounter-tekst hadden (bv. een damesploeg en een herenploeg die
+dezelfde speeldag een andere interclub-ontmoeting hadden), verschenen beide
+in dezelfde (foute) groep, en dus ook in de dropdown van de gekozen speler.
+FIX: `render_retrospective_tab()` krijgt nu een VERPLICHT `sel_player_id`-
+argument (page_lineup_lab.py geeft de al bovenaan gekozen speler door) en
+haalt ENKEL het matchdocument van DIE speler op - `build_retro_encounter_
+index()` heeft een nieuwe, optionele `sel_player_id`-parameter die, indien
+gegeven, matchrecords van andere spelers gewoon negeert. Elk matchrecord
+van een speler bevat zijn/haar partner- en tegenstandergegevens al VOLLEDIG
+(geen apart partnerdocument nodig om 1 bord correct te tonen), dus dit
+levert exact dezelfde "per match"-weergave op als voorheen, nu enkel nog
+gefilterd op de juiste speler.
+GEVOLG voor "Beste alternatief": omdat we nu enkel het document van de
+gekozen speler kennen (niet van zijn/haar teamgenoten die dag), is het
+vaker onmogelijk om >=4 gekende eigen spelers te verzamelen voor een
+alternatieve koppelverdeling - de UI toont dan expliciet WAAROM ("we tonen
+bewust enkel matchen van deze speler, dus de rest van de ploegopstelling
+die dag is niet gekend").
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PERF_2026-10-04 (op verzoek van Kim, met meetgegevens:
+"Totaal deze render: 263.47s [...] Zwaarste eigen tijd: SECTIE Nabeschouwing
+- 78.82s" en een export met 1126 regels "Firestore: get_padelstat_rating")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de meting: `_own_value_at()`/`_opponent_value_at()`
+riepen `fb.get_padelstat_rating_at(player_id, datum)` aan - en DIE functie
+doet intern `fb.get_padelstat_rating(player_id)`, dus EEN Firestore-
+document-read - PER SPELER PER BORD PER VOORSPELLING. Met de kalibratie die
+over alle ~300 ontmoetingen/1188 matchen van (destijds) alle 40 profielen
+liep, gaf dat 1126 aparte reads van ~0.15-0.17s = ~184s, exact de gemeten
+bottleneck (en de reden waarom de vorige tab lang "grayed out" bleef: dat is
+normaal Streamlit-gedrag tijdens een trage render, geen apart defect).
+FIX, data-ophalen en scale-afhankelijke berekening ONTKOPPELD:
+  1. _collect_relevant_player_ids(index) verzamelt ALLE speler-id's (eigen +
+     tegenstander) die voorkomen in de (nu al gefilterde) encounter-index.
+  2. _load_padelstat_histories(player_ids) - EEN fb.get_padelstat_rating()
+     per UNIEKE speler (dus 1x, niet per bord), @st.cache_data(ttl=300) -
+     een schuifregelaar-beweging of nieuwe ontmoeting-keuze hergebruikt deze
+     cache en doet dus GEEN nieuwe Firestore-reads meer.
+  3. _rating_at_from_history(history, datum) - PURE (geen I/O) kopie van
+     firebase_service.get_padelstat_rating_at()'s logica, werkend op de al
+     ingeladen historiek-lijst.
+  4. gather_raw_match_data(index, ...) verzamelt voor ELK bord de SCHAAL-
+     ONAFHANKELIJKE ruwe data (our_avg/their_avg/actual_won) - dit gebeurt
+     1x per sessie (gecached in st.session_state op een signatuur), NIET
+     opnieuw bij elke schuifregelaar-beweging.
+  5. score_raw_at_scale(raw_rows, scale) herberekent de winkans voor een
+     GEKOZEN factor - een PURE, snelle berekening (geen I/O), dus de
+     schuifregelaar en de hieronder beschreven auto-zoekfunctie zijn
+     vrijwel instant.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 (op verzoek van Kim: "Kan je dan
+al niet meteen zelf de beste winskansfactor kiezen om de beste brier score
+te hebben ipv dat ik die manueel moet gaan verschuiven en dan (lang)
+wachten om te zien of het beter is. Gewoon bvb met 1 knop een berekening
+starten die een voorstel doet voor aanpassing die je dan kan bevestigen?")
+--------------------------------------------------------------------------
+find_best_scale(raw_rows) doorzoekt een reeks kandidaat-factoren (50 t.e.m.
+400, stappen van 5) en berekent voor ELK de Brier-score - dankzij de
+ontkoppeling hierboven is dit PUUR rekenwerk op de al opgehaalde ruwe data,
+dus snel genoeg voor een knop-klik i.p.v. een aparte achtergrondtaak. De UI
+toont het voorstel (nieuwe factor + Brier-score, naast de huidige) met een
+aparte "Toepassen"-knop - de schuifregelaar verspringt dus nooit vanzelf,
+Kim bevestigt expliciet voor de nieuwe waarde ingesteld wordt. Dit wijzigt,
+net als de schuifregelaar zelf, ENKEL deze weergave - niet de globale
+DEFAULT_WIN_PROBABILITY_SCALE.
 """
+import math
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -65,6 +144,7 @@ import firebase_service as fb
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _DEFAULT_SCALE = ll.DEFAULT_WIN_PROBABILITY_SCALE
 _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
+_SCALE_SEARCH_RANGE = list(range(50, 401, 5))  # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04
 
 
 # --------------------------------------------------------------- datums
@@ -106,9 +186,14 @@ def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
     ])
 
 
-def build_retro_encounter_index(docs: Dict[str, dict]) -> Dict[tuple, list]:
+def build_retro_encounter_index(docs: Dict[str, dict], sel_player_id=None) -> Dict[tuple, list]:
+    """PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: met `sel_player_id`
+    gezet, komen ENKEL matchrecords van DIE speler in de index terecht -
+    zie moduledocstring voor de volledige root-cause-analyse."""
     index: Dict[tuple, list] = {}
     for pid, doc in docs.items():
+        if sel_player_id is not None and str(pid) != str(sel_player_id):
+            continue
         for m in doc.get("matches", []) or []:
             if m.get("match_type") != "interclub":
                 continue
@@ -182,11 +267,58 @@ def _find_snapshot_for(date_text, opp_user_ids: set) -> Optional[dict]:
     return None
 
 
+# --------------------------------------------------------------- padelstat-cache
+def _collect_relevant_player_ids(index: dict) -> set:
+    """PADEL_ANALYSIS_RETRO_PERF_2026-10-04: alle speler-id's (eigen +
+    tegenstander) die ooit voorkomen in de meegegeven encounter-index -
+    gebruikt om hun padelstat-historiek in EEN batch voor te laden (i.p.v.
+    per bord/per match apart, zie moduledocstring)."""
+    ids = set()
+    for entries in index.values():
+        for pid, m in entries:
+            ids.add(str(pid))
+            for veld in ("partner_user_id", "opp1_user_id", "opp2_user_id"):
+                if m.get(veld):
+                    ids.add(str(m[veld]))
+    return ids
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_padelstat_histories(player_ids: tuple) -> Dict[str, list]:
+    """PADEL_ANALYSIS_RETRO_PERF_2026-10-04 - zie moduledocstring: EEN
+    fb.get_padelstat_rating()-aanroep per UNIEKE speler, 5 minuten gecached.
+    Faalt een individuele speler, dan krijgt die gewoon een lege historiek
+    (nooit de hele batch laten crashen)."""
+    out: Dict[str, list] = {}
+    for pid in player_ids:
+        try:
+            data = fb.get_padelstat_rating(pid) or {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        out[pid] = list(data.get("history") or [])
+    return out
+
+
+def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
+    """PADEL_ANALYSIS_RETRO_PERF_2026-10-04: PURE (geen I/O) kopie van
+    firebase_service.get_padelstat_rating_at()'s logica, werkend op een AL
+    ingeladen historiek-lijst - zie moduledocstring."""
+    beste = None
+    for regel in history:
+        t = str(regel.get("fetched_at") or "")
+        if t and t[:len(moment_iso)] <= moment_iso and (beste is None or t >= beste[0]):
+            beste = (t, regel.get("rating"))
+    return beste[1] if beste else None
+
+
 # --------------------------------------------------------------- voorspelling
-def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict):
+def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
+                  ratings_cache: Dict[str, list]):
     """Effectieve rating van EEN eigen speler op `date_text` - zie
     moduledocstring voor de volgorde van bronnen. Geeft (waarde, bron) terug;
-    waarde is None als er niets gekend is."""
+    waarde is None als er niets gekend is. GEEN Firestore-aanroep meer (zie
+    PADEL_ANALYSIS_RETRO_PERF_2026-10-04) - `ratings_cache` is al voor de
+    hele sessie opgehaald."""
     pid = str(player_id)
     if snapshot_own and pid in snapshot_own:
         v = snapshot_own[pid]
@@ -196,10 +328,7 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
             return float(v["official_rank"]), "momentopname (klassement)"
     iso = to_iso_date(date_text)
     if iso:
-        try:
-            hist = fb.get_padelstat_rating_at(pid, iso)
-        except Exception:  # noqa: BLE001
-            hist = None
+        hist = _rating_at_from_history(ratings_cache.get(pid, []), iso)
         if hist is not None:
             return float(hist), "padelstat-historiek (op datum)"
     fallback = (current_official_ranks or {}).get(pid)
@@ -208,8 +337,10 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
     return None, "onbekend"
 
 
-def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict):
-    """Effectieve rating van EEN tegenstander-speler op `date_text`."""
+def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
+                       ratings_cache: Dict[str, list]):
+    """Effectieve rating van EEN tegenstander-speler op `date_text`. GEEN
+    Firestore-aanroep meer - zie _own_value_at()."""
     uid = str(user_id) if user_id else None
     if snapshot_opp and uid and uid in snapshot_opp:
         v = snapshot_opp[uid]
@@ -220,10 +351,7 @@ def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict):
     if uid:
         iso = to_iso_date(date_text)
         if iso:
-            try:
-                hist = fb.get_padelstat_rating_at(uid, iso)
-            except Exception:  # noqa: BLE001
-                hist = None
+            hist = _rating_at_from_history(ratings_cache.get(uid, []), iso)
             if hist is not None:
                 return float(hist), "padelstat-historiek (op datum)"
     official = ll.parse_ranking(ranking_text)
@@ -233,18 +361,18 @@ def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict):
 
 
 def predict_board(
-    board: dict, current_official_ranks: dict, scale: float = _DEFAULT_SCALE,
-    snapshot: Optional[dict] = None,
+    board: dict, current_official_ranks: dict, ratings_cache: Dict[str, list],
+    scale: float = _DEFAULT_SCALE, snapshot: Optional[dict] = None,
 ) -> dict:
     """Herberekent de winkans voor EEN bord, met de waarden van toen."""
     date_text = board.get("match_date")
     p1, p2 = tuple(board["pair"])
     snap_own = (snapshot or {}).get("own_players") or {}
     snap_opp = (snapshot or {}).get("opponent_players") or {}
-    our_vals = [_own_value_at(p, date_text, current_official_ranks, snap_own) for p in (p1, p2)]
+    our_vals = [_own_value_at(p, date_text, current_official_ranks, snap_own, ratings_cache) for p in (p1, p2)]
     their_vals = [
-        _opponent_value_at(board.get("opp1_user_id"), board.get("opp1_ranking"), date_text, snap_opp),
-        _opponent_value_at(board.get("opp2_user_id"), board.get("opp2_ranking"), date_text, snap_opp),
+        _opponent_value_at(board.get("opp1_user_id"), board.get("opp1_ranking"), date_text, snap_opp, ratings_cache),
+        _opponent_value_at(board.get("opp2_user_id"), board.get("opp2_ranking"), date_text, snap_opp, ratings_cache),
     ]
     our_known = [v for v, _ in our_vals if v is not None]
     their_known = [v for v, _ in their_vals if v is not None]
@@ -262,7 +390,7 @@ def predict_board(
 
 
 def predict_encounter(
-    boards: list, current_official_ranks: dict, opp_ploeg_hint: Optional[str] = None,
+    boards: list, current_official_ranks: dict, ratings_cache: Dict[str, list],
     scale: float = _DEFAULT_SCALE, use_snapshot: bool = True,
 ) -> dict:
     """Voorspelt alle borden van 1 ontmoeting. Zoekt (indien gevraagd) 1x een
@@ -272,8 +400,55 @@ def predict_encounter(
     if use_snapshot and boards:
         opp_ids = {b.get("opp1_user_id") for b in boards} | {b.get("opp2_user_id") for b in boards}
         snapshot = _find_snapshot_for(boards[0].get("match_date"), opp_ids)
-    predictions = [predict_board(b, current_official_ranks, scale=scale, snapshot=snapshot) for b in boards]
+    predictions = [predict_board(b, current_official_ranks, ratings_cache, scale=scale, snapshot=snapshot) for b in boards]
     return {"boards": predictions, "snapshot_used": snapshot is not None}
+
+
+# ------------------------------------------------ schaal-onafhankelijke ruwe data
+def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cache: Dict[str, list]) -> list:
+    """PADEL_ANALYSIS_RETRO_PERF_2026-10-04 - zie moduledocstring. Verzamelt
+    voor ELK bord van ELKE ontmoeting in `index` de SCHAAL-ONAFHANKELIJKE
+    ruwe data (our_avg/their_avg/actual_won) - dit is de enige stap die nog
+    (gecachete) opzoekingen doet; de eigenlijke winkans voor een willekeurige
+    factor is daarna een zuivere berekening via score_raw_at_scale()."""
+    raw = []
+    for entries in index.values():
+        boards = reconstruct_boards_with_rankings(entries)
+        if not boards:
+            continue
+        opp_ids = {b.get("opp1_user_id") for b in boards} | {b.get("opp2_user_id") for b in boards}
+        snapshot = _find_snapshot_for(boards[0].get("match_date"), opp_ids)
+        snap_own = (snapshot or {}).get("own_players") or {}
+        snap_opp = (snapshot or {}).get("opponent_players") or {}
+        for board in boards:
+            p1, p2 = tuple(board["pair"])
+            date_text = board.get("match_date")
+            our_vals = [_own_value_at(p, date_text, current_official_ranks, snap_own, ratings_cache) for p in (p1, p2)]
+            their_vals = [
+                _opponent_value_at(board.get("opp1_user_id"), board.get("opp1_ranking"), date_text, snap_opp, ratings_cache),
+                _opponent_value_at(board.get("opp2_user_id"), board.get("opp2_ranking"), date_text, snap_opp, ratings_cache),
+            ]
+            our_known = [v for v, _ in our_vals if v is not None]
+            their_known = [v for v, _ in their_vals if v is not None]
+            raw.append({
+                "pair": (p1, p2),
+                "our_avg": (sum(our_known) / len(our_known)) if our_known else None,
+                "their_avg": (sum(their_known) / len(their_known)) if their_known else None,
+                "actual_won": board.get("won"), "score": board.get("score"),
+                "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
+                "match_date": date_text,
+            })
+    return raw
+
+
+def score_raw_at_scale(raw_rows: list, scale: float) -> list:
+    """Vult elke rij uit gather_raw_match_data() aan met win_probability
+    voor EEN specifieke winkansfactor - pure berekening, geen I/O."""
+    out = []
+    for r in raw_rows:
+        wp = ll.estimate_win_probability(r["our_avg"], r["their_avg"], scale=scale)
+        out.append({**r, "win_probability": wp})
+    return out
 
 
 # --------------------------------------------------------------- kalibratie
@@ -286,7 +461,6 @@ def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
     n = len(usable)
     if n == 0:
         return None
-    import math
     brier = sum((p["win_probability"] - (1.0 if p["actual_won"] else 0.0)) ** 2 for p in usable) / n
     eps = 1e-9
     log_loss = -sum(
@@ -312,6 +486,25 @@ def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
     }
 
 
+def find_best_scale(raw_rows: list, scale_range=None) -> dict:
+    """PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
+    Berekent de Brier-score voor elke kandidaat-factor in `scale_range`,
+    PUUR in-memory (geen Firestore) - geeft {"best": {"scale", "brier"},
+    "curve": [{"scale", "brier", "n"}, ...]} terug. "best" is None als er
+    nergens genoeg data is om een Brier-score te berekenen."""
+    scale_range = scale_range or _SCALE_SEARCH_RANGE
+    curve = []
+    best = None
+    for s in scale_range:
+        stats = calibration_stats(score_raw_at_scale(raw_rows, s))
+        if stats is None:
+            continue
+        curve.append({"scale": s, "brier": stats["brier"], "n": stats["n"]})
+        if best is None or stats["brier"] < best["brier"]:
+            best = {"scale": s, "brier": stats["brier"]}
+    return {"best": best, "curve": curve}
+
+
 def logistic_curve(scale: float, diffs=None) -> list:
     """(diff, kans)-punten voor de visualisatie van de winkans-curve bij een
     gekozen `scale`."""
@@ -321,13 +514,16 @@ def logistic_curve(scale: float, diffs=None) -> list:
 
 # --------------------------------------------------------------- beste alternatief
 def best_alternative_for_encounter(
-    boards: list, docs: Dict[str, dict], current_official_ranks: dict,
+    boards: list, docs: Dict[str, dict], current_official_ranks: dict, ratings_cache: Dict[str, list],
     scale: float = _DEFAULT_SCALE, top_n: int = 3,
 ) -> Optional[dict]:
     """Zoekt, MET de waarden van toen en ZONDER deze ontmoeting zelf in de
     synergie te laten meetellen (exclude_match_keys - geen lekkage van de
     uitkomst in de eigen voorspelling), de beste alternatieve koppelverdeling
-    voor deze ontmoeting. Geeft None terug als er te weinig data is."""
+    voor deze ontmoeting. Geeft None terug als er te weinig data is - zie
+    PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 voor waarom dit nu vaker
+    het geval is (we kennen enkel het document van de gekozen speler, dus
+    zelden >=4 eigen spelers van dezelfde ontmoeting)."""
     if not boards:
         return None
     players = sorted({str(p) for b in boards for p in b["pair"]})
@@ -343,7 +539,7 @@ def best_alternative_for_encounter(
     snap_opp = (snapshot or {}).get("opponent_players") or {}
     player_ratings = {}
     for pid in players:
-        val, _ = _own_value_at(pid, date_text, current_official_ranks, snap_own)
+        val, _ = _own_value_at(pid, date_text, current_official_ranks, snap_own, ratings_cache)
         if val is not None:
             player_ratings[pid] = val
     opponent_boards = []
@@ -352,7 +548,7 @@ def best_alternative_for_encounter(
         pair_info = []
         for idx, uid_key, ranking_key in ((0, "opp1_user_id", "opp1_ranking"), (1, "opp2_user_id", "opp2_ranking")):
             uid = b.get(uid_key)
-            val, _ = _opponent_value_at(uid, b.get(ranking_key), date_text, snap_opp)
+            val, _ = _opponent_value_at(uid, b.get(ranking_key), date_text, snap_opp, ratings_cache)
             if uid and val is not None:
                 opponent_ratings[str(uid)] = val
             pair_info.append({
@@ -402,59 +598,80 @@ def _render_board_row(bp: dict, name_lookup: dict) -> None:
     )
     with st.expander("Op basis van welke waarden?", expanded=False):
         st.caption(
-            f"Onze spelers: {bp['our_sources'][0]}, {bp['our_sources'][1]} "
-            f"(gemiddeld {bp['our_avg']:.0f})" if bp.get("our_avg") is not None else "Onze spelers: onbekend"
+            (f"Onze spelers: {bp['our_sources'][0]}, {bp['our_sources'][1]} "
+             f"(gemiddeld {bp['our_avg']:.0f})") if bp.get("our_avg") is not None else "Onze spelers: onbekend"
         )
         st.caption(
-            f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
-            f"(gemiddeld {bp['their_avg']:.0f})" if bp.get("their_avg") is not None else "Tegenstander: onbekend"
+            (f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
+             f"(gemiddeld {bp['their_avg']:.0f})") if bp.get("their_avg") is not None else "Tegenstander: onbekend"
         )
 
 
-def render_retrospective_tab(profiles: list, max_players: int = 40) -> None:
+def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 - zie moduledocstring. Enkel
     deze functie heeft Streamlit nodig; de rest van dit bestand is daar
-    volledig los van (ook los testbaar)."""
+    volledig los van (ook los testbaar).
+    PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: `sel_player_id` is nu
+    VERPLICHT - de analyse (en de kalibratie) gebruikt UITSLUITEND de
+    interclub-matchen van DIE speler, niet van alle spelers in de club."""
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
-    st.caption(
-        "Vergelijkt de voorspelde winkans met de echte uitslag van eerder gespeelde ontmoetingen, "
-        "MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. Gebruik dit om "
-        "te controleren of de winkans-formule klopt, en wat het betere alternatief geweest zou zijn."
-    )
-    player_ids = [str(p.get("player_id")) for p in profiles if p.get("player_id")][:max_players]
+    sel_player_id = str(sel_player_id)
     name_lookup = {str(p.get("player_id")): (p.get("display_name") or str(p.get("player_id"))) for p in profiles}
-    # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: beste-poging terugval - het HUIDIGE
-    # officiele klassement, enkel gebruikt als er geen padelstat-historiek is (zie
-    # moduledocstring, bron 4). Hergebruikt dezelfde functie als de rest van de app;
-    # faalt die (bv. module niet beschikbaar), dan blijft de terugval leeg i.p.v. te crashen.
+    sel_naam = name_lookup.get(sel_player_id, sel_player_id)
+    st.caption(
+        f"Vergelijkt, voor **{sel_naam}**, de voorspelde winkans met de echte uitslag van eerder gespeelde "
+        "interclub-matchen, MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. "
+        "Gebruik dit om te controleren of de winkans-formule klopt, en wat het betere alternatief geweest "
+        "zou zijn. Toont enkel matchen van deze speler - wissel van speler bovenaan de pagina om een "
+        "andere analyse te zien."
+    )
+    with st.spinner(f"Matchen van {sel_naam} ophalen..."):
+        docs = ll.get_docs_for_players([sel_player_id])
+    # PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: enkel matchen van sel_player_id.
+    index = build_retro_encounter_index(docs, sel_player_id=sel_player_id)
+    encounters = list_retro_encounters(index)
+    if not encounters:
+        st.info(f"Nog geen gespeelde interclub-ontmoetingen gevonden voor {sel_naam}.")
+        return
+    # Klassement-terugval ook voor gekende teamgenoten van sel_player_id (niet enkel
+    # sel_player_id zelf) - anders toont "Op basis van welke waarden?" onnodig "onbekend"
+    # voor de partner (zie screenshot-feedback).
+    own_side_ids = {sel_player_id}
+    for entries in index.values():
+        for _pid, m in entries:
+            if m.get("partner_user_id"):
+                own_side_ids.add(str(m["partner_user_id"]))
     current_official_ranks = {}
     try:
         from lineup_scout import _build_own_official_ranks_strict
-        current_official_ranks = _build_own_official_ranks_strict(player_ids) or {}
+        current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
     except Exception:  # noqa: BLE001
         pass
-    st.caption(
-        "Let op: voor ONZE eigen spelers is er geen historiek van het OFFICIELE klassement in deze app "
-        "(enkel van de padelstat-waarde, sinds kort). Ontbreekt er padelstat-historiek voor een speler op "
-        "die datum, dan valt de berekening terug op zijn HUIDIGE klassement - duidelijk gelabeld hieronder "
-        "als 'benadering'. Voor de tegenstander komt het officiele klassement WEL altijd van toen, want dat "
-        "staat al op het uitslagenblad van die dag."
-    )
-    with st.spinner("Eigen matchen ophalen..."):
-        docs = ll.get_docs_for_players(player_ids)
-    index = build_retro_encounter_index(docs)
-    encounters = list_retro_encounters(index)
-    if not encounters:
-        st.info("Nog geen gespeelde interclub-ontmoetingen gevonden in de database.")
-        return
+
+    # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler,
+    # 5 minuten gecached - geen Firestore-reads meer per bord/match hierna.
+    player_ids = tuple(sorted(_collect_relevant_player_ids(index)))
+    ratings_cache = _load_padelstat_histories(player_ids)
+
+    # Schaal-ONAFHANKELIJKE ruwe data - 1x verzameld per sessie (hergebruikt bij
+    # schuifregelaar-bewegingen en de "beste factor zoeken"-knop hieronder).
+    raw_sig = (sel_player_id, player_ids)
+    raw_key = f"retro_raw_{sel_player_id}"
+    if st.session_state.get(raw_key + "_sig") != raw_sig:
+        st.session_state[raw_key] = gather_raw_match_data(index, current_official_ranks, ratings_cache)
+        st.session_state[raw_key + "_sig"] = raw_sig
+    raw_rows = st.session_state[raw_key]
+
     labels = [lbl for _k, lbl in encounters]
     key_by_label = {lbl: k for k, lbl in encounters}
-    gekozen_label = st.selectbox("Kies een eerder gespeelde ontmoeting", labels, key="retro_pick_encounter")
+    gekozen_label = st.selectbox(
+        f"Kies een eerder gespeelde ontmoeting van {sel_naam}", labels, key="retro_pick_encounter",
+    )
     gekozen_key = key_by_label[gekozen_label]
     boards = reconstruct_boards_with_rankings(index[gekozen_key])
 
     scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
-    pred = predict_encounter(boards, current_official_ranks, scale=scale)
+    pred = predict_encounter(boards, current_official_ranks, ratings_cache, scale=scale)
     if pred["snapshot_used"]:
         st.success("Een eerdere momentopname van deze ontmoeting werd gevonden - de waarden van toen zijn exact.")
     st.markdown("#### Per match: voorspeld tegenover echt")
@@ -464,9 +681,13 @@ def render_retrospective_tab(profiles: list, max_players: int = 40) -> None:
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
     with st.spinner("Alternatieven doorrekenen..."):
-        alt = best_alternative_for_encounter(boards, docs, current_official_ranks, scale=scale)
+        alt = best_alternative_for_encounter(boards, docs, current_official_ranks, ratings_cache, scale=scale)
     if not alt:
-        st.caption("Onvoldoende data om alternatieven te berekenen voor deze ontmoeting.")
+        st.caption(
+            "Onvoldoende data om alternatieven te berekenen voor deze ontmoeting - we tonen bewust enkel "
+            f"matchen van {sel_naam}, dus de rest van de ploegopstelling die dag (wie nog meer speelde, met "
+            "wie) is niet gekend. Een alternatief vergt minstens 4 gekende eigen spelers van dezelfde dag."
+        )
     else:
         actual_ebw = alt["actual"]["expected_boards_won"] if alt["actual"] else None
         for rank, r in enumerate(alt["top"], start=1):
@@ -486,17 +707,20 @@ def render_retrospective_tab(profiles: list, max_players: int = 40) -> None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
 
     st.divider()
-    st.markdown("#### Kalibratie over alle gespeelde matchen")
+    st.markdown(f"#### Kalibratie over alle gespeelde matchen van {sel_naam}")
     st.caption(
-        "Hoe vaak klopte een voorspelling van bv. '60% winkans' ook echt? De Brier-score (lager is beter, "
-        "0 = perfect, 0.25 = niet beter dan een muntstuk) en de kans-klassen hieronder gebruiken ALLE "
-        "gespeelde matchen van de geselecteerde spelers, niet enkel de bovenstaande ontmoeting."
+        f"Hoe vaak klopte een voorspelling van bv. '60% winkans' ook echt? Gebruikt ALLE **{len(raw_rows)}** "
+        f"interclub-matchen van **{sel_naam}** die we kennen (niet enkel de bovenstaande ontmoeting, maar wel "
+        "nog steeds enkel van deze speler - matchen van andere spelers tellen hier niet mee, want we kennen "
+        "hun waarden van toen te onvolledig om dat zinvol te maken). De Brier-score (lager is beter, 0 = "
+        "perfect, 0.25 = niet beter dan een muntstuk) en de kans-klassen hieronder herberekenen INSTANT bij "
+        "een andere factor - er gebeurt hierna geen enkele nieuwe Firestore-opvraging meer."
     )
     c_slider, c_curve = st.columns([2, 1])
     with c_slider:
         scale = st.slider(
             "Winkansfactor (hoe gevoelig de winkans reageert op het ratingverschil)",
-            min_value=50, max_value=400, value=int(_DEFAULT_SCALE), step=5, key="retro_scale",
+            min_value=50, max_value=400, value=int(scale), step=5, key="retro_scale",
             help=f"Huidige app-standaard: {_DEFAULT_SCALE:.0f}. Een KLEINERE factor maakt elk ratingverschil "
                  "impactvoller (steilere curve); een GROTERE factor maakt de winkans voorzichtiger "
                  "(vlakkere curve). Dit wijzigt ENKEL de berekening hieronder, niet de rest van de app.",
@@ -504,14 +728,10 @@ def render_retrospective_tab(profiles: list, max_players: int = 40) -> None:
     with c_curve:
         st.caption(f"Bij 100 punten verschil: {_pct(ll.estimate_win_probability(0, -100, scale=scale))} winkans.")
 
-    all_preds = []
-    for _k, _lbl in encounters:
-        bds = reconstruct_boards_with_rankings(index[_k])
-        p = predict_encounter(bds, current_official_ranks, scale=scale, use_snapshot=True)
-        all_preds.extend(p["boards"])
-    stats = calibration_stats(all_preds)
+    scored = score_raw_at_scale(raw_rows, scale)
+    stats = calibration_stats(scored)
     if not stats:
-        st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
+        st.info(f"Nog geen matchen van {sel_naam} met zowel een gekende winkans als een gekende uitslag.")
         return
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -535,3 +755,32 @@ def render_retrospective_tab(profiles: list, max_players: int = 40) -> None:
             "systematisch verschil (bv. bij lage kansklassen te hoog, bij hoge te laag) wijst op een "
             "factor die scherper of voorzichtiger zou moeten staan."
         )
+
+    # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
+    st.divider()
+    st.markdown("##### Beste winkansfactor automatisch zoeken")
+    st.caption(
+        "Zoekt, over alle bovenstaande matchen, de winkansfactor met de LAAGSTE Brier-score (dus de beste "
+        "voorspelling) - puur rekenwerk op de al opgehaalde gegevens, dus snel. Je ziet het voorstel en "
+        "bevestigt zelf voor het wordt toegepast; de schuifregelaar springt nooit vanzelf."
+    )
+    if st.button("Zoek beste winkansfactor", key="retro_find_best_scale"):
+        with st.spinner("Factoren doorrekenen..."):
+            st.session_state["retro_best_scale_result"] = find_best_scale(raw_rows)
+    result = st.session_state.get("retro_best_scale_result")
+    if result and result.get("best"):
+        best = result["best"]
+        if best["scale"] == int(scale):
+            st.success(f"De huidige factor ({scale:.0f}) is al de beste in het doorzochte bereik (50-400, stap 5) - Brier {best['brier']:.3f}.")
+        else:
+            richting = "gevoeliger voor het ratingverschil (kleiner getal)" if best["scale"] < scale else "voorzichtiger (groter getal)"
+            st.info(
+                f"Voorstel: **{best['scale']}** (Brier **{best['brier']:.3f}**) in plaats van de huidige "
+                f"**{int(scale)}** (Brier **{stats['brier']:.3f}**) - dat betekent een {richting} inschatting."
+            )
+            if st.button(f"Toepassen: zet factor op {best['scale']}", key="retro_apply_best_scale"):
+                st.session_state["retro_scale"] = best["scale"]
+                st.session_state.pop("retro_best_scale_result", None)
+                st.rerun()
+    elif result is not None:
+        st.warning("Kon geen enkele factor beoordelen - onvoldoende matchen met een gekende uitslag.")

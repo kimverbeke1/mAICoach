@@ -165,6 +165,19 @@ andere secties. Faalt de import van lineup_retrospective.py (bv. tijdens
 een gefaseerde uitrol), dan toont de sectie een duidelijke melding i.p.v.
 de hele pagina te laten crashen.
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 (op verzoek van Kim: lange
+laadtijd (263s) + "er worden matchen getoond die ik niet eens gespeeld heb.
+Bvb padel dames.... Ik wil daar enkel matchen zien die de geselecteerde
+speler gespeeld heeft")
+--------------------------------------------------------------------------
+_render_retrospective_section() geeft nu `sel_player_id` (de bovenaan de
+pagina gekozen speler) door aan render_retrospective_tab(). Zie
+lineup_retrospective.py voor de volledige root-cause-analyse (filterbug:
+matchen van ALLE profielen werden samengevoegd puur op datum+encounter-
+tekst, zonder te checken WIE de match speelde) en de bijhorende
+performance-fix (de 1126 herhaalde Firestore-reads - de eigenlijke oorzaak
+van de 263s-render - zijn teruggebracht tot 1 read per unieke speler).
+--------------------------------------------------------------------------
 PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 (op verzoek van Kim: "er zijn een
 aantal zaken die een beetje overlappen bij de analyse [...] Ik vind voor
 mezelf de rotatieplanner de core. Dus ik zou die na de scenario analyse
@@ -710,10 +723,14 @@ def _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_glob
         st.divider()
         with perf.step("oa.render_ai_section (enkel UI, geen AI-call)"):
             oa.render_ai_section(report_for_ai, opp.get("ploeg_id"), key_prefix=f"scout_team_{sel_player_id}")
-def _render_retrospective_section(profiles) -> None:
+def _render_retrospective_section(profiles, sel_player_id) -> None:
     """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 - zie moduledocstring en
     lineup_retrospective.py. Draait enkel wanneer de gebruiker deze sectie
-    effectief kiest (zelfde lui-ladingspatroon als de andere secties)."""
+    effectief kiest (zelfde lui-ladingspatroon als de andere secties).
+    PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: geeft `sel_player_id`
+    (de bovenaan de pagina gekozen speler) door - de nabeschouwing toont
+    voortaan UITSLUITEND de matchen van die speler, zie lineup_retrospective.py
+    voor de root-cause-analyse van waarom dat eerst niet zo was."""
     if render_retrospective_tab is None:
         st.warning(
             "Kon de module 'lineup_retrospective' niet laden - controleer of "
@@ -722,7 +739,7 @@ def _render_retrospective_section(profiles) -> None:
         )
         return
     try:
-        render_retrospective_tab(profiles)
+        render_retrospective_tab(profiles, sel_player_id)
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Kon de nabeschouwing niet tonen: {type(exc).__name__}: {exc}")
 def page_lineup_lab():
@@ -787,7 +804,7 @@ def page_lineup_lab():
         # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: hangt NIET af van de scout-
         # keten - werkt rechtstreeks op de al gescrapete eigen matchdata.
         with perf.step("SECTIE Nabeschouwing"):
-            _render_retrospective_section(profiles)
+            _render_retrospective_section(profiles, sel_player_id)
     # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: het meetpaneel staat bewust
     # HELEMAAL onderaan, zodat het de metingen van de volledige render kan
     # tonen. Zet perf_timing.PERF_ENABLED = False om het uit te schakelen.
