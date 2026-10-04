@@ -43,6 +43,39 @@ collectie "lineup_snapshots", document "<ploeg_id>__<datum>": de padelstat-
 waarden en officiele klassementen van ALLE spelers op dat moment, de
 winkans-schaal, en het laatst ingevulde plan (wij + tegenstander). Basis voor
 een latere tab "Nabeschouwing" (voorspeld vs. echte uitslag, kalibratie).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04 (feedback Kim: "er staat bvb op de
+knoppen: S1: 24%: S2:22%. Beter zou zijn om ook kort te tonen wat dat
+Scenario is. als je iets koos dan had ik eerst niet gezien dat er effectief
+iets geselecteerd was. Als het knoppen zijn dan dat wel tonen dat die knoppen
+geselecteerd is (groen?)" + "Ik denk dat het beter is om gewoon die vergelijk
+de voorstellen te tonen en dan met een knop bij elke rij 1 van die rijen te
+kunnen kiezen (ook tonen dat die knop gekozen is.)" + "in de tabel mag je ook
+de beste opstelling tonen voor de speler voor wie we de analyse doen")
+--------------------------------------------------------------------------
+1. SCENARIO-KNOPPEN: de korte omschrijving stond al als caption ONDER elke
+   knop (ongewijzigd) - NIEUW is dat de knop die exact overeenkomt met de
+   huidige tegenstander-invulling nu VISUEEL afwijkt: een vinkje in de
+   knoptekst EN type="primary" (de gekleurde/opgevulde Streamlit-knopstijl,
+   t.o.v. de normale omlijnde knop) i.p.v. een losse caption die je kon
+   missen. Daarvoor wordt opp_sel/opp_plan nu AL gelezen VOOR de knoppen
+   gerenderd worden (was voorheen pas erna).
+2. "ONZE PLOEG - VOORSTELLEN": de aparte knoppenrij met percentages is WEG.
+   In de plaats: enkel nog de vergelijkingstabel (niet langer in een
+   ingeklapte expander - "gewoon tonen"), met per rij een "Kies"-knop. De
+   rij die exact overeenkomt met de huidige invulling krijgt een vinkje,
+   vetgedrukte tekst en de knop wordt (uitgeschakeld) "Actief \u2713" i.p.v.
+   "Kies". Kolom "Gelijk" blijft (Kim: "net die kolom toont waar het
+   verschil in opstelling zit"), naast "Min. 1 punt" (= Winst + Gelijk).
+3. NIEUWE RIJ "Beste voor <naam>": de speler voor wie de analyse loopt
+   (page_lineup_lab.py's spelerskeuze bovenaan) wordt via st.session_state
+   ("viewing_player_id_<ploeg_id>", gezet door page_lineup_lab.py) herkend;
+   onder de bestaande 4 voorstellen komt een 5de rij met het plan dat voor
+   PRECIES DIE speler de hoogste gemiddelde persoonlijke winkans geeft over
+   de match(en) waarin hij/zij voorkomt (tegen de huidige opp_dist) - zelfde
+   aanpak als de vroegere "Beste opstelling voor mezelf" in de matchup-tabel
+   (die daar nu WEG is, zie lineup_matchup_table.py), maar dan contextueel
+   t.o.v. het scenario dat je hier aan het plannen bent.
 """
 import datetime as _dt
 import traceback
@@ -196,7 +229,21 @@ def _weakest_two(available_ids, ctx: _Ctx):
     return frozenset({sterk[0][1], sterk[1][1]})
 
 
-def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None) -> dict:
+def _personal_avg_wp(plan: list, viewing_player_id: str, ctx: "_Ctx", opp_dist: list):
+    """PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: gemiddelde persoonlijke
+    winkans van `viewing_player_id` over de match(en) waarin die speler in
+    `plan` voorkomt (tegen `opp_dist`). None als die speler nergens in dit
+    plan speelt."""
+    probs = []
+    for r in range(len(plan)):
+        for m in range(len(plan[r])):
+            pair = plan[r][m]
+            if viewing_player_id in pair:
+                probs.append(ctx.match_wp(pair, r, m, opp_dist))
+    return (sum(probs) / len(probs)) if probs else None
+
+
+def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_id=None) -> dict:
     out = {}
     scored = [(p, ctx.outcome(p, opp_dist, played_k)) for p in plans]
     for kind, _, _ in _PRESETS:
@@ -208,6 +255,17 @@ def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None) -> dict:
             pool = scored
         if pool:
             out[kind] = max(pool, key=lambda x: _score("safe" if kind == "safe" else "best", x[1]))
+    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: 5de voorstel - beste voor de
+    # specifieke speler voor wie de analyse loopt (zie moduledocstring).
+    if viewing_player_id:
+        outcome_by_id = {id(p): o for p, o in scored}
+        personal = [
+            (_personal_avg_wp(p, viewing_player_id, ctx, opp_dist), p) for p in plans
+        ]
+        personal = [(score, p) for score, p in personal if score is not None]
+        if personal:
+            _, beste_plan = max(personal, key=lambda x: x[0])
+            out["self"] = (beste_plan, outcome_by_id[id(beste_plan)])
     return out
 
 
@@ -421,6 +479,13 @@ def _render_plan_screen(
     opp_ps = {u: v for u in roster_uids if (v := _cached_own_player_rating(u)) is not None}
     own_ps = {str(k): v for k, v in (player_ratings or {}).items() if v is not None}
     ctx = _Ctx(player_ratings, official_ranks_strict, opponent_ratings, opp_ranks)
+    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: de speler voor wie de analyse
+    # loopt (gezet door page_lineup_lab.py) - voor de "Beste voor <naam>"-rij.
+    viewing_player_id = st.session_state.get(f"viewing_player_id_{ploeg_id}")
+    if viewing_player_id is not None:
+        viewing_player_id = str(viewing_player_id)
+        if viewing_player_id not in available_ids:
+            viewing_player_id = None
 
     def _lbl(naam, rk, ps):
         info = " · ".join(x for x in [f"P{int(rk)}" if rk is not None else "P?",
@@ -449,13 +514,25 @@ def _render_plan_screen(
             scen.append({"name": f"S{i + 1}", "labels": s.get("labels") or [],
                          "pairs": [pairs[0:2], pairs[2:4]], "w": s["weight"]})
 
-    st.markdown('<div class="section-header">Plan voor de volledige ontmoeting</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Rotatieplanner - plan voor de volledige ontmoeting</div>', unsafe_allow_html=True)
     st.caption(
         "Stel beide rotaties samen, voor de tegenstander en voor ons, speler per speler. Het eindresultaat "
         "onderaan wordt bij elke wijziging meteen herrekend. Gebruik de knoppen als vertrekpunt."
     )
     opp_prefix = f"plan_opp_v2_{ploeg_id}"
     own_prefix = f"plan_own_v2_{ploeg_id}"
+
+    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: opp_sel VOOR de scenario-knoppen
+    # lezen (was voorheen pas erna), zodat we meteen kunnen tonen welk scenario
+    # (indien van toepassing) al actief/geselecteerd is.
+    opp_sel_voor_knoppen = _read_sel(opp_prefix, opp_label)
+    opp_plan_voor_knoppen = _slots_to_plan(opp_sel_voor_knoppen)
+    active_scenario_name = None
+    if opp_plan_voor_knoppen is not None:
+        for s in scen:
+            if s["pairs"][0] == opp_plan_voor_knoppen[0] and s["pairs"][1] == opp_plan_voor_knoppen[1]:
+                active_scenario_name = s["name"]
+                break
 
     # ---- tegenstander snelkeuze
     st.markdown("**Tegenstander - snelkeuze** (zelfde scenario's en gewichten als de scenario-analyse)")
@@ -465,8 +542,14 @@ def _render_plan_screen(
             cols = st.columns(per_rij)
             for col, s in zip(cols, scen[start:start + per_rij]):
                 with col:
-                    if st.button(f"{s['name']} · {s['w'] * 100:.0f}%", key=f"{opp_prefix}_use_{s['name']}",
-                                 use_container_width=True):
+                    is_active = (s["name"] == active_scenario_name)
+                    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: vinkje + "primary"-stijl
+                    # (gevulde knopkleur) voor het actief geselecteerde scenario.
+                    btn_label = f"{'\u2713 ' if is_active else ''}{s['name']} \u00b7 {s['w'] * 100:.0f}%"
+                    if st.button(
+                        btn_label, key=f"{opp_prefix}_use_{s['name']}", use_container_width=True,
+                        type=("primary" if is_active else "secondary"),
+                    ):
                         if _fill(opp_prefix, s["pairs"], opp_label):
                             st.rerun(scope="fragment")
                         st.warning("Een speler van dit scenario zit niet in de tegenstander-selectie.")
@@ -523,6 +606,9 @@ def _render_plan_screen(
             st.session_state[pk + "_sig"] = sig
         plans = st.session_state.get(pk) or []
     weakest = _weakest_two(available_ids, ctx)
+    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: huidige invulling - gebruikt om
+    # de actieve rij in de voorstellen-tabel te markeren.
+    own_plan_now = _slots_to_plan(own_sel)
     st.markdown("**Onze ploeg - voorstellen**" + (" (enkel rotatie 2)" if played_k is not None else ""))
     if not opp_dist:
         st.caption("Kies eerst een tegenstander-scenario of vul de tegenstander in.")
@@ -531,32 +617,46 @@ def _render_plan_screen(
     elif not plans:
         st.warning("Geen reglementair geldig plan met de huidige spelers, matchen per speler en puntengrens.")
     else:
-        presets = _pick_presets(plans, opp_dist, ctx, weakest, played_k)
-        cols = st.columns(len(_PRESETS))
-        vergelijk = []
-        for col, (kind, titel, uitleg) in zip(cols, _PRESETS):
-            with col:
-                if kind not in presets:
-                    st.button(titel, key=f"{own_prefix}_p_{kind}", disabled=True, use_container_width=True)
-                    st.caption(uitleg)
-                    continue
+        presets = _pick_presets(plans, opp_dist, ctx, weakest, played_k, viewing_player_id)
+        rijen = []
+        for kind, titel, uitleg in _PRESETS:
+            if kind in presets:
                 plan, pp = presets[kind]
-                if st.button(f"{titel} · {pp['p2'] * 100:.0f}% winst", key=f"{own_prefix}_p_{kind}",
-                             use_container_width=True):
-                    if _fill(own_prefix, plan, own_label, rotations=[1] if played_k is not None else range(_N_ROT)):
-                        st.rerun(scope="fragment")
-                st.caption(uitleg)
-                vergelijk.append({
-                    "Voorstel": titel, "Plan": _plan_txt(plan, names_all),
-                    "Winst": f"{pp['p2'] * 100:.0f}%", "Gelijk": f"{pp['p1'] * 100:.0f}%",
-                    "Verlies": f"{pp['p0'] * 100:.0f}%", "Min. 1 punt": f"{(pp['p2'] + pp['p1']) * 100:.0f}%",
-                })
+                rijen.append((kind, titel, uitleg, plan, pp))
+        if "self" in presets:
+            plan, pp = presets["self"]
+            naam = names_all.get(viewing_player_id, viewing_player_id)
+            rijen.append(("self", f"Beste voor {naam}", "hoogste persoonlijke winkans voor deze speler", plan, pp))
+        if not rijen:
+            st.warning("Geen enkel voorstel kon berekend worden met de huidige instellingen.")
+        else:
+            # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: enkel nog de vergelijkingstabel,
+            # NIET langer ingeklapt, met een "Kies"-knop per rij en een duidelijke
+            # markering van de rij die al actief is - zie moduledocstring.
+            kop = st.columns([1.3, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+            for c, h in zip(kop, ["Voorstel", "Plan", "Winst", "Gelijk", "Verlies", "Min. 1p", ""]):
+                c.markdown(f"**{h}**")
+            for kind, titel, uitleg, plan, pp in rijen:
+                is_active = own_plan_now is not None and own_plan_now == plan
+                rij = st.columns([1.3, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+                titel_txt = f"\u2713 **{titel}**" if is_active else titel
+                rij[0].markdown(titel_txt)
+                rij[0].caption(uitleg)
+                rij[1].markdown(_plan_txt(plan, names_all))
+                rij[2].markdown(f":green[**{pp['p2'] * 100:.0f}%**]" if is_active else f"{pp['p2'] * 100:.0f}%")
+                rij[3].markdown(f"{pp['p1'] * 100:.0f}%")
+                rij[4].markdown(f"{pp['p0'] * 100:.0f}%")
+                rij[5].markdown(f"{(pp['p2'] + pp['p1']) * 100:.0f}%")
+                with rij[6]:
+                    if is_active:
+                        st.button("Actief \u2713", key=f"{own_prefix}_p_{kind}", disabled=True, use_container_width=True)
+                    elif st.button("Kies", key=f"{own_prefix}_p_{kind}", use_container_width=True):
+                        if _fill(own_prefix, plan, own_label, rotations=[1] if played_k is not None else range(_N_ROT)):
+                            st.rerun(scope="fragment")
         if weakest:
             st.caption("Onze 2 zwakste spelers (padelstat, anders klassement): "
                        + " en ".join(names_all.get(u, u) for u in sorted(weakest))
                        + (f". Tegenstander: {opp_bron}." if opp_bron else "."))
-        with st.expander("Vergelijk de voorstellen", expanded=False):
-            st.dataframe(vergelijk, use_container_width=True, hide_index=True)
     if st.button("Onze ploeg leegmaken", key=f"{own_prefix}_clear"):
         _clear(own_prefix)
         st.rerun(scope="fragment")
@@ -597,7 +697,7 @@ def _render_plan_screen(
                     wpv = ctx.match_wp(frozenset(ons), r, m, opp_dist)
                     kleur = "green" if wpv >= 0.55 else ("red" if wpv <= 0.45 else "orange")
                     extra = "" if all(hun) else " (gemiddeld over de scenario's)"
-                    regel += f"  →  :{kleur}[**{wpv * 100:.0f}% winkans**]{extra}"
+                    regel += f"  \u2192  :{kleur}[**{wpv * 100:.0f}% winkans**]{extra}"
                 if regel:
                     st.markdown(regel)
 
@@ -614,7 +714,7 @@ def _render_plan_screen(
     _save_snapshot(ploeg_id, (bundle or {}).get("team_name") or "", available_ids, own_names,
                    official_ranks_strict, own_ps, roster_uids, opp_names, opp_ranks, opp_ps, own_plan, opp_plan)
     if own_plan is None:
-        st.info("Vul alle 8 vakjes van onze ploeg in (of klik een voorstel) om het eindresultaat te zien.")
+        st.info("Vul alle 8 vakjes van onze ploeg in (of kies een voorstel) om het eindresultaat te zien.")
         return
     if not opp_dist:
         st.info("Kies een tegenstander-scenario of vul de tegenstander in om het eindresultaat te zien.")

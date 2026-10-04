@@ -133,14 +133,6 @@ toelichting):
      verwijderen" nadat de 2 nuttige presets ("Ons sterkste 4 (Elo)",
      "Onze vorige opstelling") verhuisd waren naar de "Zelf samenstellen"-
      expander in de Rotatieplanner (lineup_rotation.py).
-Na deze 2 verwijderingen bestaat de volgorde van _render_opstelling_
-scenario() nog uit: matchup-tabel ("Opstelling-scenario's") -> Rotatie-
-planner (nu met eindpaneel en de tegenstander-snelkeuzes) - zie
-lineup_rotation.py voor de volledige toelichting bij wat daar nieuw is.
-lineup_whatif.py en lineup_sandbox.py zelf blijven als BESTAND nog
-bestaan in de repo (dit bestand kan ze niet verwijderen) - zie de
-oplever-instructies voor de `git rm`-commando's om ze ook daar weg te
-halen.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03 (op verzoek van Kim, meermaals
 gemeld: "Snelkeuze tegenstander is nog altijd maar 1 optie" + het model
@@ -172,6 +164,38 @@ deze sectie effectief kiest - geen enkele impact op de laadtijd van de
 andere secties. Faalt de import van lineup_retrospective.py (bv. tijdens
 een gefaseerde uitrol), dan toont de sectie een duidelijke melding i.p.v.
 de hele pagina te laten crashen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 (op verzoek van Kim: "er zijn een
+aantal zaken die een beetje overlappen bij de analyse [...] Ik vind voor
+mezelf de rotatieplanner de core. Dus ik zou die na de scenario analyse
+tonen. kans op winst en detail bij scenario analyse zelf voor aanvallend,
+veilig en robuust mogen dan eigenlijk wel weg [...] Het stuk van alle
+matchups, zou je in een apart stuk mogen doen [...] De beste opstelling
+voor mezelf, zal daar wegmogen, aangezien we dat gaan toevoegen bij de
+voorstellen van de rotatieplanner")
+--------------------------------------------------------------------------
+De vroegere ENE aanroep van `_render_all_valid_matchups()` (die intern
+ALLES deed: roster-keuze, scenario-matrix, de knop "Bereken alle geldige
+matchups" en de groepenweergave) is vervangen door TWEE losse aanroepen,
+met de Rotatieplanner ERTUSSEN:
+  1. lineup_matchup_table.render_opponent_scenario_setup(...) - toont
+     "Opstelling-scenario's" (roster-keuze + verwacht aantal matchen +
+     model + scenario-matrix, nu ingekort - zie lineup_scenario_matrix.py)
+     en geeft een dict terug met "unique_opponent_lineups"/"model_weights"/
+     "model_stats".
+  2. _render_rotation_planner(...) - ONGEWIJZIGD aangeroepen (zelfde
+     argumenten als voorheen); dit is nu de kern van de pagina, meteen na
+     de scenario-analyse.
+  3. lineup_matchup_table.render_matchup_overview(setup, ...) - toont "Alle
+     matchups" (de knop "Bereken alle geldige matchups" + de groepen-
+     weergave, nu ZONDER "Beste opstelling voor mezelf" - die vraag
+     beantwoordt de Rotatieplanner nu via de nieuwe "Beste voor <naam>"-rij
+     in het planscherm).
+Daarnaast wordt st.session_state["viewing_player_id_<ploeg_id>"] gezet
+(de speler voor wie de analyse loopt, bovenaan de pagina gekozen) - dat
+leest lineup_plan_screen.py om te weten VOOR WIE die "Beste voor <naam>"-
+rij berekend moet worden, zonder dat lineup_rotation.py's aanroep van
+_render_rotation_planner() hoeft te wijzigen (geen nieuw argument nodig).
 """
 import streamlit as st
 from dashboard_common import (
@@ -197,7 +221,9 @@ from lineup_rotation import (
     _default_opponent_max_per_player,
     ROTATIONS_MIN, ROTATIONS_MAX,  # PADEL_ANALYSIS_CONFIGURABLE_ROTATIONS_2026-09-29
 )
-from lineup_matchup_table import _render_all_valid_matchups
+# PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: de 2 losse functies i.p.v. de
+# ene gecombineerde _render_all_valid_matchups() - zie moduledocstring.
+from lineup_matchup_table import render_opponent_scenario_setup, render_matchup_overview
 # PADEL_ANALYSIS_ROTATION_BUILD1_2026-10-01: lineup_whatif en lineup_sandbox
 # zijn NIET MEER GEIMPORTEERD - zie moduledocstring.
 # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: lazy/defensief - zie moduledocstring.
@@ -321,6 +347,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     # PADEL_ANALYSIS_LINEUP_SNAPSHOT_2026-10-03: datum van de volgende ontmoeting, voor de
     # momentopname die het planscherm bewaart (nabeschouwing met de waarden van toen).
     st.session_state[f"next_match_date_{opp.get('ploeg_id')}"] = before_date
+    # PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: de speler voor wie de analyse
+    # loopt - lineup_plan_screen.py leest dit voor de "Beste voor <naam>"-rij.
+    st.session_state[f"viewing_player_id_{opp.get('ploeg_id')}"] = str(sel_player_id)
     with perf.step("_scout_team_all_fixtures (in fragment)"):
         full_opp_bundle = _scout_team_all_fixtures(
             fixtures, opp.get("ploeg_id"), opp.get("name") or "", before_date,
@@ -467,13 +496,15 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         opponent_ratings = _opponent_padelstat_ratings(bundle)
     for _lbl, _pid in own_label_to_id.items():
         name_lookup_global.setdefault(_pid, _lbl)
-    with perf.step("_render_all_valid_matchups (matchup-tabel)"):
-        all_matchups = _render_all_valid_matchups(
-            planning_bundle, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
-            player_ratings, official_ranks_strict, opponent_ratings, report,
-            name_lookup_global, sel_player_id,
-            tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
-        ) or []
+    # PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: 1) scenario-analyse (ingekort),
+    # 2) Rotatieplanner (de kern, meteen hierna), 3) "Alle matchups" apart -
+    # zie moduledocstring.
+    with perf.step("render_opponent_scenario_setup (scenario-analyse)"):
+        setup = render_opponent_scenario_setup(
+            planning_bundle, opp, int(total_boards), synergy_fn, player_ratings, official_ranks_strict,
+            opponent_ratings, available_ids, max_per_player, name_lookup_global=name_lookup_global,
+            tournament_rules_dict=tournament_rules_dict,
+        )
     st.divider()
     chosen_scenario_boards = None
     with perf.step("_render_rotation_planner"):
@@ -486,6 +517,13 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             max_per_player=max_per_player,  # PADEL_ANALYSIS_PLANNER_TWO_PAIRS_2026-09-29
             profiles=profiles, sel_player_id=sel_player_id,  # PADEL_ANALYSIS_ROTATION_PLANNER_PRESETS_2026-09-30
         )
+    with perf.step("render_matchup_overview (alle matchups)"):
+        all_matchups = render_matchup_overview(
+            setup, opp, available_ids, max_per_player, int(total_boards), synergy_fn,
+            player_ratings, official_ranks_strict, opponent_ratings, report,
+            name_lookup_global, sel_player_id,
+            tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
+        ) or []
 def _render_saved_lineup_analyses(name_lookup_global: dict):
     st.markdown('<div class="section-header">Opgeslagen opstelling-analyses</div>', unsafe_allow_html=True)
     st.caption("Analyses die je eerder opsloeg.")
