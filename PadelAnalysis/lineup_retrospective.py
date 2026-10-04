@@ -3,6 +3,7 @@ lineup_retrospective.py - Nabeschouwing: per eerder gespeelde ontmoeting de
 voorspelde winkans tegenover de echte uitslag, MET de padelstat-/officiële
 klassementwaarden van TOEN (niet de huidige), plus een kalibratieblok over
 alle gespeelde matchen samen met een instelbare winkansfactor.
+
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 (op verzoek van Kim: "het zou ook
 handig zijn om al gespeelde matchen ook nog te kunnen analyseren maar dan
@@ -67,21 +68,9 @@ die match speelde. Zodra 2 verschillende spelers toevallig dezelfde
 datum/encounter-tekst hadden (bv. een damesploeg en een herenploeg die
 dezelfde speeldag een andere interclub-ontmoeting hadden), verschenen beide
 in dezelfde (foute) groep, en dus ook in de dropdown van de gekozen speler.
-FIX: `render_retrospective_tab()` krijgt nu een VERPLICHT `sel_player_id`-
-argument (page_lineup_lab.py geeft de al bovenaan gekozen speler door) en
-haalt ENKEL het matchdocument van DIE speler op - `build_retro_encounter_
-index()` heeft een nieuwe, optionele `sel_player_id`-parameter die, indien
-gegeven, matchrecords van andere spelers gewoon negeert. Elk matchrecord
-van een speler bevat zijn/haar partner- en tegenstandergegevens al VOLLEDIG
-(geen apart partnerdocument nodig om 1 bord correct te tonen), dus dit
-levert exact dezelfde "per match"-weergave op als voorheen, nu enkel nog
-gefilterd op de juiste speler.
-GEVOLG voor "Beste alternatief": omdat we nu enkel het document van de
-gekozen speler kennen (niet van zijn/haar teamgenoten die dag), is het
-vaker onmogelijk om >=4 gekende eigen spelers te verzamelen voor een
-alternatieve koppelverdeling - de UI toont dan expliciet WAAROM ("we tonen
-bewust enkel matchen van deze speler, dus de rest van de ploegopstelling
-die dag is niet gekend").
+FIX (sindsdien verder verfijnd, zie PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04
+hieronder): render_retrospective_tab() filtert nog steeds EXPLICIET op een
+GEKEND, GEKOZEN spelerspeloton - nooit meer "alle 40 profielen impliciet".
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_PERF_2026-10-04 (op verzoek van Kim, met meetgegevens:
 "Totaal deze render: 263.47s [...] Zwaarste eigen tijd: SECTIE Nabeschouwing
@@ -142,16 +131,10 @@ KLASSEMENT. Ontbrak er geen snapshot EN geen historiek-regel exact op/voor
 de matchdatum (bv. omdat de historiek pas sinds kort wordt bijgehouden, zie
 PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03 in firebase_service.py), dan
 sprong de functie METEEN naar het officiële klassement - ook al was er
-intussen gewoon een (recentere) padelstat-waarde gekend. Dat is exact wat
-het screenshot toonde: "huidig officieel klassement (benadering)" i.p.v.
-een padelstat-cijfer, voor een speler die wel degelijk een padelstat-
-rating heeft (enkel nog geen historiek-regel van voor die matchdatum).
-FIX: een NIEUWE tussenstap - _latest_rating_from_history() - geeft de
-MEEST RECENTE padelstat-waarde uit de (al geladen) historiek-lijst terug,
-ongeacht of die voor/na de matchdatum ligt. Nieuwe volgorde voor ONZE
-EIGEN spelers: snapshot -> padelstat-historiek OP DATUM -> HUIDIGE
-padelstat-waarde (nieuw) -> officieel klassement (nu pas de ALLERLAATSTE
-terugval, enkel als er ook nooit een padelstat-waarde gekend was).
+intussen gewoon een (recentere) padelstat-waarde gekend. FIX: een NIEUWE
+tussenstap - _latest_rating_from_history() - geeft de MEEST RECENTE
+padelstat-waarde uit de (al geladen) historiek-lijst terug, ongeacht of die
+voor/na de matchdatum ligt.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_FLAT_RATING_FALLBACK_2026-10-04 (op verzoek van Kim,
 2e ronde, met screenshot: "op basis van welke waarden zegt dat onze
@@ -163,22 +146,14 @@ lezen: het "history"-veld wordt ENKEL gevuld/aangevuld OP HET MOMENT dat
 save_padelstat_rating() voor een speler wordt AANGEROEPEN (dus bij een
 refresh) - NIET met terugwerkende kracht voor spelers die sinds
 PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03 nog niet opnieuw ververst
-zijn. Zo'n speler heeft in Firestore dus nog gewoon het OUDE, VLAKKE
-"rating"-veld (plus "fetched_at"), maar GEEN "history"-array.
-_load_padelstat_histories() deed `list(data.get("history") or [])` - voor
-zo'n speler dus altijd [], waardoor diens wel degelijk bestaande padelstat-
-waarde volledig genegeerd werd en de code alsnog bij het officiële
-klassement uitkwam - exact het gerapporteerde symptoom.
-FIX: _load_padelstat_histories() geeft nu per speler een dict
+zijn. FIX: _load_padelstat_histories() geeft nu per speler een dict
 {"history": [...], "flat_rating": rating_of_None, "flat_fetched_at": ...}
 terug i.p.v. enkel een lijst - het vlakke "rating"-veld gaat NIET meer
 verloren. Een nieuwe, gedeelde kernfunctie _padelstat_priority_rating()
 doorloopt voor zowel eigen spelers als tegenstanders dezelfde 4 stappen:
   1. padelstat-historiek OP DATUM (exact, indien aanwezig);
   2. de meest recente padelstat-HISTORIEK-waarde (any datum);
-  3. het vlakke, niet-gehistoriseerde "rating"-veld (NIEUW - dekt precies
-     de hierboven beschreven, nog niet ge-migreerde spelers af), apart
-     gelabeld zodat de UI eerlijk toont dat dit GEEN historiek-reeks is;
+  3. het vlakke, niet-gehistoriseerde "rating"-veld (NIEUW);
   4. de meegegeven terugval (eigen spelers: huidig officieel klassement;
      tegenstander: officieel klassement van het uitslagenblad van toen).
 --------------------------------------------------------------------------
@@ -188,20 +163,98 @@ padelstat klassement van toen (of huidig als je dat niet hebt). eigenlijk
 moet de winstkans op dezelfde manier berekend worden dan bij de analyse")
 --------------------------------------------------------------------------
 ROOT CAUSE, bevestigd: `_opponent_value_at()` probeerde NOOIT padelstat -
-enkel snapshot -> padelstat-historiek-op-datum (die voor tegenstanders
-sowieso zelden/nooit gevuld was, zie hierboven) -> rechtstreeks het
-officiële klassement van het uitslagenblad. Dat is ASYMMETRISCH met
-_own_value_at() (die wel al padelstat probeerde) EN met de hoofdanalyse
-(lineup_matchup_table.py/lineup_rotation.py), die voor BEIDE kanten
-effective_simulation_rating(uid, padelstat_ratings, official_ranks) - dus
-padelstat-eerst - gebruikt via lineup_scout._opponent_padelstat_ratings().
-FIX: _opponent_value_at() gebruikt nu DEZELFDE _padelstat_priority_rating()
-als _own_value_at(), met als ALLERLAATSTE terugval het officiële
-klassement van het uitslagenblad (in plaats van, zoals voorheen, als
-ENIGE bron). Dit maakt de berekening voor beide kanten identiek van
-opzet aan de hoofdanalyse: padelstat (van toen, anders meest recent
-gekend) heeft voorrang; het officiële klassement is nu voor BEIDE kanten
-pas het laatste redmiddel.
+enkel snapshot -> padelstat-historiek-op-datum -> rechtstreeks het
+officiële klassement van het uitslagenblad. FIX: _opponent_value_at()
+gebruikt nu DEZELFDE _padelstat_priority_rating() als _own_value_at(), met
+als ALLERLAATSTE terugval het officiële klassement van het uitslagenblad.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_SCALE_WIDGET_FIX_2026-10-04 (op verzoek van Kim, met
+foutmelding: "StreamlitWidgetAlreadyInstantiatedError:
+st.session_state['retro_scale'] cannot be modified after the widget with
+that key is instantiated")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd: de "Toepassen"-knop deed
+`st.session_state["retro_scale"] = best["scale"]` NADAT de st.slider() met
+key="retro_scale" al in DEZELFDE render geïnstantieerd was (de slider staat
+hoger in de functie dan de knop) - Streamlit staat dat niet toe, ook al
+volgt er meteen een st.rerun(): de controle gebeurt bij de toewijzing zelf,
+niet pas bij de volgende render.
+FIX: de knop gebruikt nu `on_click=_apply_best_scale_callback` met
+`args=(best["scale"],)` i.p.v. een `if st.button(...): st.session_state[...] = ...`-
+blok. Een on_click-callback draait VOOR de widgets van de volgende render
+geïnstantieerd worden (dat is exact wat de officiële foutmelding zelf al
+aanraadt), dus de toewijzing is daar wel toegelaten. Geen expliciete
+st.rerun() meer nodig - Streamlit doet dat automatisch na een callback.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04 (op verzoek van Kim: "ik zie
+enkel de matchen van mezelf. Ik wil ook die van mijn ploegmaten zien. Nog
+meer data trouwens dat om te gebruiken. Dan kan je eindresultaat vergelijken
+met voorspeld resultaat. Beste alternatief is altijd leeg" + de bijhorende
+melding "we tonen bewust enkel matchen van Kim Verbeke [...] Een alternatief
+vergt minstens 4 gekende eigen spelers van dezelfde dag")
+--------------------------------------------------------------------------
+ROOT CAUSE van "Beste alternatief altijd leeg": bevestigd, en inherent aan
+de PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04-fix hierboven - die loste
+de dames-matchen-bug terecht op door ENKEL het document van de GEKOZEN
+speler op te halen, maar sloot daarmee ONBEDOELD ook de WEL gewenste
+teamgenoten (dezelfde ontmoeting, andere koppels) uit. Met <4 gekende eigen
+spelers per ontmoeting kan best_alternative_for_encounter() nooit een
+alternatieve koppelverdeling berekenen (die heeft minstens 4 spelers nodig
+om te herschikken) - en de kalibratie/"eindresultaat"-vraag hieronder heeft
+om dezelfde reden nooit de VOLLEDIGE ontmoeting gekend.
+FIX: `render_retrospective_tab()` bepaalt nu EERST, met een goedkope enkele
+lookup van ENKEL `sel_player_id`, welke teamgenoten in diens matchen als
+partner opduiken ("gedetecteerde ploegmaats"). Een multiselect ("Analyseer
+ook de matchen van") laat Kim dat voorstel aanvullen/inperken - standaard
+vooraf ingevuld met de gedetecteerde ploegmaats. Alle volgende stappen
+(docs ophalen, encounter-index, padelstat-cache, ruwe data, kalibratie,
+"beste alternatief") draaien op dat VOLLEDIGE, EXPLICIET gekozen peloton -
+nooit meer impliciet "alle profielen", dus de dames-matchen-bug uit
+PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 kan niet terugkeren: een
+match komt enkel binnen als minstens 1 van de EXPLICIET gekozen spelers
+hem effectief speelde.
+`build_retro_encounter_index()` heeft nu een `allowed_player_ids`-parameter
+(een SET) i.p.v. het vroegere, enkelvoudige `sel_player_id` - met dezelfde
+betekenis (None = geen filter, geef dit nooit mee vanuit de UI) maar nu
+meerdere toegelaten spelers tegelijk. Een bord dat door 2 van de gekozen
+teamgenoten gespeeld werd (elk vanuit hun eigen document) krijgt dankzij de
+bestaande dedupe-sleutel (_board_dedupe_key(), gebaseerd op match_id/koppel,
+niet op wie het document aanlevert) maar EENMAAL een plek in de index - geen
+dubbele rijen.
+Zodra zo een ontmoeting NU >=4 bekende eigen spelers heeft, werkt "Beste
+alternatief" vanzelf (geen losse codewijziging nodig daar).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 (zelfde verzoek als
+hierboven: "Dan kan je eindresultaat vergelijken met voorspeld resultaat")
+--------------------------------------------------------------------------
+NIEUW blok "Eindresultaat van de ontmoeting: voorspeld tegenover echt" -
+enkel zinvol/getoond zodra ALLE boards van de gekozen ontmoeting gekend
+zijn (typisch pas haalbaar met teamgenoten erbij, zie hierboven). Combineert
+de per-bord voorspelde winkansen tot een voorspelde kans op 2/1/0
+competitiepunten (_combine_boards_to_point_probs() - lokale, PURE kopie van
+dezelfde combinatorische logica als lineup_rotation._match_outcome_point_
+probabilities()/lineup_plan_screen._points(), BEWUST hier opnieuw
+geschreven i.p.v. geïmporteerd - zie de uitleg bovenaan dit bestand over
+waarom dit bestand zijn eigen, kleine kopieën van gedeelde rekenlogica
+gebruikt i.p.v. afhankelijkheden op andere lineup_*-modules op te bouwen)
+en vergelijkt dat met de ECHTE einduitslag (_actual_encounter_result() -
+simpel telwerk op "won" per bord, enkel als ALLE boards een gekende
+uitslag hebben). Is niet elk bord gekend, dan toont de sectie expliciet
+hoeveel borden ontbreken i.p.v. een onvolledig of misleidend cijfer.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_ALT_REASON_2026-10-04 (gevonden tijdens het testen van
+PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04 hierboven)
+--------------------------------------------------------------------------
+ROOT CAUSE: best_alternative_for_encounter() gaf in ALLE "niet gelukt"-
+gevallen simpelweg None terug, en de UI toonde daarbij altijd dezelfde
+tekst: "minder dan 4 spelers gekend". Dat klopte niet meer zodra er WEL
+>=4 spelers gekend waren maar de optimalisatie zelf (ll.optimize_lineup_
+vs_scenario) toch leeg teruggaf (bv. geen enkele combinatie binnen de
+puntengrens) - de UI zou dan een AANTOONBAAR ONJUISTE oorzaak tonen.
+FIX: de functie geeft nu ALTIJD een dict terug (nooit None) met een
+"reason"-veld ("too_few_players" / "no_valid_combinations" / None bij
+succes) en "n_players" - de UI toont per geval de juiste, specifieke
+tekst i.p.v. 1 vaste aanname.
 """
 import math
 import re
@@ -257,13 +310,15 @@ def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
     ])
 
 
-def build_retro_encounter_index(docs: Dict[str, dict], sel_player_id=None) -> Dict[tuple, list]:
-    """PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: met `sel_player_id`
-    gezet, komen ENKEL matchrecords van DIE speler in de index terecht -
-    zie moduledocstring voor de volledige root-cause-analyse."""
+def build_retro_encounter_index(docs: Dict[str, dict], allowed_player_ids=None) -> Dict[tuple, list]:
+    """PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: `allowed_player_ids` is nu
+    een SET (meerdere toegelaten spelers) i.p.v. het vroegere enkelvoudige
+    `sel_player_id` - zie moduledocstring. None = geen filter (nooit vanuit
+    de UI meegeven - enkel ter beschikking voor eventueel ander gebruik)."""
+    allowed = {str(p) for p in allowed_player_ids} if allowed_player_ids is not None else None
     index: Dict[tuple, list] = {}
     for pid, doc in docs.items():
-        if sel_player_id is not None and str(pid) != str(sel_player_id):
+        if allowed is not None and str(pid) not in allowed:
             continue
         for m in doc.get("matches", []) or []:
             if m.get("match_type") != "interclub":
@@ -280,10 +335,8 @@ def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
     ROOT CAUSE, bevestigd: de sortering gebruikte de RUWE datum-TEKST
     ("26/09/2026", dag-eerst) als sorteersleutel. Lexicografisch sorteren
     van dag-eerst-tekst geeft NIET de chronologische volgorde zodra de
-    maand verschilt (bv. "05/01/2026" komt lexicografisch VOOR
-    "20/12/2025", terwijl 5 januari 2026 net NA 20 december 2025 valt).
-    FIX: sorteer op `to_iso_date(x[2])` (YYYY-MM-DD, wel correct
-    lexicografisch sorteerbaar) i.p.v. de ruwe tekst."""
+    maand verschilt. FIX: sorteer op `to_iso_date(x[2])` (YYYY-MM-DD, wel
+    correct lexicografisch sorteerbaar) i.p.v. de ruwe tekst."""
     items = []
     for key, entries in index.items():
         date, encounter = key
@@ -302,7 +355,13 @@ def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
 def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
     """Zoals ll.reconstruct_boards(), maar behoudt ook opp1_ranking/
     opp2_ranking (tekst, bv. "P200") en match_date - nodig voor de
-    retrospectieve voorspelling (zie moduledocstring)."""
+    retrospectieve voorspelling (zie moduledocstring).
+    PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: `entries` kan nu matchrecords
+    van MEERDERE eigen spelers bevatten (1 ontmoeting, meerdere koppels) -
+    de bestaande `_board_dedupe_key()` (gebaseerd op match_id/koppel, NIET
+    op welk document het record aanlevert) zorgt dat elk bord nog steeds
+    maar EENMAAL in de uitkomst verschijnt, ook als 2 teamgenoten hetzelfde
+    bord elk vanuit hun eigen perspectief aanleveren."""
     seen = {}
     for pid, m in entries:
         key = _board_dedupe_key(m, pid)
@@ -322,6 +381,22 @@ def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
             "match_id": m.get("match_id"), "dedupe_key": key,
         }
     return list(seen.values())
+
+
+# --------------------------------------------------------------- teamgenoten
+def _detect_teammates(docs: Dict[str, dict], sel_player_id: str) -> set:
+    """PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04 - zie moduledocstring: alle
+    speler-id's die ooit als `partner_user_id` optraden in een interclub-
+    match van `sel_player_id` - dit is het voorstel dat de multiselect
+    standaard vooraf invult."""
+    teammates = set()
+    doc = docs.get(str(sel_player_id)) or {}
+    for m in doc.get("matches", []) or []:
+        if m.get("match_type") != "interclub":
+            continue
+        if m.get("partner_user_id"):
+            teammates.add(str(m["partner_user_id"]))
+    return teammates
 
 
 # --------------------------------------------------------------- momentopnames
@@ -453,11 +528,7 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
     moduledocstring voor de volgorde van bronnen. Geeft (waarde, bron) terug;
     waarde is None als er niets gekend is. GEEN Firestore-aanroep meer (zie
     PADEL_ANALYSIS_RETRO_PERF_2026-10-04) - `ratings_cache` is al voor de
-    hele sessie opgehaald.
-    PADEL_ANALYSIS_RETRO_FLAT_RATING_FALLBACK_2026-10-04: gebruikt nu de
-    gedeelde _padelstat_priority_rating() (historiek-op-datum -> meest
-    recente historiek -> vlak "rating"-veld -> fallback) i.p.v. eigen
-    inline-logica - zie moduledocstring."""
+    hele sessie opgehaald."""
     pid = str(player_id)
     if snapshot_own and pid in snapshot_own:
         v = snapshot_own[pid]
@@ -477,10 +548,8 @@ def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
     """Effectieve rating van EEN tegenstander-speler op `date_text`. GEEN
     Firestore-aanroep meer - zie _own_value_at().
     PADEL_ANALYSIS_RETRO_OPPONENT_PADELSTAT_2026-10-04: gebruikt nu DEZELFDE
-    gedeelde _padelstat_priority_rating() als eigen spelers - padelstat
-    (van toen, anders meest recent gekend) heeft voorrang; het officiele
-    klassement van het uitslagenblad is nu pas het ALLERLAATSTE redmiddel,
-    i.p.v. - zoals voorheen - de enige bron. Zie moduledocstring."""
+    gedeelde _padelstat_priority_rating() als eigen spelers - zie
+    moduledocstring."""
     uid = str(user_id) if user_id else None
     if snapshot_opp and uid and uid in snapshot_opp:
         v = snapshot_opp[uid]
@@ -540,6 +609,53 @@ def predict_encounter(
         snapshot = _find_snapshot_for(boards[0].get("match_date"), opp_ids)
     predictions = [predict_board(b, current_official_ranks, ratings_cache, scale=scale, snapshot=snapshot) for b in boards]
     return {"boards": predictions, "snapshot_used": snapshot is not None}
+
+
+# ------------------------------------------- volledige-ontmoeting-uitkomst
+def _combine_boards_to_point_probs(win_probs: list) -> dict:
+    """PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 - zie moduledocstring.
+    PURE, lokale kopie van dezelfde combinatorische logica als lineup_
+    rotation._match_outcome_point_probabilities()/lineup_plan_screen._points() -
+    bewust hier opnieuw geschreven i.p.v. geïmporteerd (zie bovenaan dit
+    bestand: geen afhankelijkheden op andere lineup_*-modules). `win_probs`
+    mag None bevatten (onbekende winkans) - die telt als 50/50."""
+    probs = [(0.5 if p is None else max(0.0, min(1.0, float(p)))) for p in win_probs]
+    n = len(probs)
+    if n == 0:
+        return {"p2": 0.0, "p1": 0.0, "p0": 0.0}
+    tot = {0: 1.0}
+    for p in probs:
+        nieuw = {}
+        for k, pk in tot.items():
+            nieuw[k] = nieuw.get(k, 0.0) + pk * (1.0 - p)
+            nieuw[k + 1] = nieuw.get(k + 1, 0.0) + pk * p
+        tot = nieuw
+    half = n / 2.0
+    p2 = sum(p for k, p in tot.items() if k > half)
+    p1 = sum(p for k, p in tot.items() if k == half)
+    p0 = max(0.0, 1.0 - p2 - p1)
+    return {"p2": p2, "p1": p1, "p0": p0}
+
+
+def _actual_encounter_result(boards: list) -> Optional[dict]:
+    """PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04: telt de echte
+    uitslag van een VOLLEDIGE ontmoeting (alle boards). Geeft None terug als
+    niet ELK bord een gekende "won"-waarde heeft - toon dan liever niets dan
+    een onvolledig/misleidend cijfer."""
+    if not boards:
+        return None
+    gewonnen = [b.get("won") for b in boards]
+    if any(w is None for w in gewonnen):
+        return None
+    n_win = sum(1 for w in gewonnen if w)
+    half = len(boards) / 2.0
+    if n_win > half:
+        uitkomst = "gewonnen"
+    elif n_win == half:
+        uitkomst = "gelijk"
+    else:
+        uitkomst = "verloren"
+    return {"n_win": n_win, "n_boards": len(boards), "uitkomst": uitkomst}
 
 
 # ------------------------------------------------ schaal-onafhankelijke ruwe data
@@ -658,15 +774,15 @@ def best_alternative_for_encounter(
     """Zoekt, MET de waarden van toen en ZONDER deze ontmoeting zelf in de
     synergie te laten meetellen (exclude_match_keys - geen lekkage van de
     uitkomst in de eigen voorspelling), de beste alternatieve koppelverdeling
-    voor deze ontmoeting. Geeft None terug als er te weinig data is - zie
-    PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 voor waarom dit nu vaker
-    het geval is (we kennen enkel het document van de gekozen speler, dus
-    zelden >=4 eigen spelers van dezelfde ontmoeting)."""
+    voor deze ontmoeting. Geeft altijd een dict terug (nooit None) met een
+    "reason"-veld (None = gelukt; "too_few_players"; "no_valid_combinations")
+    zodat de UI de ECHTE oorzaak kan tonen i.p.v. 1 generieke, soms
+    misleidende melding - zie PADEL_ANALYSIS_RETRO_ALT_REASON_2026-10-04."""
     if not boards:
-        return None
+        return {"top": [], "actual": None, "reason": "too_few_players", "n_players": 0}
     players = sorted({str(p) for b in boards for p in b["pair"]})
     if len(players) < 4:
-        return None
+        return {"top": [], "actual": None, "reason": "too_few_players", "n_players": len(players)}
     required = ll.required_counts_from_boards(boards)
     exclude_keys = {b["dedupe_key"] for b in boards}
     synergy = ll.compute_pairwise_synergy(docs, players, exclude_match_keys=exclude_keys)
@@ -700,13 +816,13 @@ def best_alternative_for_encounter(
         top_n=top_n, win_probability_scale=scale,
     )
     if not results:
-        return None
+        return {"top": [], "actual": None, "reason": "no_valid_combinations", "n_players": len(players)}
     actual_key = tuple(sorted(tuple(sorted(b["pair"])) for b in boards))
     actual_result = next(
         (r for r in results if tuple(sorted(tuple(sorted(a["our_pair"])) for a in r["assignment"])) == actual_key),
         None,
     )
-    return {"top": results, "actual": actual_result}
+    return {"top": results, "actual": actual_result, "reason": None, "n_players": len(players)}
 
 
 # --------------------------------------------------------------------------
@@ -745,36 +861,73 @@ def _render_board_row(bp: dict, name_lookup: dict) -> None:
         )
 
 
+def _apply_best_scale_callback(new_scale: float) -> None:
+    """PADEL_ANALYSIS_RETRO_SCALE_WIDGET_FIX_2026-10-04 - zie moduledocstring:
+    MOET via on_click (draait voor de volgende render de slider-widget
+    opnieuw instantieert), niet rechtstreeks na een if-st.button()-blok."""
+    st.session_state["retro_scale"] = new_scale
+    st.session_state.pop("retro_best_scale_result", None)
+
+
 def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 - zie moduledocstring. Enkel
     deze functie heeft Streamlit nodig; de rest van dit bestand is daar
     volledig los van (ook los testbaar).
-    PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: `sel_player_id` is nu
-    VERPLICHT - de analyse (en de kalibratie) gebruikt UITSLUITEND de
-    interclub-matchen van DIE speler, niet van alle spelers in de club."""
+    PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: toont nu standaard ook de
+    matchen van gedetecteerde teamgenoten (aanpasbaar via multiselect) -
+    zie moduledocstring voor waarom dit de "Beste alternatief altijd
+    leeg"-klacht oplost en meer kalibratiedata oplevert."""
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
     sel_player_id = str(sel_player_id)
     name_lookup = {str(p.get("player_id")): (p.get("display_name") or str(p.get("player_id"))) for p in profiles}
     sel_naam = name_lookup.get(sel_player_id, sel_player_id)
-    st.caption(
-        f"Vergelijkt, voor **{sel_naam}**, de voorspelde winkans met de echte uitslag van eerder gespeelde "
-        "interclub-matchen, MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. "
-        "Gebruik dit om te controleren of de winkans-formule klopt, en wat het betere alternatief geweest "
-        "zou zijn. Toont enkel matchen van deze speler - wissel van speler bovenaan de pagina om een "
-        "andere analyse te zien."
-    )
+
+    # PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: eerst een goedkope lookup van
+    # ENKEL sel_player_id om teamgenoten te detecteren (voorstel voor de
+    # multiselect hieronder) - zie moduledocstring.
     with st.spinner(f"Matchen van {sel_naam} ophalen..."):
-        docs = ll.get_docs_for_players([sel_player_id])
-    # PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04: enkel matchen van sel_player_id.
-    index = build_retro_encounter_index(docs, sel_player_id=sel_player_id)
+        sel_docs = ll.get_docs_for_players([sel_player_id])
+    teammates = _detect_teammates(sel_docs, sel_player_id)
+    teammate_options = [p for p in profiles if str(p.get("player_id")) in teammates]
+    other_options = [p for p in profiles if str(p.get("player_id")) not in teammates
+                     and str(p.get("player_id")) != sel_player_id]
+    option_labels = [sel_naam] + [name_lookup.get(str(p.get("player_id")), "?") for p in teammate_options + other_options]
+    label_to_id = {sel_naam: sel_player_id}
+    label_to_id.update({name_lookup.get(str(p.get("player_id")), "?"): str(p.get("player_id")) for p in teammate_options})
+    label_to_id.update({name_lookup.get(str(p.get("player_id")), "?"): str(p.get("player_id")) for p in other_options})
+    default_labels = [sel_naam] + [name_lookup.get(str(p.get("player_id")), "?") for p in teammate_options]
+
+    st.caption(
+        f"Vergelijkt de voorspelde winkans met de echte uitslag van eerder gespeelde interclub-matchen, MET "
+        "de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. Gebruik dit om te "
+        "controleren of de winkans-formule klopt, en wat het betere alternatief geweest zou zijn."
+    )
+    gekozen_labels = st.multiselect(
+        "Analyseer ook de matchen van",
+        option_labels, default=default_labels, key=f"retro_teammates_{sel_player_id}",
+        help=f"{sel_naam} staat er altijd bij. Standaard vooraf ingevuld met de teamgenoten waarmee "
+             f"{sel_naam} al samenspeelde - voeg er gerust meer toe, of laat enkele weg. Meer spelers "
+             "samen geven een vollediger beeld per ontmoeting (en maken 'Beste alternatief' en het "
+             "eindresultaat hieronder vaker berekenbaar), maar dames- en herenmatchen blijven gescheiden: "
+             "een match komt enkel mee als een van de hier gekozen spelers hem ECHT speelde.",
+    )
+    gekozen_ids = {label_to_id[lbl] for lbl in gekozen_labels if lbl in label_to_id} | {sel_player_id}
+
+    if gekozen_ids == {sel_player_id}:
+        docs = sel_docs
+    else:
+        with st.spinner("Matchen van de gekozen spelers ophalen..."):
+            docs = ll.get_docs_for_players(sorted(gekozen_ids))
+
+    index = build_retro_encounter_index(docs, allowed_player_ids=gekozen_ids)
     encounters = list_retro_encounters(index)
     if not encounters:
         st.info(f"Nog geen gespeelde interclub-ontmoetingen gevonden voor {sel_naam}.")
         return
-    # Klassement-terugval ook voor gekende teamgenoten van sel_player_id (niet enkel
-    # sel_player_id zelf) - anders toont "Op basis van welke waarden?" onnodig "onbekend"
-    # voor de partner (zie screenshot-feedback).
-    own_side_ids = {sel_player_id}
+
+    # Klassement-terugval ook voor alle gekozen spelers EN hun partners (niet enkel
+    # sel_player_id zelf) - anders toont "Op basis van welke waarden?" onnodig "onbekend".
+    own_side_ids = set(gekozen_ids)
     for entries in index.values():
         for _pid, m in entries:
             if m.get("partner_user_id"):
@@ -785,22 +938,25 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
     except Exception:  # noqa: BLE001
         pass
+
     # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler,
     # 5 minuten gecached - geen Firestore-reads meer per bord/match hierna.
     player_ids = tuple(sorted(_collect_relevant_player_ids(index)))
     ratings_cache = _load_padelstat_histories(player_ids)
+
     # Schaal-ONAFHANKELIJKE ruwe data - 1x verzameld per sessie (hergebruikt bij
     # schuifregelaar-bewegingen en de "beste factor zoeken"-knop hieronder).
-    raw_sig = (sel_player_id, player_ids)
+    raw_sig = (tuple(sorted(gekozen_ids)), player_ids)
     raw_key = f"retro_raw_{sel_player_id}"
     if st.session_state.get(raw_key + "_sig") != raw_sig:
         st.session_state[raw_key] = gather_raw_match_data(index, current_official_ranks, ratings_cache)
         st.session_state[raw_key + "_sig"] = raw_sig
     raw_rows = st.session_state[raw_key]
+
     labels = [lbl for _k, lbl in encounters]
     key_by_label = {lbl: k for k, lbl in encounters}
     gekozen_label = st.selectbox(
-        f"Kies een eerder gespeelde ontmoeting van {sel_naam}", labels, key="retro_pick_encounter",
+        "Kies een eerder gespeelde ontmoeting", labels, key="retro_pick_encounter",
     )
     gekozen_key = key_by_label[gekozen_label]
     boards = reconstruct_boards_with_rankings(index[gekozen_key])
@@ -811,16 +967,57 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown("#### Per match: voorspeld tegenover echt")
     for bp in pred["boards"]:
         _render_board_row(bp, name_lookup)
+
+    # PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 - zie moduledocstring.
+    st.divider()
+    st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
+    n_known_boards = len(boards)
+    # PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04: GEEN vast minimum (najaar heeft 4 borden,
+    # voorjaar 6) - dat zou bij het andere formaat altijd ten onrechte "te weinig" tonen. Matchen
+    # gebeuren wel altijd per 2 tegelijk (1 rotatie), dus een ONEVEN aantal is wel een hard signaal
+    # van onvolledigheid.
+    if n_known_boards < 2 or n_known_boards % 2 != 0:
+        st.caption(
+            f"We kennen {n_known_boards} van de borden van deze ontmoeting - te weinig (of een oneven "
+            "aantal, wat altijd op een ontbrekend bord wijst) voor een betrouwbaar eindresultaat. Voeg "
+            "hierboven bij 'Analyseer ook de matchen van' meer teamgenoten van die dag toe."
+        )
+    else:
+        encounter_pp = _combine_boards_to_point_probs([bp["win_probability"] for bp in pred["boards"]])
+        st.caption(
+            f"Gebaseerd op {n_known_boards} gekende borden van deze ontmoeting - mogelijk een deel als "
+            "niet alle teamgenoten van die dag hierboven geselecteerd zijn."
+        )
+        st.markdown(
+            f"Voorspeld (op basis van {n_known_boards} gekende borden): "
+            f":green[**{encounter_pp['p2'] * 100:.0f}% winst**] \u00b7 "
+            f":orange[**{encounter_pp['p1'] * 100:.0f}% gelijk**] \u00b7 "
+            f":red[**{encounter_pp['p0'] * 100:.0f}% verlies**]"
+        )
+        actual = _actual_encounter_result(boards)
+        if actual is None:
+            st.caption("De echte uitslag van 1 of meer van deze borden is niet gekend - geen vergelijking mogelijk.")
+        else:
+            st.markdown(
+                f"Echt: **{actual['uitkomst']}** ({actual['n_win']} van {actual['n_boards']} borden gewonnen)."
+            )
+
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
     with st.spinner("Alternatieven doorrekenen..."):
         alt = best_alternative_for_encounter(boards, docs, current_official_ranks, ratings_cache, scale=scale)
-    if not alt:
+    if alt.get("reason") == "too_few_players":
         st.caption(
-            "Onvoldoende data om alternatieven te berekenen voor deze ontmoeting - we tonen bewust enkel "
-            f"matchen van {sel_naam}, dus de rest van de ploegopstelling die dag (wie nog meer speelde, met "
-            "wie) is niet gekend. Een alternatief vergt minstens 4 gekende eigen spelers van dezelfde dag."
+            f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige "
+            "4) - voeg hierboven bij 'Analyseer ook de matchen van' meer teamgenoten van die dag toe."
         )
+    elif alt.get("reason") == "no_valid_combinations":
+        st.caption(
+            f"{alt.get('n_players', 0)} eigen spelers gekend, maar geen enkele reglementair geldige "
+            "alternatieve koppelverdeling gevonden voor deze combinatie (bv. door de puntengrens)."
+        )
+    elif not alt.get("top"):
+        st.caption("Geen alternatieven gevonden voor deze ontmoeting.")
     else:
         actual_ebw = alt["actual"]["expected_boards_won"] if alt["actual"] else None
         for rank, r in enumerate(alt["top"], start=1):
@@ -838,15 +1035,16 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             )
         elif alt["actual"] is not None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
+
     st.divider()
-    st.markdown(f"#### Kalibratie over alle gespeelde matchen van {sel_naam}")
+    namen_tekst = " / ".join(name_lookup.get(pid, pid) for pid in sorted(gekozen_ids))
+    st.markdown(f"#### Kalibratie over alle gespeelde matchen van {namen_tekst}")
     st.caption(
         f"Hoe vaak klopte een voorspelling van bv. '60% winkans' ook echt? Gebruikt ALLE **{len(raw_rows)}** "
-        f"interclub-matchen van **{sel_naam}** die we kennen (niet enkel de bovenstaande ontmoeting, maar wel "
-        "nog steeds enkel van deze speler - matchen van andere spelers tellen hier niet mee, want we kennen "
-        "hun waarden van toen te onvolledig om dat zinvol te maken). De Brier-score (lager is beter, 0 = "
-        "perfect, 0.25 = niet beter dan een muntstuk) en de kans-klassen hieronder herberekenen INSTANT bij "
-        "een andere factor - er gebeurt hierna geen enkele nieuwe Firestore-opvraging meer."
+        f"interclub-matchen van de hierboven gekozen spelers die we kennen (niet enkel de bovenstaande "
+        "ontmoeting). De Brier-score (lager is beter, 0 = perfect, 0.25 = niet beter dan een muntstuk) en de "
+        "kans-klassen hieronder herberekenen INSTANT bij een andere factor - er gebeurt hierna geen enkele "
+        "nieuwe Firestore-opvraging meer."
     )
     c_slider, c_curve = st.columns([2, 1])
     with c_slider:
@@ -862,7 +1060,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     scored = score_raw_at_scale(raw_rows, scale)
     stats = calibration_stats(scored)
     if not stats:
-        st.info(f"Nog geen matchen van {sel_naam} met zowel een gekende winkans als een gekende uitslag.")
+        st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -871,6 +1069,13 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.metric("Accuraatheid", f"{stats['accuracy'] * 100:.0f}%", help="Hoe vaak de favoriet (>=50%) ook echt won.")
     with c3:
         st.metric("Aantal matchen", f"{stats['n']}")
+    if stats["brier"] >= 0.245:
+        st.warning(
+            f"Een Brier-score van {stats['brier']:.3f} ligt zeer dicht bij 0.25 - dat betekent dat de "
+            "voorspelling hier amper beter is dan een muntje opgooien. Meer data (teamgenoten hierboven "
+            "toevoegen) kan dit beeld scherper maken, maar wijst mogelijk ook op een factor die bijgesteld "
+            "moet worden, of op wedstrijden waar de echte uitslag sterk afweek van het niveauverschil."
+        )
     st.caption(
         f"Gemiddeld voorspeld: {stats['mean_predicted'] * 100:.0f}% - gemiddeld werkelijk gewonnen: "
         f"{stats['mean_actual'] * 100:.0f}%."
@@ -908,9 +1113,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
                 f"Voorstel: **{best['scale']}** (Brier **{best['brier']:.3f}**) in plaats van de huidige "
                 f"**{int(scale)}** (Brier **{stats['brier']:.3f}**) - dat betekent een {richting} inschatting."
             )
-            if st.button(f"Toepassen: zet factor op {best['scale']}", key="retro_apply_best_scale"):
-                st.session_state["retro_scale"] = best["scale"]
-                st.session_state.pop("retro_best_scale_result", None)
-                st.rerun()
+            # PADEL_ANALYSIS_RETRO_SCALE_WIDGET_FIX_2026-10-04 - zie moduledocstring:
+            # via on_click i.p.v. een if-st.button()-blok dat session_state["retro_scale"]
+            # rechtstreeks zou zetten NA het al geïnstantieerde slider-widget hierboven.
+            st.button(
+                f"Toepassen: zet factor op {best['scale']}", key="retro_apply_best_scale",
+                on_click=_apply_best_scale_callback, args=(best["scale"],),
+            )
     elif result is not None:
         st.warning("Kon geen enkele factor beoordelen - onvoldoende matchen met een gekende uitslag.")
