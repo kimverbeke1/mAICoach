@@ -1,6 +1,6 @@
 """
 lineup_retrospective.py - Nabeschouwing: per eerder gespeelde ontmoeting de
-voorspelde winkans tegenover de echte uitslag, MET de padelstat-/officiële
+voorspelde winkans tegenover de echte uitslag, MET de padelstat-/officiele
 klassementwaarden van TOEN (niet de huidige), plus een kalibratieblok over
 alle gespeelde matchen samen met een instelbare winkansfactor.
 --------------------------------------------------------------------------
@@ -10,79 +10,58 @@ parallelle Firestore-batches, snapshot-cache, persistente winkansfactor,
 eindresultaat-vergelijking, "beste alternatief", individuele-vorm-index,
 automatische teamgenoten-resolutie, sterkte-gecorrigeerd vorm-model,
 vereenvoudigde kalibratie, prefetch-scope-fix, tegenstander-lek-fix,
-model-consistentie tussen "Per match" en kalibratie.)
+model-consistentie tussen "Per match" en kalibratie, lazy kalibratie achter
+een knop, live voortgangsweergave per stap, teamgenoten-scan-cache.)
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05 (op verzoek van Kim, na
-herhaalde snelheidsklachten ondanks eerdere fixes: "nabeschouwing nog traag.
-je toont ook niet eerst de eigen [matchen] dat die mss sneller al
-beschikbaar is dan al die gekende matchen?" + "is nu echt wel extreem lang
-[...] ik ga geen csv doorsturen nog. nog altijd bezig. ik zie alleen alle
-gekende matchen doorzoeken")
+PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 (op verzoek van
+Kim, met meting: "zit vandaag over 64k [Firestore-reads]. ik had pay as you
+go gedacht maar is raar" + bevestigd: ~10-15x op "Bereken kalibratie"
+geklikt vandaag)
 --------------------------------------------------------------------------
-EERLIJKE STAND VAN ZAKEN: 3 eerdere rondes probeerden de kalibratie-stap
-(gather_all_valid_match_data(), die over ALLE profielen in de database
-loopt) sneller te maken door de deel-stappen ERBINNEN te optimaliseren
-(parallelle prefetch, scope beperkt tot relevante spelers i.p.v. alle
-profielen). Elke fix loste een ECHTE, bevestigde bottleneck op (achtereen-
-volgens padelstat-reads, klassement-reads), maar Kim rapporteert dat de
-render nu, ZONDER dat er een nieuwe CSV-meting voorhanden is, minutenlang
-("echt wel extreem lang") blijft hangen op exact de stap "Alle gekende
-matchen doorzoeken..." - het st.spinner()-bericht rond
-gather_all_valid_match_data(). Het ONVERKLAARDE deel van deze stap is
-`ll.get_docs_for_players(all_ids)` zelf: dit haalt het VOLLEDIGE
-matchdocument (met de hele "matches"-array, potentieel honderden regels per
-speler) op voor ELK profiel in de hele clubdatabase (mogelijk honderden
-profielen) - en dit bestand heeft GEEN zicht op hoe lineup_lab.py die
-functie intern implementeert (sequentieel per speler, of echt gebatcht).
-Als dat intern sequentieel gebeurt, is DIT de werkelijke, nog niet
-bevestigde bottleneck - groter dan de 2 die al wel bevestigd en opgelost
-zijn.
-FIX, in 2 delen, GEEN gok meer over de interne implementatie van
-ll.get_docs_for_players():
-  1. STRUCTUREEL: de kalibratie-doorzoeking (gather_all_valid_match_data(),
-     dus ook de daaruit afgeleide form_index en form_adjustment) is NIET
-     MEER AUTOMATISCH bij elke render. "Per match", "Eindresultaat" en
-     "Beste alternatief" (die ENKEL sel_player_id's eigen, kleine
-     matchdocument + automatisch gevonden teamgenoten van 1 ontmoeting
-     nodig hebben - een GOEDKOPE bewerking) worden nu DIRECT getoond,
-     zonder op de rest te wachten. De kalibratie-sectie staat nu achter
-     een EXPLICIETE knop "Bereken kalibratie (over alle gekende matchen)" -
-     wie enkel "Per match" wil bekijken, wacht dus NOOIT meer op de zware
-     stap. Dit is zowel Kim's eigen voorstel ("toon eerst de eigen [...]")
-     als de veiligste ingreep die ik met zekerheid kan nemen zonder de
-     broncode van ll.get_docs_for_players() te zien.
-  2. METING: een nieuw, apart perf.step()-meetpunt
-     "retro: get_docs_for_players(alle profielen)" rond PRECIES die ene
-     aanroep (voorheen inbegrepen in de grotere "alle geldige matchdata
-     verzamelen"-stap, dus niet apart zichtbaar) - zodra Kim de nieuwe
-     "Bereken kalibratie"-knop indrukt en een CSV deelt, is in 1 oogopslag
-     te zien of deze aanroep de echte (resterende) bottleneck is. Dat
-     bevestigt of weerlegt de hierboven beschreven hypothese, i.p.v. nog
-     een 4e keer blind te herstellen op basis van een vermoeden.
-  3. `form_index` (gebruikt in "Per match" voor de individuele-vorm-regel,
-     PADEL_ANALYSIS_RETRO_INDIVIDUAL_FORM_2026-10-04) komt nu OOK uit de
-     kalibratie-data en is dus pas beschikbaar NADAT "Bereken kalibratie"
-     ingedrukt is - voordien toont "Per match" eenvoudigweg geen
-     individuele-vorm-regel (geen fout, enkel tijdelijk afwezig totdat de
-     kalibratie 1x gedraaid is in deze sessie). Hetzelfde geldt voor de
-     ACTIEVE bias/form_weight-correctie in de voorspelling zelf
-     (PADEL_ANALYSIS_RETRO_MODEL_CONSISTENCY_2026-10-05) - zonder
-     berekende form_adjustment wordt enkel scale+bias toegepast (form_
-     weight-component op 0), nooit een crash.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_RETRO_TEAMMATE_SCAN_COST_2026-10-05 (gevonden TIJDENS het
-testen van bovenstaande fix, met een stress-test van 300 profielen)
---------------------------------------------------------------------------
-BELANGRIJKE, APARTE VONDST: zelfs NA het lui maken van de kalibratie-stap
-hierboven, bleek _resolve_encounter_teammates() een TWEEDE, eigen bron van
-kosten te zijn die WEL nog automatisch draait bij elke weergave van een
-ontmoeting - ongeacht de "Bereken kalibratie"-knop. Deze functie haalt tot
-200 VOLLEDIGE matchdocumenten op van ANDERE profielen (om te zoeken wie er
-toevallig ook op dezelfde dag/ontmoeting speelde) - bij een club met
-honderden profielen is dit zelf een aanzienlijke, nooit apart geidentifi-
-ceerde kost. Zie de uitgebreide toelichting rechtstreeks bij de functie
-zelf voor de 2-delige fix (sessie-caching per ontmoeting + een eigen
-perf.step() om dit voortaan apart meetbaar te maken).
+ROOT CAUSE, bevestigd door de code na te lezen: een eerdere versie van
+gather_all_valid_match_data() had een PERSISTENTE Firestore-cache (1 uur
+geldig, collectie "app_settings"), zodat de dure scan over ALLE profielen
+(in Kim's data: ~2067 unieke tegenstander-/partner-ID's over alle seizoenen
+heen - dat aantal is op zich GEEN bug, zie hieronder) maar 1x per uur
+werkelijk hoefde te gebeuren. Die cache is bij een latere herbouw van dit
+bestand (de overstap naar de "Bereken kalibratie"-knop +
+live-voortgangsweergave) VERLOREN gegaan - elke klik op de knop, in elke
+sessie, na elke reboot, deed sindsdien de VOLLEDIGE scan opnieuw. Bij
+~2067 relevante spelers x 2-3 reads (padelstat + officieel klassement) x
+~10-15 klikken vandaag komt dat nauwkeurig overeen met het gemelde
+Firestore-verbruik van >64.000 reads op 1 dag.
+Over het getal 2067 zelf: dat zijn NIET Kim's 169 clubprofielen, maar ELKE
+tegenstander/partner die ooit voorkwam in de interclub-historie van al die
+169 profielen, over ALLE seizoenen heen (elk profiel kan tientallen
+matchen hebben, elk tegen 2 tegenstanders - dat loopt snel op tot
+duizenden unieke, externe TVL-spelers). Dat aantal zelf is dus
+verwachting, geen fout - het ONTBREKEN van een cache errond was dat wel.
+FIX: _read_all_valid_cache()/_write_all_valid_cache() (teruggebracht, met
+dezelfde opzet als voorheen) omwikkelen nu STAP 1 (de duurste:
+ll.get_docs_for_players(all_ids)) EN het eindresultaat van gather_all_valid_match_
+data() in zijn geheel:
+  - VOOR stap 1 wordt eerst de cache gecontroleerd (signatuur = de
+    gesorteerde tuple van alle profiel-ID's). Bij een TREFFER toont de
+    live-voortgangsweergave dat meteen ("Cache gevonden (opgeslagen op ...,
+    X minuten oud) - geen nieuwe Firestore-reads nodig.") en springt de
+    functie DIRECT naar het eindresultaat - stappen 1 t/m 6 worden dan
+    VOLLEDIG overgeslagen, dus 0 nieuwe Firestore-reads bij een herhaalde
+    klik binnen het uur.
+  - Bij een MISTREFFER lopen stap 1 t/m 6 zoals voorheen (ONGEWIJZIGD,
+    inclusief de live-voortgangsmeldingen per stap), en wordt het resultaat
+    NA afloop weggeschreven naar de cache (TTL 1 uur) voor de volgende
+    klik/sessie.
+  - Enkel de SCHAAL-ONAFHANKELIJKE ruwe rijen worden opgeslagen (our_avg/
+    their_avg/actual_won/bron-indicatie e.d. - geen win_probability, die
+    hangt af van de actief ingestelde scale/bias/form_weight en wordt nog
+    steeds live herberekend door score_raw_at_scale()).
+  - Faalt de Firestore-opslag of -lezing om welke reden ook (bv. een
+    tijdelijke verbindingsfout), dan valt dit stil terug op "altijd vers
+    berekenen" - nooit een crash, enkel het ontbreken van de versnelling.
+Dit raakt UITSLUITEND gather_all_valid_match_data() (de kalibratie-knop).
+De andere eerdere fixes (teamgenoten-scan-cache in session_state, lazy
+calibration achter de knop, model-consistentie) blijven ONGEWIJZIGD - dit
+is een AANVULLING op die laatste fix, geen vervanging.
 """
 import datetime as _dt
 import math
@@ -109,6 +88,9 @@ except Exception:  # noqa: BLE001  pragma: no cover
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _CALIBRATION_SETTINGS_COLLECTION = "app_settings"
 _CALIBRATION_SETTINGS_DOC = "retro_calibration"
+# PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 - zie moduledocstring.
+_ALL_VALID_CACHE_DOC = "retro_all_valid_cache"
+_ALL_VALID_CACHE_TTL_SECONDS = 3600
 _DEFAULT_SCALE = ll.DEFAULT_WIN_PROBABILITY_SCALE
 _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
 _SCALE_BIAS_SEARCH_SCALES = list(range(50, 801, 20))
@@ -230,28 +212,9 @@ def _resolve_encounter_teammates(
     een tegenstander die toevallig ook een eigen profiel heeft (bv. omdat hij
     voor een andere ploeg speelde) niet ten onrechte als teamgenoot wordt
     aanvaard.
-    --------------------------------------------------------------------
-    PADEL_ANALYSIS_RETRO_TEAMMATE_SCAN_COST_2026-10-05 (gevonden tijdens het
-    testen van PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05 hierboven):
-    deze functie haalt tot `max_candidates` (standaard 200) VOLLEDIGE
-    matchdocumenten op van ANDERE profielen - UNCONDITIONEEL, bij ELKE
-    weergave van een ontmoeting, ongeacht de lazy-kalibratie-fix. Bij een
-    club met honderden profielen is dit zelf een aanzienlijke, automatische
-    kost die nooit apart gemeten of herkend was (wel al omvat door een
-    buitenste perf.step() in render_retrospective_tab(), maar niet
-    geisoleerd op DEZE ene aanroep). Dit kan een deel van de "nog steeds
-    extreem lang"-klacht verklaren, OOK na het lui maken van de kalibratie-
-    stap, want dit pad loopt nog steeds automatisch.
-    FIX (2 delen, geen gok over de interne snelheid van ll.get_docs_for_
-    players() - enkel het AANTAL aanroepen en HOE VAAK verminderen):
-      1. Het resultaat wordt nu gecached in st.session_state per
-         (sel_player_id, encounter_key) - wisselen tussen de "Overzicht"/
-         "Detail"-weergave of andere herrenders van DEZELFDE ontmoeting
-         doen deze dure scan dus maar 1x per sessie, niet bij elke rerun.
-      2. Een eigen perf.step() rond ENKEL de get_docs_for_players()-aanroep
-         hierbinnen, zodat een volgende CSV-meting PRECIES laat zien hoeveel
-         tijd dit kost, los van de rest - i.p.v. verborgen in de bredere
-         "teamgenoten van deze ontmoeting zoeken"-stap."""
+    Resultaat wordt gecached in st.session_state per (sel_player_id,
+    encounter_key) - wisselen tussen weergaven of andere herrenders van
+    DEZELFDE ontmoeting doen deze scan dus maar 1x per sessie."""
     cache_key = f"retro_teammates_cache_{sel_player_id}_{encounter_key}"
     debug_key = f"retro_teammates_debug_{sel_player_id}_{encounter_key}"
     if cache_key in st.session_state:
@@ -267,13 +230,6 @@ def _resolve_encounter_teammates(
         st.session_state[cache_key] = {}
         st.session_state[debug_key] = {"other_ids_count": 0, "docs_count": 0, "matched_count": 0, "error": None}
         return {}
-    # PADEL_ANALYSIS_RETRO_VISIBLE_DEBUG_V2_2026-10-05 (op verzoek van Kim:
-    # "zorg voor voldoende debug info om het probleem voor eens en voor
-    # altijd te lokaliseren") - de voorheen STILZWIJGEND opgevangen
-    # Exception wordt nu EXPLICIET bewaard en getoond (geen silent except
-    # meer), samen met de exacte aantallen kandidaten/documenten/matches -
-    # zodat zichtbaar wordt OF en WAAROM dit pad faalt, i.p.v. enkel
-    # "minder borden dan verwacht" zonder verklaring.
     error_txt = None
     all_docs = {}
     with perf.step(f"retro: teammate-scan get_docs_for_players ({len(other_ids)} kandidaten)"):
@@ -691,43 +647,80 @@ def compute_form_adjustment(raw_rows: list, scale: float, bias: float = 0.0) -> 
     return {pid: {"n": len(vals), "avg_residual": sum(vals) / len(vals)} for pid, vals in tally.items() if vals}
 
 
-# PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05: deze functie wordt NIET
-# meer automatisch aangeroepen bij elke render - zie moduledocstring. Enkel
-# nog via de "Bereken kalibratie"-knop in render_retrospective_tab().
+# --------------------------------------------------------------------------
+# PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 - zie moduledocstring.
+# --------------------------------------------------------------------------
+def _read_all_valid_cache(player_ids_sig: tuple) -> Optional[dict]:
+    """Geeft het opgeslagen resultaat terug ALS de spelerslijst-signatuur
+    overeenkomt EN de cache niet verlopen is, anders None. Faalt stil."""
+    try:
+        doc = fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_ALL_VALID_CACHE_DOC).get()
+        data = doc.to_dict() if doc is not None and getattr(doc, "exists", True) else None
+        if not data:
+            return None
+        if tuple(data.get("player_ids_sig") or []) != player_ids_sig:
+            return None
+        saved_at_epoch = data.get("saved_at_epoch")
+        age_seconds = None
+        if saved_at_epoch is not None:
+            age_seconds = _dt.datetime.now(_dt.timezone.utc).timestamp() - float(saved_at_epoch)
+            if age_seconds > _ALL_VALID_CACHE_TTL_SECONDS:
+                return None
+        rows = data.get("valid_rows")
+        if not isinstance(rows, list):
+            return None
+        for r in rows:
+            r["pair"] = tuple(r.get("pair") or ())
+        return {
+            "valid_rows": rows,
+            "n_total_boards": int(data.get("n_total_boards") or 0),
+            "player_ids": list(data.get("player_ids") or []),
+            "saved_at": data.get("saved_at"),
+            "age_seconds": age_seconds,
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_all_valid_cache(player_ids_sig: tuple, player_ids: list, valid_rows: list, n_total_boards: int) -> None:
+    """Schrijft de SCHAAL-ONAFHANKELIJKE ruwe rijen weg (geen win_
+    probability - die hangt af van de gekozen factor). Faalt stil."""
+    try:
+        payload = {
+            "player_ids_sig": list(player_ids_sig),
+            "player_ids": player_ids,
+            "valid_rows": [
+                {
+                    "pair": list(r.get("pair") or ()),
+                    "our_avg": r.get("our_avg"), "their_avg": r.get("their_avg"),
+                    "actual_won": r.get("actual_won"), "score": r.get("score"),
+                    "opp1_name": r.get("opp1_name"), "opp2_name": r.get("opp2_name"),
+                    "opp1_user_id": r.get("opp1_user_id"), "opp2_user_id": r.get("opp2_user_id"),
+                    "match_date": r.get("match_date"),
+                    "our_is_padelstat": r.get("our_is_padelstat"), "their_is_padelstat": r.get("their_is_padelstat"),
+                }
+                for r in valid_rows
+            ],
+            "n_total_boards": n_total_boards,
+            "saved_at_epoch": _dt.datetime.now(_dt.timezone.utc).timestamp(),
+            "saved_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_ALL_VALID_CACHE_DOC).set(payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def gather_all_valid_match_data(
     profiles: list, debug_timings: Optional[list] = None, live_placeholder=None,
 ) -> dict:
     """Bouwt de SCHAAL-ONAFHANKELIJKE ruwe matchdata over ALLE profielen in
     de database. `full_padelstat_rows` is de subset waarvoor de kalibratie
     ONVOORWAARDELIJK gebruikt wordt.
-    --------------------------------------------------------------------
-    PADEL_ANALYSIS_RETRO_LIVE_PROGRESS_2026-10-05 (op verzoek van Kim,
-    NA het testen van de vorige (na-afloop) telemetrie: "berekent calibratie
-    duurt nog steeds heel lang. ik krijg zelfs geen resultaat binnen
-    minuten! zorg voor voldoende debug info om het probleem voor eens en
-    voor altijd te lokaliseren")
-    --------------------------------------------------------------------
-    KRITIEKE TEKORTKOMING van de vorige telemetrie-poging (PADEL_ANALYSIS_
-    RETRO_VISIBLE_TELEMETRY_2026-10-05), nu ERKEND: die toonde de gemeten
-    tijd per stap pas NADAT de volledige functie al klaar was (via
-    st.session_state + st.rerun()). Als de functie zelf MINUTENLANG blijft
-    hangen op 1 specifieke stap (of oneindig, bij een echte hang-bug), ziet
-    Kim NOOIT enige telemetrie - enkel de spinner, voor onbepaalde tijd.
-    Dat verklaart waarom de vorige "fix" het probleem niet kon lokaliseren:
-    ze was zelf afhankelijk van het al voltooid zijn van exact het probleem
-    dat ze moest blootleggen.
-    FIX: `live_placeholder` (een st.empty()-object, aangemaakt door de
-    aanroeper VOOR deze functie wordt aangeroepen) wordt nu bijgewerkt
-    VOOR elke stap begint ("Stap X: ... - bezig...") EN NA elke stap
-    voltooid is ("Stap X: ... - klaar (Ys)") - Streamlit rendert deze
-    tussentijdse updates ONMIDDELLIJK (st.empty().markdown() flushed
-    meteen naar de browser, in tegenstelling tot een return-waarde die pas
-    na afloop verwerkt wordt). Blijft de app nu vastzitten, dan toont het
-    scherm ZELF, LIVE, op welke stap dat gebeurt - bv. permanent
-    "Stap 1: documenten ophalen (667 profielen) - bezig..." zonder ooit
-    naar "klaar" over te gaan, wat ONOMSTOTELIJK bewijst dat de hang in
-    `ll.get_docs_for_players()` zelf zit (buiten het bereik van dit
-    bestand) en niet in een lus die DIT bestand zelf bevat."""
+    PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05: controleert
+    EERST de persistente Firestore-cache (1 uur geldig) - bij een treffer
+    worden stap 1 t/m 6 VOLLEDIG overgeslagen (0 nieuwe Firestore-reads).
+    Bij een mistreffer lopen alle stappen zoals voorheen, en wordt het
+    resultaat NA afloop weggeschreven voor de volgende klik/sessie."""
     import time as _time
 
     def _mark(label, t0, count=None):
@@ -745,75 +738,96 @@ def gather_all_valid_match_data(
             "n_full_padelstat": 0, "n_fallback": 0, "form_index": {}, "player_ids": [],
         }
 
-    _live(f"**Stap 1/6:** documenten ophalen voor **{len(all_ids)}** profielen - bezig...")
-    t0 = _time.perf_counter()
-    with perf.step(f"retro: get_docs_for_players (ALLE {len(all_ids)} profielen)"):
-        try:
-            docs = ll.get_docs_for_players(all_ids)
-        except Exception as exc:  # noqa: BLE001
-            _live(f"**Stap 1/6 MISLUKT** na {_time.perf_counter() - t0:.1f}s: `{type(exc).__name__}: {exc}`")
-            docs = {}
-    dt1 = _time.perf_counter() - t0
-    _live(f"**Stap 1/6:** documenten ophalen voor {len(all_ids)} profielen - klaar ({dt1:.1f}s), {len(docs)} documenten terug.")
-    _mark(f"1. get_docs_for_players ({len(all_ids)} profielen opgevraagd)", t0, len(all_ids))
+    sig = tuple(all_ids)
+    t0_cache = _time.perf_counter()
+    _live(f"**Cache controleren** voor {len(all_ids)} profielen...")
+    cached = _read_all_valid_cache(sig)
+    if cached is not None:
+        age_min = (cached.get("age_seconds") or 0) / 60.0
+        _live(
+            f"**Cache gevonden** (opgeslagen op {cached.get('saved_at', '?')}, {age_min:.0f} minuten oud) - "
+            "geen nieuwe Firestore-reads nodig. Stap 1 t/m 6 overgeslagen."
+        )
+        _mark("0. persistente cache gelezen (stap 1-6 overgeslagen)", t0_cache, len(cached["valid_rows"]))
+        valid_rows = cached["valid_rows"]
+        n_total_boards = cached["n_total_boards"]
+    else:
+        _live(f"**Geen bruikbare cache** (verlopen, leeg of andere spelerslijst) - volledige berekening start...")
+        _mark("0. persistente cache: mistreffer", t0_cache)
 
-    t0 = _time.perf_counter()
-    index = build_retro_encounter_index(docs, allowed_player_ids=None)
-    n_encounters = len(index)
-    n_boards_seen = sum(len(v) for v in index.values())
-    dt2 = _time.perf_counter() - t0
-    _live(f"**Stap 2/6:** encounter-index gebouwd ({dt2:.1f}s) - {n_encounters} ontmoetingen, {n_boards_seen} matchrecords.")
-    _mark(f"2. encounter-index bouwen ({n_encounters} ontmoetingen, {n_boards_seen} matchrecords)", t0, n_boards_seen)
+        _live(f"**Stap 1/6:** documenten ophalen voor **{len(all_ids)}** profielen - bezig...")
+        t0 = _time.perf_counter()
+        with perf.step(f"retro: get_docs_for_players (ALLE {len(all_ids)} profielen)"):
+            try:
+                docs = ll.get_docs_for_players(all_ids)
+            except Exception as exc:  # noqa: BLE001
+                _live(f"**Stap 1/6 MISLUKT** na {_time.perf_counter() - t0:.1f}s: `{type(exc).__name__}: {exc}`")
+                docs = {}
+        dt1 = _time.perf_counter() - t0
+        _live(f"**Stap 1/6:** documenten ophalen voor {len(all_ids)} profielen - klaar ({dt1:.1f}s), {len(docs)} documenten terug.")
+        _mark(f"1. get_docs_for_players ({len(all_ids)} profielen opgevraagd)", t0, len(all_ids))
 
-    relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
-    _live(f"**Stap 3/6:** officieel klassement ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
-    t0 = _time.perf_counter()
-    current_official_ranks = {}
-    with perf.step(f"retro: officieel klassement (kalibratie, {len(relevant_ids)} spelers)"):
-        try:
-            from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
-            prefetch_own_player_reads(list(relevant_ids))
-            current_official_ranks = _build_own_official_ranks_strict(list(relevant_ids)) or {}
-        except Exception as exc:  # noqa: BLE001
-            _live(f"**Stap 3/6 fout** (genegeerd, gaat verder): `{type(exc).__name__}: {exc}`")
-    dt3 = _time.perf_counter() - t0
-    _live(f"**Stap 3/6:** officieel klassement - klaar ({dt3:.1f}s), {len(current_official_ranks)} spelers met een klassement.")
-    _mark(f"3. officieel klassement ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
+        t0 = _time.perf_counter()
+        index = build_retro_encounter_index(docs, allowed_player_ids=None)
+        n_encounters = len(index)
+        n_boards_seen = sum(len(v) for v in index.values())
+        dt2 = _time.perf_counter() - t0
+        _live(f"**Stap 2/6:** encounter-index gebouwd ({dt2:.1f}s) - {n_encounters} ontmoetingen, {n_boards_seen} matchrecords.")
+        _mark(f"2. encounter-index bouwen ({n_encounters} ontmoetingen, {n_boards_seen} matchrecords)", t0, n_boards_seen)
 
-    _live(f"**Stap 4/6:** padelstat-historiek ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
-    t0 = _time.perf_counter()
-    with perf.step(f"retro: padelstat-historiek (kalibratie, {len(relevant_ids)} spelers)"):
-        ratings_cache = _load_padelstat_histories(relevant_ids)
-    dt4 = _time.perf_counter() - t0
-    _live(f"**Stap 4/6:** padelstat-historiek - klaar ({dt4:.1f}s).")
-    _mark(f"4. padelstat-historiek ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
+        relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
+        _live(f"**Stap 3/6:** officieel klassement ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
+        t0 = _time.perf_counter()
+        current_official_ranks = {}
+        with perf.step(f"retro: officieel klassement (kalibratie, {len(relevant_ids)} spelers)"):
+            try:
+                from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
+                prefetch_own_player_reads(list(relevant_ids))
+                current_official_ranks = _build_own_official_ranks_strict(list(relevant_ids)) or {}
+            except Exception as exc:  # noqa: BLE001
+                _live(f"**Stap 3/6 fout** (genegeerd, gaat verder): `{type(exc).__name__}: {exc}`")
+        dt3 = _time.perf_counter() - t0
+        _live(f"**Stap 3/6:** officieel klassement - klaar ({dt3:.1f}s), {len(current_official_ranks)} spelers met een klassement.")
+        _mark(f"3. officieel klassement ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
 
-    _live(f"**Stap 5/6:** winkans per bord berekenen voor **{n_boards_seen}** matchrecords - bezig...")
-    t0 = _time.perf_counter()
-    with perf.step("retro: gather_raw_match_data (per-bord-voorspelling, kalibratie)"):
-        raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
-    dt5 = _time.perf_counter() - t0
-    _live(f"**Stap 5/6:** winkans per bord - klaar ({dt5:.1f}s), {len(raw)} borden berekend.")
-    _mark(f"5. per-bord voorspelling berekenen ({len(raw)} borden)", t0, len(raw))
+        _live(f"**Stap 4/6:** padelstat-historiek ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
+        t0 = _time.perf_counter()
+        with perf.step(f"retro: padelstat-historiek (kalibratie, {len(relevant_ids)} spelers)"):
+            ratings_cache = _load_padelstat_histories(relevant_ids)
+        dt4 = _time.perf_counter() - t0
+        _live(f"**Stap 4/6:** padelstat-historiek - klaar ({dt4:.1f}s).")
+        _mark(f"4. padelstat-historiek ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
 
-    t0 = _time.perf_counter()
-    valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
+        _live(f"**Stap 5/6:** winkans per bord berekenen voor **{n_boards_seen}** matchrecords - bezig...")
+        t0 = _time.perf_counter()
+        with perf.step("retro: gather_raw_match_data (per-bord-voorspelling, kalibratie)"):
+            raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
+        dt5 = _time.perf_counter() - t0
+        _live(f"**Stap 5/6:** winkans per bord - klaar ({dt5:.1f}s), {len(raw)} borden berekend.")
+        _mark(f"5. per-bord voorspelling berekenen ({len(raw)} borden)", t0, len(raw))
+
+        t0 = _time.perf_counter()
+        valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
+        n_total_boards = len(raw)
+        dt6 = _time.perf_counter() - t0
+        _mark("6a. filteren geldige rijen", t0, len(valid_rows))
+
+        t0 = _time.perf_counter()
+        _write_all_valid_cache(sig, all_ids, valid_rows, n_total_boards)
+        dt_write = _time.perf_counter() - t0
+        _live(
+            f"**Stap 6/6:** klaar - {len(valid_rows)} geldige matchen gevonden, weggeschreven naar cache "
+            f"({dt_write:.1f}s) voor de volgende klik. **Totaal: {dt1+dt2+dt3+dt4+dt5+dt6+dt_write:.1f}s.**"
+        )
+        _mark("6b. resultaat wegschrijven naar persistente cache", t0)
+
     n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
     n_fallback = len(valid_rows) - n_full_padelstat
     full_padelstat_rows = [r for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat")]
     form_index = compute_individual_form_index(valid_rows)
-    dt6 = _time.perf_counter() - t0
-    _live(
-        f"**Stap 6/6:** klaar ({dt6:.1f}s) - {len(valid_rows)} geldige matchen, waarvan "
-        f"{n_full_padelstat} met volledige padelstat. **Totaal: {dt1+dt2+dt3+dt4+dt5+dt6:.1f}s.**"
-    )
-    _mark(
-        f"6. filteren/samenvatten ({len(valid_rows)} geldig, waarvan {n_full_padelstat} volledig padelstat)",
-        t0, len(valid_rows),
-    )
     return {
         "valid_rows": valid_rows, "full_padelstat_rows": full_padelstat_rows,
-        "n_total_boards": len(raw), "n_valid": len(valid_rows),
+        "n_total_boards": n_total_boards, "n_valid": len(valid_rows),
         "n_full_padelstat": n_full_padelstat, "n_fallback": n_fallback,
         "form_index": form_index, "player_ids": all_ids,
     }
@@ -949,30 +963,6 @@ def best_alternative_for_encounter(
     boards: list, docs: Dict[str, dict], current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, top_n: int = 3,
 ) -> Optional[dict]:
-    """
-    PADEL_ANALYSIS_RETRO_ALT_DEBUG_2026-10-05 (op verzoek van Kim, met
-    screenshot: "Onvoldoende eigen spelers gekend voor deze ontmoeting (3
-    van de nodige 4) -> niet logisch. je hebt alle waardes.")
-    --------------------------------------------------------------------
-    `players` hieronder komt NIET uit het profielenbestand of een aparte
-    telling - het is LETTERLIJK de verzameling spelers die voorkomt in
-    `boards[i]["pair"]` (ons koppel per bord), dezelfde `boards`-lijst die
-    "Per match" hierboven toont. Als "Per match" 4 regels toont maar hier
-    toch "3 van de 4" verschijnt, is er een DISCREPANTIE tussen wat
-    getoond wordt en wat hier binnenkomt - mogelijke oorzaken (niet
-    geraden, maar wel elk met een eigen, EXPLICIET debug-veld hieronder
-    gevuld, zodat de ECHTE oorzaak zichtbaar wordt i.p.v. samengevat):
-      a) een speler komt in meerdere boards voor met dezelfde partner,
-         waardoor er minder dan 4 UNIEKE spelers overblijven (reglementair
-         zou dit niet mogen, maar de data kan dat toch bevatten);
-      b) 1 van de 4 "Per match"-regels toont een bord waarvan `pair` om
-         een andere reden niet correct gevuld is.
-    In plaats van enkel "reason": "too_few_players" terug te geven, bevat
-    het resultaat nu ALTIJD een "debug"-veld met het volledige, ruwe
-    materiaal (boards + de afgeleide players-set) - de UI toont dit in een
-    inklapbaar debug-blok zodra er minder dan 4 spelers gevonden worden,
-    zodat de oorzaak nu zichtbaar is i.p.v. geraden.
-    """
     debug_boards = [
         {"pair": sorted(b.get("pair") or []), "score": b.get("score"), "match_id": b.get("match_id"),
          "opp1_name": b.get("opp1_name"), "opp2_name": b.get("opp2_name")}
@@ -1100,7 +1090,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     sel_player_id = str(sel_player_id)
     name_lookup = {str(p.get("player_id")): (p.get("display_name") or str(p.get("player_id"))) for p in profiles}
     sel_naam = name_lookup.get(sel_player_id, sel_player_id)
-
     if "retro_scale" not in st.session_state:
         with perf.step("retro: opgeslagen winkansfactor lezen"):
             saved = _load_saved_scale()
@@ -1111,25 +1100,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
     bias = st.session_state.get("retro_bias", 0.0)
     form_weight = st.session_state.get("retro_form_weight", 0.0)
-
-    # PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05 - zie moduledocstring:
-    # de kalibratie-data (all_data) staat NIET meer hier vooraan, enkel
-    # UITGELEZEN als ze al in een eerdere klik op "Bereken kalibratie" in
-    # DEZE sessie berekend werd. "Per match" wacht dus NOOIT meer op deze
-    # (potentieel minutenlange) stap.
     all_data = st.session_state.get("retro_all_valid_data")
     form_index = (all_data or {}).get("form_index") or {}
     form_adjustment = (
         compute_form_adjustment((all_data or {}).get("full_padelstat_rows") or [], scale=_DEFAULT_SCALE, bias=0.0)
         if (form_weight and all_data) else {}
     )
-
-    # PADEL_ANALYSIS_RETRO_GUARD_OWN_FETCH_2026-10-05 (gevonden tijdens het
-    # testen van de live-progress-fix hierboven): deze aanroep was NERGENS
-    # beveiligd tegen een fout - faalt `ll.get_docs_for_players()` hier (bv.
-    # een Firestore-timeout), dan crashte voorheen de HELE Nabeschouwing-
-    # pagina met een onbehandelde Python-exceptie, zonder enige duiding.
-    # Nu EXPLICIET opgevangen en getoond, net als bij de teamgenoten-scan.
     with perf.step("retro: eigen matchen ophalen"):
         with st.spinner(f"Matchen van {sel_naam} ophalen..."):
             try:
@@ -1137,45 +1113,25 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Kon de matchen van {sel_naam} niet ophalen: {type(exc).__name__}: {exc}")
                 return
-
     st.caption(
         f"Vergelijkt, voor **{sel_naam}**, de voorspelde winkans met de echte uitslag van eerder gespeelde "
         "interclub-matchen, MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend."
     )
-
     with perf.step("retro: encounter-index bouwen (eigen matchen)"):
         index = build_retro_encounter_index(docs, allowed_player_ids={sel_player_id})
     encounters = list_retro_encounters(index)
     if not encounters:
         st.info(f"Nog geen gespeelde interclub-ontmoetingen gevonden voor {sel_naam}.")
         return
-
     labels = [lbl for _k, lbl in encounters]
     key_by_label = {lbl: k for k, lbl in encounters}
     gekozen_label = st.selectbox(
         "Kies een eerder gespeelde ontmoeting", labels, key="retro_pick_encounter",
     )
     gekozen_key = key_by_label[gekozen_label]
-
     eigen_entries = index.get(gekozen_key, [])
     eigen_boards = reconstruct_boards_with_rankings(eigen_entries)
     gekende_tegenstanders = _known_opponent_ids(eigen_boards)
-
-    # PADEL_ANALYSIS_RETRO_TEAMMATES_AUTO_AGAIN_2026-10-05 (op verzoek van
-    # Kim: "we zitten terug met hetzelfde probleem dat enkel mijn eigen
-    # matchen van de ontmoeting getoond worden [...] ik wil dus ALTIJD de 4
-    # matchen zien van de ontmoeting") - DRAAIT WEER AUTOMATISCH, net als
-    # voor PADEL_ANALYSIS_RETRO_TEAMMATE_SCAN_COST_2026-10-05 de knop
-    # invoerde. Het verschil met toen: het resultaat wordt nu PER ONTMOETING
-    # (sel_player_id + gekozen_key) gecached in st.session_state, dus de
-    # (potentieel dure) scan van kandidaat-profielen gebeurt nog maar 1x
-    # zolang je dezelfde ontmoeting bekijkt - niet bij elke rerun (en een
-    # rerun gebeurt op Streamlit bij vrijwel elke widget-interactie, ook in
-    # een ANDERE sectie van de pagina). Wissel je naar een ANDERE ontmoeting,
-    # dan draait de scan 1x opnieuw voor die nieuwe ontmoeting.
-    # _resolve_encounter_teammates() cachet intern al per (sel_player_id,
-    # gekozen_key) - deze aanroep is dus goedkoop bij een herhaalde render
-    # van dezelfde ontmoeting, en draait maar 1x echt bij een nieuwe keuze.
     teammate_docs = _resolve_encounter_teammates(
         sel_player_id, gekozen_key, profiles, exclude_ids=gekende_tegenstanders,
     )
@@ -1184,12 +1140,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             f"{len(teammate_docs)} teamgenoot/teamgenoten van deze ontmoeting automatisch mee opgenomen: "
             + ", ".join(name_lookup.get(pid, pid) for pid in teammate_docs)
         )
-    # PADEL_ANALYSIS_RETRO_VISIBLE_DEBUG_V2_2026-10-05 - zie moduledocstring
-    # bij _resolve_encounter_teammates(): ALTIJD tonen, ook als er WEL
-    # teamgenoten gevonden zijn - Kim's klacht was dat ZELFS NA de vorige
-    # fix nog maar 2 van de 4 borden verschenen, dus "1 of meer gevonden"
-    # alleen bewijst niet dat ALLE teamgenoten gevonden zijn. Dit blokje
-    # toont de PRECIEZE tellingen zodat dat verifieerbaar wordt.
     tm_debug_key = f"retro_teammates_debug_{sel_player_id}_{gekozen_key}"
     tm_debug = st.session_state.get(tm_debug_key)
     if tm_debug:
@@ -1222,7 +1172,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     entries_encounter = index_encounter.get(gekozen_key, [])
     boards = reconstruct_boards_with_rankings(entries_encounter)
     boards = [b for b in boards if not (set(b["pair"]) & gekende_tegenstanders)]
-
     own_side_ids = {sel_player_id} | set(teammate_docs.keys())
     for _pid, m in entries_encounter:
         if m.get("partner_user_id"):
@@ -1236,11 +1185,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
         except Exception:  # noqa: BLE001
             pass
-
     player_ids = tuple(sorted(_collect_relevant_player_ids(index_encounter)))
     with perf.step(f"retro: padelstat-historiek laden ({len(player_ids)} spelers)"):
         ratings_cache = _load_padelstat_histories(player_ids)
-
     with perf.step("retro: ontmoeting voorspellen (predict_encounter)"):
         pred = predict_encounter(
             boards, current_official_ranks, ratings_cache, scale=scale,
@@ -1251,7 +1198,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown("#### Per match: voorspeld tegenover echt")
     for bp in pred["boards"]:
         _render_board_row(bp, name_lookup, form_index=form_index)
-
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
     n_known_boards = len(boards)
@@ -1276,7 +1222,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.markdown(
                 f"Echt: **{actual['uitkomst']}** ({actual['n_win']} van {actual['n_boards']} borden gewonnen)."
             )
-
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
     with perf.step("retro: beste alternatief doorrekenen"):
@@ -1286,10 +1231,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.caption(
             f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige 4)."
         )
-        # PADEL_ANALYSIS_RETRO_ALT_DEBUG_2026-10-05 - zie moduledocstring bij
-        # best_alternative_for_encounter(): toont PRECIES welke borden en
-        # spelers hier binnenkwamen, zodat de echte oorzaak zichtbaar is
-        # i.p.v. enkel een samengevat getal.
         dbg = alt.get("debug") or {}
         with st.expander("Debug: welke borden/spelers zag deze berekening?", expanded=True):
             st.caption(
@@ -1306,9 +1247,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             )
             st.caption(
                 "Als dit minder borden toont dan de regels hierboven bij 'Per match', dan is dat de "
-                "rechtstreekse oorzaak - vergelijk de 2 lijsten. Als het AANTAL klopt maar er toch "
-                "minder dan 4 unieke spelers uitkomen, speelt een speler in 2 borden met identieke "
-                "koppel-samenstelling (zie de 'Ons koppel'-kolom voor duplicaten)."
+                "rechtstreekse oorzaak - vergelijk de 2 lijsten."
             )
     elif alt.get("reason") == "no_valid_combinations":
         st.caption(
@@ -1334,24 +1273,14 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             )
         elif alt["actual"] is not None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
-
-    # PADEL_ANALYSIS_RETRO_LAZY_CALIBRATION_2026-10-05 - zie moduledocstring:
-    # de ZWARE stap (gather_all_valid_match_data, over ALLE profielen) staat
-    # nu achter een EXPLICIETE knop i.p.v. automatisch te draaien.
     st.divider()
     st.markdown("#### Kalibratie over alle gekende matchen (enkel padelstat)")
     st.caption(
         "Dit doorzoekt ALLE interclub-matchen in de database (niet enkel die van "
-        f"{sel_naam}) - kan bij een grote database even duren. Druk op de knop om te berekenen."
+        f"{sel_naam}) - de eerste keer (of na 1 uur) duurt dit even, daarna is het binnen het uur "
+        "vrijwel instant dankzij een gedeelde, opgeslagen cache."
     )
     if st.button("Bereken kalibratie (over alle gekende matchen)", key="retro_compute_calibration"):
-        # PADEL_ANALYSIS_RETRO_LIVE_PROGRESS_2026-10-05 - zie moduledocstring
-        # bij gather_all_valid_match_data(): `live_placeholder` (st.empty())
-        # wordt TIJDENS de berekening bijgewerkt, PER STAP, VOOR en NA elke
-        # deelstap - zichtbaar in de browser ZODRA elke stap start, niet pas
-        # als de hele functie klaar is. Blijft dit scherm vastzitten op bv.
-        # "Stap 1/6: ... - bezig...", dan bewijst dat ONOMSTOTELIJK dat de
-        # hang in get_docs_for_players() zelf zit (buiten dit bestand).
         import time as _time
         debug_timings: list = []
         live_placeholder = st.empty()
@@ -1365,7 +1294,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "n_profiles": len(profiles),
         }
         st.rerun()
-
     debug_info = st.session_state.get("retro_calibration_debug")
     if debug_info:
         with st.expander(
@@ -1384,11 +1312,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
                     f"Traagste stap: **{traagste['label']}** ({traagste['seconds']:.1f}s, "
                     f"{traagste['seconds'] / debug_info['total_seconds'] * 100:.0f}% van de totale tijd)."
                 )
-
     if all_data is None:
         st.info("Nog niet berekend in deze sessie - klik hierboven op de knop.")
         return
-
     raw_rows = all_data.get("full_padelstat_rows") or []
     if not raw_rows:
         st.info(
@@ -1396,14 +1322,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "niet berekend worden."
         )
         return
-
     form_txt = f", vorm-gewicht {form_weight:+.2f}" if form_weight else ""
     st.markdown(f"Huidige instelling: **factor {scale:.0f}**, **bias {bias:+.0f}**{form_txt}.")
     st.caption(
         "Deze instelling geldt OOK voor 'Per match' en 'Beste alternatief' hierboven. Wijzig uitsluitend "
         "via 'Zoek beste model' hieronder + 'Toepassen'."
     )
-
     with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
         stats = calibration_stats(score_raw_at_scale(raw_rows, scale, bias=bias, form_weight=form_weight, form_adjustment=form_adjustment))
     if not stats:
@@ -1438,7 +1362,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
                 f"Let op: de hoogste kansklasse ({hoogste_bin['bereik']}) wijkt het meest af "
                 f"({hoogste_bin['gem_voorspeld']:.0f}% voorspeld tegenover {hoogste_bin['werkelijk']:.0f}% werkelijk)."
             )
-
     st.divider()
     st.markdown("##### Beste model zoeken (schaal + bias + individuele vorm)")
     st.caption(
