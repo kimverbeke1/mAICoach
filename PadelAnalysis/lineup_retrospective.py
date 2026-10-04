@@ -20,19 +20,17 @@ BRONNEN VAN "DE WAARDEN VAN TOEN", in volgorde van betrouwbaarheid:
   2. firebase_service.get_padelstat_rating_at(player_id, datum): de
      padelstat-HISTORIEK (PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03),
      die vanaf de eerste refresh ERNA automatisch verder aangevuld wordt.
-     Voor data van VOOR die historiek bestond, is er simpelweg niets - de
-     functie geeft dan None terug, geen verzonnen waarde.
-  3. Voor TEGENSTANDERS: het officiële klassement staat als tekst
+     Voor data van VOOR die historiek bestond, is er simpelweg niets.
+  3. PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04 (zie verderop): de
+     MEEST RECENTE padelstat-waarde, ongeacht of die exact op/voor de
+     matchdatum ligt - enkel voor ONZE EIGEN spelers, enkel als stap 2 niets
+     opleverde.
+  4. Voor TEGENSTANDERS: het officiële klassement staat als tekst
      ("P200" e.d.) al IN het eigen matchrecord (opp1_ranking/opp2_ranking,
      zoals getoond op het uitslagenblad op dat moment) - dat is dus
-     ALTIJD een waarde van toen, nooit de huidige.
-  4. Voor ONZE EIGEN spelers: er is GEEN historiek van het officiële
-     klassement in dit project (enkel klassement_history van TVL, die
-     niet per speler teruggekoppeld is aan deze module) - bij ontbrekende
-     padelstat-historiek valt dit bestand daarom terug op het HUIDIGE
-     officiële klassement, EXPLICIET gelabeld als "benadering" in de UI.
-     Dit is een bewuste, duidelijk gecommuniceerde beperking, geen gok die
-     verstopt wordt.
+     ALTIJD een waarde van toen, nooit de huidige. Voor onze EIGEN spelers
+     is dit de ALLERLAATSTE terugval (zie punt 3 hierboven, die daar NU
+     voor gaat).
 --------------------------------------------------------------------------
 WAAROM DIT BESTAND EIGEN ENCOUNTER/BOARD-RECONSTRUCTIE HEEFT (NIET
 ll.build_encounter_index()/ll.reconstruct_boards() HERGEBRUIKT):
@@ -40,7 +38,7 @@ die twee functies in lineup_lab.py geven exact dezelfde GROEPERING
 (match_date, encounter) en dedupe-sleutel (match_id + koppel) terug - dat
 MOET identiek blijven, dus de logica hieronder is BEWUST een letterlijke
 kopie daarvan - maar ze laten de "opp1_ranking"/"opp2_ranking"-tekstvelden
-van elk matchrecord vallen, die hier net essentieel zijn (bron 3 hierboven).
+van elk matchrecord vallen, die hier net essentieel zijn (bron 4 hierboven).
 Een lokale kopie die deze velden WEL meeneemt is veiliger dan de publieke
 functies van lineup_lab.py aan te passen voor een gebruik dat buiten hun
 oorspronkelijke scope valt.
@@ -131,6 +129,34 @@ aparte "Toepassen"-knop - de schuifregelaar verspringt dus nooit vanzelf,
 Kim bevestigt expliciet voor de nieuwe waarde ingesteld wordt. Dit wijzigt,
 net als de schuifregelaar zelf, ENKEL deze weergave - niet de globale
 DEFAULT_WIN_PROBABILITY_SCALE.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04 (op verzoek van Kim,
+met screenshot: "ik zie dat je enkel officieel klassement in rekening
+neemt, wat niet bruikbaar is. Je moet padelstat score gebruiken. Als je
+het historisch niet hebt mag je eventueel wel de huidige waarde gebruiken
+(zeker voor recente matchen)")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd: `_own_value_at()` had voor ONZE EIGEN spelers maar 3
+stappen: snapshot -> padelstat-historiek OP DATUM -> huidig OFFICIEEL
+KLASSEMENT. Ontbrak er geen snapshot EN geen historiek-regel exact op/voor
+de matchdatum (bv. omdat de historiek pas sinds kort wordt bijgehouden, zie
+PADEL_ANALYSIS_PADELSTAT_HISTORY_2026-10-03 in firebase_service.py), dan
+sprong de functie METEEN naar het officiële klassement - ook al was er
+intussen gewoon een (recentere) padelstat-waarde gekend. Dat is exact wat
+het screenshot toonde: "huidig officieel klassement (benadering)" i.p.v.
+een padelstat-cijfer, voor een speler die wel degelijk een padelstat-
+rating heeft (enkel nog geen historiek-regel van voor die matchdatum).
+FIX: een NIEUWE tussenstap - _latest_rating_from_history() - geeft de
+MEEST RECENTE padelstat-waarde uit de (al geladen) historiek-lijst terug,
+ongeacht of die voor/na de matchdatum ligt. Nieuwe volgorde voor ONZE
+EIGEN spelers: snapshot -> padelstat-historiek OP DATUM -> HUIDIGE
+padelstat-waarde (nieuw) -> officieel klassement (nu pas de ALLERLAATSTE
+terugval, enkel als er ook nooit een padelstat-waarde gekend was). Voor
+TEGENSTANDERS blijft de volgorde ONGEWIJZIGD: hun klassement komt al van
+het uitslagenblad van die dag zelf (dus al "van toen", geen gok) en dat
+blijft een betere bron dan een niet-gedateerde padelstat-waarde van
+vandaag - enkel Kim's screenshot ging over "Onze spelers", dus enkel die
+kant is aangepast.
 """
 import math
 import re
@@ -203,7 +229,16 @@ def build_retro_encounter_index(docs: Dict[str, dict], sel_player_id=None) -> Di
 
 def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
     """Zelfde label-afleiding als ll.list_encounters(), meest recent eerst.
-    Geeft (key, label, date) terug."""
+    Geeft (key, label, date) terug.
+    PADEL_ANALYSIS_RETRO_SORT_FIX_2026-10-04 (op verzoek van Kim: "sortering
+    van de matchen in de lijst moet volgens datum zijn. Nieuwste eerst."):
+    ROOT CAUSE, bevestigd: de sortering gebruikte de RUWE datum-TEKST
+    ("26/09/2026", dag-eerst) als sorteersleutel. Lexicografisch sorteren
+    van dag-eerst-tekst geeft NIET de chronologische volgorde zodra de
+    maand verschilt (bv. "05/01/2026" komt lexicografisch VOOR
+    "20/12/2025", terwijl 5 januari 2026 net NA 20 december 2025 valt).
+    FIX: sorteer op `to_iso_date(x[2])` (YYYY-MM-DD, wel correct
+    lexicografisch sorteerbaar) i.p.v. de ruwe tekst."""
     items = []
     for key, entries in index.items():
         date, encounter = key
@@ -215,14 +250,14 @@ def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
         label_parts = [p for p in [date, reeks, encounter] if p]
         label = " \u2014 ".join(label_parts) if label_parts else "Onbekende ontmoeting"
         items.append((key, label, date))
-    items.sort(key=lambda x: x[2] or "", reverse=True)
+    items.sort(key=lambda x: to_iso_date(x[2]) or "", reverse=True)
     return [(k, lbl) for k, lbl, _ in items]
 
 
 def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
     """Zoals ll.reconstruct_boards(), maar behoudt ook opp1_ranking/
     opp2_ranking (tekst, bv. "P200") en match_date - nodig voor de
-    retrospectieve voorspelling (zie moduledocstring, bron 3)."""
+    retrospectieve voorspelling (zie moduledocstring)."""
     seen = {}
     for pid, m in entries:
         key = _board_dedupe_key(m, pid)
@@ -311,6 +346,19 @@ def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
     return beste[1] if beste else None
 
 
+def _latest_rating_from_history(history: list) -> Optional[float]:
+    """PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04 - zie
+    moduledocstring. De MEEST RECENTE padelstat-waarde in een historiek-
+    lijst, ongeacht een datum-cutoff - gebruikt als terugval zodra er geen
+    historiek-regel exact op/voor de matchdatum bestaat, maar er WEL ooit
+    een padelstat-waarde gekend was (bv. pas sinds recent bijgehouden)."""
+    if not history:
+        return None
+    beste = max(history, key=lambda r: str(r.get("fetched_at") or ""))
+    rating = beste.get("rating")
+    return float(rating) if rating is not None else None
+
+
 # --------------------------------------------------------------- voorspelling
 def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
                   ratings_cache: Dict[str, list]):
@@ -318,7 +366,10 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
     moduledocstring voor de volgorde van bronnen. Geeft (waarde, bron) terug;
     waarde is None als er niets gekend is. GEEN Firestore-aanroep meer (zie
     PADEL_ANALYSIS_RETRO_PERF_2026-10-04) - `ratings_cache` is al voor de
-    hele sessie opgehaald."""
+    hele sessie opgehaald.
+    PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04: nieuwe volgorde -
+    snapshot -> padelstat-op-datum -> HUIDIGE padelstat (nieuw) -> officieel
+    klassement (nu pas de allerlaatste terugval)."""
     pid = str(player_id)
     if snapshot_own and pid in snapshot_own:
         v = snapshot_own[pid]
@@ -326,21 +377,30 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
             return float(v["padelstat"]), "momentopname (padelstat)"
         if v.get("official_rank") is not None:
             return float(v["official_rank"]), "momentopname (klassement)"
+    history = ratings_cache.get(pid, [])
     iso = to_iso_date(date_text)
     if iso:
-        hist = _rating_at_from_history(ratings_cache.get(pid, []), iso)
+        hist = _rating_at_from_history(history, iso)
         if hist is not None:
             return float(hist), "padelstat-historiek (op datum)"
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04: huidige padelstat-
+    # waarde gaat nu VOOR het officiele klassement.
+    current_ps = _latest_rating_from_history(history)
+    if current_ps is not None:
+        return current_ps, "huidige padelstat (geen historiek op die datum - benadering)"
     fallback = (current_official_ranks or {}).get(pid)
     if fallback is not None:
-        return float(fallback), "huidig officieel klassement (benadering)"
+        return float(fallback), "huidig officieel klassement (laatste redmiddel, geen padelstat gekend)"
     return None, "onbekend"
 
 
 def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
                        ratings_cache: Dict[str, list]):
     """Effectieve rating van EEN tegenstander-speler op `date_text`. GEEN
-    Firestore-aanroep meer - zie _own_value_at()."""
+    Firestore-aanroep meer - zie _own_value_at(). Volgorde ONGEWIJZIGD
+    (zie moduledocstring, PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04:
+    enkel de EIGEN-spelers-kant is aangepast - het officiele klassement van
+    de tegenstander komt al van het uitslagenblad van die dag zelf)."""
     uid = str(user_id) if user_id else None
     if snapshot_opp and uid and uid in snapshot_opp:
         v = snapshot_opp[uid]
@@ -647,12 +707,10 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
     except Exception:  # noqa: BLE001
         pass
-
     # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler,
     # 5 minuten gecached - geen Firestore-reads meer per bord/match hierna.
     player_ids = tuple(sorted(_collect_relevant_player_ids(index)))
     ratings_cache = _load_padelstat_histories(player_ids)
-
     # Schaal-ONAFHANKELIJKE ruwe data - 1x verzameld per sessie (hergebruikt bij
     # schuifregelaar-bewegingen en de "beste factor zoeken"-knop hieronder).
     raw_sig = (sel_player_id, player_ids)
@@ -661,7 +719,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.session_state[raw_key] = gather_raw_match_data(index, current_official_ranks, ratings_cache)
         st.session_state[raw_key + "_sig"] = raw_sig
     raw_rows = st.session_state[raw_key]
-
     labels = [lbl for _k, lbl in encounters]
     key_by_label = {lbl: k for k, lbl in encounters}
     gekozen_label = st.selectbox(
@@ -669,7 +726,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     )
     gekozen_key = key_by_label[gekozen_label]
     boards = reconstruct_boards_with_rankings(index[gekozen_key])
-
     scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
     pred = predict_encounter(boards, current_official_ranks, ratings_cache, scale=scale)
     if pred["snapshot_used"]:
@@ -677,7 +733,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown("#### Per match: voorspeld tegenover echt")
     for bp in pred["boards"]:
         _render_board_row(bp, name_lookup)
-
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
     with st.spinner("Alternatieven doorrekenen..."):
@@ -705,7 +760,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             )
         elif alt["actual"] is not None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
-
     st.divider()
     st.markdown(f"#### Kalibratie over alle gespeelde matchen van {sel_naam}")
     st.caption(
@@ -727,7 +781,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         )
     with c_curve:
         st.caption(f"Bij 100 punten verschil: {_pct(ll.estimate_win_probability(0, -100, scale=scale))} winkans.")
-
     scored = score_raw_at_scale(raw_rows, scale)
     stats = calibration_stats(scored)
     if not stats:
@@ -755,7 +808,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "systematisch verschil (bv. bij lage kansklassen te hoog, bij hoge te laag) wijst op een "
             "factor die scherper of voorzichtiger zou moeten staan."
         )
-
     # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
     st.divider()
     st.markdown("##### Beste winkansfactor automatisch zoeken")

@@ -76,6 +76,37 @@ de beste opstelling tonen voor de speler voor wie we de analyse doen")
    aanpak als de vroegere "Beste opstelling voor mezelf" in de matchup-tabel
    (die daar nu WEG is, zie lineup_matchup_table.py), maar dan contextueel
    t.o.v. het scenario dat je hier aan het plannen bent.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 (op verzoek van Kim: "de
+teksten wat S1, S2 mogen iets duidelijker en multiline. Je mag ook de
+waarom van deze kansen tonen. Eigenlijk komt het er dan op neer dat we
+meteen de scenario analyse in die rotatieplanner integreren [...] voorstel
+opstellingen rotatieplanner mag in mooiere tabel. Ik zie dat er in alle
+plannen verschillende identieke opstellingen zijn [...] je kan dus beter
+tonen: Beste plan en dan (opofferen tussen haakjes of toch zeker wat meer
+info waarom dat het beste plan is). Minstens 1 punt is trouwens ook dezelfde
+opstelling. dus beter dan maar gewoon die 2 opstellingen tonen met uitleg")
+--------------------------------------------------------------------------
+1. S-KNOPPEN DUIDELIJKER: de caption onder elke knop toont nu de VOLLEDIGE
+   scenario-omschrijving (geen afkapping meer op 48 tekens) plus, op een
+   aparte regel, de "waarom"-redenen van het model (bv. "Waarom: Roels &
+   Logghe speelden al 3x samen"). Die redenen komen nu mee in de gedeelde
+   scenario-lijst (zie lineup_scenario_matrix.py, PADEL_ANALYSIS_ROTATION_
+   INTEGRATION_2026-10-04) - geen nieuwe modelaanroep hier nodig.
+2. SCENARIO-OVERZICHT IN DE PLANNER: een nieuwe, inklapbare tabel ("Scenario-
+   overzicht") net onder de S-knoppen toont Scenario/Gewicht/Wat/Rotatie 1/
+   Rotatie 2/Waarom voor alle scenario's - dezelfde gegevens als de aparte
+   scenario-analyse-sectie, nu ook rechtstreeks in de Rotatieplanner. De
+   aparte sectie zelf blijft ONGEWIJZIGD bestaan (Kim: "nog niet direct die
+   scenario analyse weglaten") - dit is een AANVULLING, geen vervanging.
+3. VOORSTELLEN SAMENVOEGEN: identieke opstellingen (bv. "Beste plan" en
+   "Opofferen" die toevallig dezelfde koppelverdeling opleveren) worden niet
+   langer als aparte, dubbele rijen getoond. _merge_duplicate_rows() groepeert
+   voorstellen op hun EXACTE opstelling (ongeacht rij-volgorde) en toont ze
+   als 1 rij met gecombineerde titel ("Beste plan = Opofferen") en
+   gecombineerde uitleg ("meeste verwachte punten; onze 2 zwakste spelers
+   samen in 1 match") - zo zie je in 1 oogopslag WAAROM een opstelling onder
+   meerdere strategieen de beste is, i.p.v. dezelfde rij meermaals te zien.
 """
 import datetime as _dt
 import traceback
@@ -269,6 +300,39 @@ def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_i
     return out
 
 
+def _canon_plan(plan: list) -> tuple:
+    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: canonieke sleutel van
+    een plan (ongeacht rotatie-/matchvolgorde) - gebruikt om identieke
+    voorstellen te herkennen en samen te voegen."""
+    return tuple(sorted(tuple(sorted(tuple(sorted(p)) for p in rot)) for rot in plan))
+
+
+def _merge_duplicate_rows(rijen: list) -> list:
+    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 - zie moduledocstring:
+    voegt rijen met EXACT dezelfde opstelling samen tot 1 rij met
+    gecombineerde titel ("Beste plan = Opofferen") en gecombineerde,
+    ontdubbelde uitleg. Volgorde van eerste voorkomen blijft behouden."""
+    merged: dict = {}
+    volgorde = []
+    for kind, titel, uitleg, plan, pp in rijen:
+        ck = _canon_plan(plan)
+        if ck not in merged:
+            merged[ck] = {"kinds": [], "titels": [], "uitlegs": [], "plan": plan, "pp": pp}
+            volgorde.append(ck)
+        merged[ck]["kinds"].append(kind)
+        merged[ck]["titels"].append(titel)
+        merged[ck]["uitlegs"].append(uitleg)
+    return [
+        (
+            merged[ck]["kinds"][0],
+            " = ".join(merged[ck]["titels"]),
+            "; ".join(dict.fromkeys(merged[ck]["uitlegs"])),
+            merged[ck]["plan"], merged[ck]["pp"],
+        )
+        for ck in volgorde
+    ]
+
+
 def _predict_r2(bundle, roster, r1, opp_ranks, opp_ps, rules):
     if olm is None:
         return []
@@ -412,6 +476,22 @@ def _plan_txt(plan, names) -> str:
     )
 
 
+def _rotation_pairs_text(boards: list) -> tuple:
+    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: 'M1 A / B' per match,
+    gegroepeerd per rotatie - lokale, minimale kopie van lineup_scenario_
+    matrix._rotation_text_opp() (geen import, om koppeling tussen de 2
+    modules te vermijden)."""
+    rot1 = boards[0:MATCHES_PER_ROTATION]
+    rot2 = boards[MATCHES_PER_ROTATION:2 * MATCHES_PER_ROTATION]
+
+    def _fmt(rot):
+        return "  ·  ".join(
+            f"M{m + 1} " + " / ".join(p.get("name", "?") for p in (b.get("opponent_pair") or []))
+            for m, b in enumerate(rot)
+        )
+    return _fmt(rot1), _fmt(rot2)
+
+
 def _save_snapshot(ploeg_id, opp_name, available_ids, own_names, own_ranks, own_ps,
                    opp_uids, opp_names, opp_ranks, opp_ps, own_plan, opp_plan) -> None:
     """PADEL_ANALYSIS_LINEUP_SNAPSHOT_2026-10-03 - zie moduledocstring. Faalt altijd stil."""
@@ -511,8 +591,15 @@ def _render_plan_screen(
             if len(ids) == 2 and None not in ids:
                 pairs.append(frozenset(ids))
         if len(pairs) == _N_ROT * MATCHES_PER_ROTATION:
-            scen.append({"name": f"S{i + 1}", "labels": s.get("labels") or [],
-                         "pairs": [pairs[0:2], pairs[2:4]], "w": s["weight"]})
+            scen.append({
+                "name": f"S{i + 1}", "labels": s.get("labels") or [],
+                "pairs": [pairs[0:2], pairs[2:4]], "w": s["weight"],
+                # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: redenen + ruwe
+                # boards meegeven, voor de duidelijkere caption en het
+                # scenario-overzicht hieronder.
+                "reasons": s.get("reasons") or "", "model_prob": s.get("model_prob"),
+                "boards": s.get("boards") or [],
+            })
 
     st.markdown('<div class="section-header">Rotatieplanner - plan voor de volledige ontmoeting</div>', unsafe_allow_html=True)
     st.caption(
@@ -553,10 +640,31 @@ def _render_plan_screen(
                         if _fill(opp_prefix, s["pairs"], opp_label):
                             st.rerun(scope="fragment")
                         st.warning("Een speler van dit scenario zit niet in de tegenstander-selectie.")
-                    korte = " / ".join(s["labels"])
-                    st.caption(korte if len(korte) <= 48 else korte[:46] + "…")
+                    # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: volledige
+                    # omschrijving (geen afkapping meer) + aparte "waarom"-regel.
+                    st.caption(" / ".join(s["labels"]))
+                    if s.get("reasons"):
+                        st.caption(f"*Waarom:* {s['reasons']}")
     else:
         st.caption("Nog geen scenario's - klik eerst op 'Bereken' in de scenario-analyse, of vul de tegenstander zelf in.")
+    # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: scenario-overzicht
+    # rechtstreeks in de planner - zie moduledocstring. Vervangt de losse
+    # scenario-analyse-sectie NIET (die blijft ongewijzigd bestaan).
+    if scen:
+        with st.expander("Scenario-overzicht (uit de scenario-analyse)", expanded=False):
+            st.caption(
+                "Dezelfde scenario's als in 'Opstelling-scenario's' hierboven, nog eens kort samengevat - "
+                "gebruik de S-knoppen hierboven om er een te kiezen."
+            )
+            rijen_scen = []
+            for s in scen:
+                r1_txt, r2_txt = _rotation_pairs_text(s.get("boards") or [])
+                rijen_scen.append({
+                    "Scenario": s["name"], "Gewicht": f"{s['w'] * 100:.0f}%",
+                    "Wat": " / ".join(s["labels"]), "Rotatie 1": r1_txt, "Rotatie 2": r2_txt,
+                    "Waarom": s.get("reasons") or "",
+                })
+            st.dataframe(rijen_scen, use_container_width=True, hide_index=True)
     if st.button("Tegenstander leegmaken", key=f"{opp_prefix}_clear"):
         _clear(opp_prefix)
         st.rerun(scope="fragment")
@@ -630,16 +738,19 @@ def _render_plan_screen(
         if not rijen:
             st.warning("Geen enkel voorstel kon berekend worden met de huidige instellingen.")
         else:
+            # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: identieke
+            # opstellingen samenvoegen tot 1 rij - zie moduledocstring.
+            rijen = _merge_duplicate_rows(rijen)
             # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: enkel nog de vergelijkingstabel,
             # NIET langer ingeklapt, met een "Kies"-knop per rij en een duidelijke
             # markering van de rij die al actief is - zie moduledocstring.
-            kop = st.columns([1.3, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+            kop = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
             for c, h in zip(kop, ["Voorstel", "Plan", "Winst", "Gelijk", "Verlies", "Min. 1p", ""]):
                 c.markdown(f"**{h}**")
             for kind, titel, uitleg, plan, pp in rijen:
                 is_active = own_plan_now is not None and own_plan_now == plan
-                rij = st.columns([1.3, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
-                titel_txt = f"\u2713 **{titel}**" if is_active else titel
+                rij = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
+                titel_txt = f"\u2713 **{titel}**" if is_active else f"**{titel}**"
                 rij[0].markdown(titel_txt)
                 rij[0].caption(uitleg)
                 rij[1].markdown(_plan_txt(plan, names_all))

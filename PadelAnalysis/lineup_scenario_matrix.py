@@ -77,6 +77,23 @@ de bouwstenen pick_strategies()/compute_matrix()/build_own_options() blijven
 in dit bestand staan (geen functionaliteit verwijderd, enkel niet langer
 vanuit render_scenario_matrix() aangeroepen) mocht een latere, aparte
 "geavanceerd"-weergave ze nog nodig hebben.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 (op verzoek van Kim: "eigenlijk
+komt het er dan op neer dat we meteen de scenario analyse in die
+rotatieplanner integreren wat beter is. Nog niet direct die scenario
+analyse weglaten maar ik wil wel al eens zien of we die data niet meteen
+proper in de rotatieplanner kunnen steken" + "je mag ook de waarom van deze
+kansen tonen" bij de S-knoppen in de Rotatieplanner)
+--------------------------------------------------------------------------
+De "waarom"-reden per scenario werd voorheen ENKEL berekend in de expander
+hieronder ("Waarom deze kansen? (model)"), dus niet beschikbaar voor
+lineup_plan_screen.py. FIX: de reden wordt nu EENMALIG berekend (niet 2x)
+en VERPLICHT mee opgeslagen in de gedeelde st.session_state-lijst
+("scen_matrix_scen_v3_<ploeg>") als veld "reasons", naast "model_prob" -
+lineup_plan_screen.py kan deze nu rechtstreeks tonen onder de S-knoppen,
+zonder het model zelf opnieuw te moeten aanroepen. Deze sectie zelf (de
+scenario-analyse) blijft ONGEWIJZIGD bestaan - Kim wil ze voorlopig nog
+niet weglaten.
 """
 import streamlit as st
 from dashboard_common import ll, _parse_match_date
@@ -326,11 +343,14 @@ def render_scenario_matrix(
         "meestal Match 1 of 2). Gewicht = diezelfde kans, herrekend over enkel de getoonde scenario's. '<1%' "
         "betekent: mogelijk, maar het model verwacht het niet."
     )
+    # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: redenen EENMALIG berekend,
+    # gedeeld met het planscherm via de sessiestate-lijst (zie moduledocstring).
+    redenen_per_scenario = [_reasons(model_stats, s["key"]) for s in scenarios]
     # PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: gedeelde bron voor het planscherm.
     st.session_state[f"scen_matrix_scen_v3_{ploeg_key}"] = [
         {"key": s["key"], "boards": s["boards"], "labels": list(s["labels"]),
-         "weight": s["weight"], "model_prob": s.get("model_prob")}
-        for s in scenarios
+         "weight": s["weight"], "model_prob": s.get("model_prob"), "reasons": redenen_per_scenario[i]}
+        for i, s in enumerate(scenarios)
     ]
     n_rot = max(1, int(total_boards) // MATCHES_PER_ROTATION)
     legenda = []
@@ -345,6 +365,5 @@ def render_scenario_matrix(
     st.dataframe(legenda, use_container_width=True, hide_index=True)
     with st.expander("Waarom deze kansen? (model)", expanded=False):
         for i, s in enumerate(scenarios):
-            reden = _reasons(model_stats, s["key"])
-            st.markdown(f"**S{i + 1}** - {' / '.join(s['labels'])}: {reden or 'geen uitgesproken patroon'}")
+            st.markdown(f"**S{i + 1}** - {' / '.join(s['labels'])}: {redenen_per_scenario[i] or 'geen uitgesproken patroon'}")
     st.divider()
