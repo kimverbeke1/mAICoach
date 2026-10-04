@@ -895,11 +895,43 @@ def best_alternative_for_encounter(
     boards: list, docs: Dict[str, dict], current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, top_n: int = 3,
 ) -> Optional[dict]:
+    """
+    PADEL_ANALYSIS_RETRO_ALT_DEBUG_2026-10-05 (op verzoek van Kim, met
+    screenshot: "Onvoldoende eigen spelers gekend voor deze ontmoeting (3
+    van de nodige 4) -> niet logisch. je hebt alle waardes.")
+    --------------------------------------------------------------------
+    `players` hieronder komt NIET uit het profielenbestand of een aparte
+    telling - het is LETTERLIJK de verzameling spelers die voorkomt in
+    `boards[i]["pair"]` (ons koppel per bord), dezelfde `boards`-lijst die
+    "Per match" hierboven toont. Als "Per match" 4 regels toont maar hier
+    toch "3 van de 4" verschijnt, is er een DISCREPANTIE tussen wat
+    getoond wordt en wat hier binnenkomt - mogelijke oorzaken (niet
+    geraden, maar wel elk met een eigen, EXPLICIET debug-veld hieronder
+    gevuld, zodat de ECHTE oorzaak zichtbaar wordt i.p.v. samengevat):
+      a) een speler komt in meerdere boards voor met dezelfde partner,
+         waardoor er minder dan 4 UNIEKE spelers overblijven (reglementair
+         zou dit niet mogen, maar de data kan dat toch bevatten);
+      b) 1 van de 4 "Per match"-regels toont een bord waarvan `pair` om
+         een andere reden niet correct gevuld is.
+    In plaats van enkel "reason": "too_few_players" terug te geven, bevat
+    het resultaat nu ALTIJD een "debug"-veld met het volledige, ruwe
+    materiaal (boards + de afgeleide players-set) - de UI toont dit in een
+    inklapbaar debug-blok zodra er minder dan 4 spelers gevonden worden,
+    zodat de oorzaak nu zichtbaar is i.p.v. geraden.
+    """
+    debug_boards = [
+        {"pair": sorted(b.get("pair") or []), "score": b.get("score"), "match_id": b.get("match_id"),
+         "opp1_name": b.get("opp1_name"), "opp2_name": b.get("opp2_name")}
+        for b in (boards or [])
+    ]
     if not boards:
-        return {"top": [], "actual": None, "reason": "too_few_players", "n_players": 0}
+        return {"top": [], "actual": None, "reason": "too_few_players", "n_players": 0, "debug": {"boards": debug_boards, "players": []}}
     players = sorted({str(p) for b in boards for p in b["pair"]})
     if len(players) < 4:
-        return {"top": [], "actual": None, "reason": "too_few_players", "n_players": len(players)}
+        return {
+            "top": [], "actual": None, "reason": "too_few_players", "n_players": len(players),
+            "debug": {"boards": debug_boards, "players": players, "n_boards": len(boards)},
+        }
     required = ll.required_counts_from_boards(boards)
     exclude_keys = {b["dedupe_key"] for b in boards}
     synergy = ll.compute_pairwise_synergy(docs, players, exclude_match_keys=exclude_keys)
@@ -1160,6 +1192,30 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.caption(
             f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige 4)."
         )
+        # PADEL_ANALYSIS_RETRO_ALT_DEBUG_2026-10-05 - zie moduledocstring bij
+        # best_alternative_for_encounter(): toont PRECIES welke borden en
+        # spelers hier binnenkwamen, zodat de echte oorzaak zichtbaar is
+        # i.p.v. enkel een samengevat getal.
+        dbg = alt.get("debug") or {}
+        with st.expander("Debug: welke borden/spelers zag deze berekening?", expanded=True):
+            st.caption(
+                f"Gevonden: {dbg.get('n_boards', len(dbg.get('boards', [])))} bord(en), "
+                f"{len(dbg.get('players', []))} unieke speler(s): "
+                + (", ".join(name_lookup.get(p, p) for p in dbg.get("players", [])) or "(geen)")
+            )
+            st.dataframe(
+                [{"Bord": i + 1, "Ons koppel": " / ".join(name_lookup.get(p, p) for p in b["pair"]),
+                  "Tegen": f"{b.get('opp1_name', '?')} / {b.get('opp2_name', '?')}", "Score": b.get("score"),
+                  "Match-ID": b.get("match_id")}
+                 for i, b in enumerate(dbg.get("boards", []))],
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "Als dit minder borden toont dan de regels hierboven bij 'Per match', dan is dat de "
+                "rechtstreekse oorzaak - vergelijk de 2 lijsten. Als het AANTAL klopt maar er toch "
+                "minder dan 4 unieke spelers uitkomen, speelt een speler in 2 borden met identieke "
+                "koppel-samenstelling (zie de 'Ons koppel'-kolom voor duplicaten)."
+            )
     elif alt.get("reason") == "no_valid_combinations":
         st.caption(
             f"{alt.get('n_players', 0)} eigen spelers gekend, maar geen enkele reglementair geldige "
