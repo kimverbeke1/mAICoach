@@ -209,6 +209,33 @@ Daarnaast wordt st.session_state["viewing_player_id_<ploeg_id>"] gezet
 leest lineup_plan_screen.py om te weten VOOR WIE die "Beste voor <naam>"-
 rij berekend moet worden, zonder dat lineup_rotation.py's aanroep van
 _render_rotation_planner() hoeft te wijzigen (geen nieuw argument nodig).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04 (op verzoek van Kim: "refresh heel
+snel. let wel: refresh --> scherm gaat terug naar analyseren. moet
+nabeschouwing blijven")
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de code na te lezen: de gekozen sectie
+("Analyseren"/"Rangschikking"/.../"Nabeschouwing") leefde UITSLUITEND in
+st.session_state, via de radio-key f"lineup_lab_section_{sel_player_id}".
+Een volledige paginaherlaad (F5) kan op Streamlit (zeker op Streamlit
+Cloud) een NIEUWE sessie starten - de server-side session_state is dan
+leeg, en de radio valt terug op zijn EERSTE optie ("Analyseren"), ongeacht
+welke sectie je net nog bekeek. Dit is exact hetzelfde patroon als eerdere
+fixes in dit bestand voor andere widgets die wel al eens tegen dit
+probleem aanliepen - hier was het nog niet opgelost.
+FIX: de gekozen sectie wordt nu OOK bewaard in de URL via st.query_params
+("?lineup_section=Nabeschouwing"), die WEL standaard meekomt bij een F5
+(de browser stuurt de volledige URL, inclusief query-string, opnieuw mee).
+  - _initial_section_index() leest de query-parameter bij het opbouwen van
+    de radio en gebruikt die als startwaarde ALLEEN als er nog geen
+    sessie-waarde voor deze radio-key bestaat (een actieve keuze binnen de
+    lopende sessie wordt dus NOOIT overschreven door een verouderde URL).
+  - Na het bepalen van `section` wordt de URL-parameter gesynchroniseerd
+    zodra ze afwijkt van de huidige waarde - dus elke sectiewissel update
+    meteen de URL, zodat een volgende F5 daar weer op uitkomt.
+Faalt st.query_params (oudere Streamlit-versie, of een andere fout), dan
+valt alles stil terug op het bestaande, sessie-only gedrag - nooit de hele
+pagina laten crashen voor dit comfort-detail.
 """
 import streamlit as st
 from dashboard_common import (
@@ -281,6 +308,40 @@ SECTION_POULE = "Andere ploegen"
 SECTION_SAVED = "Opgeslagen analyses"
 SECTION_RETRO = "Nabeschouwing"  # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03
 _SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED, SECTION_RETRO]
+# PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04: zie moduledocstring.
+_SECTION_QUERY_KEY = "lineup_section"
+
+
+def _initial_section_index(radio_key: str) -> int:
+    """PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04 - zie moduledocstring. Geeft
+    de start-index voor de sectie-radio terug op basis van de URL-query-
+    parameter, MAAR ALLEEN als er nog geen actieve sessie-waarde voor
+    `radio_key` bestaat - een lopende sessie-keuze mag nooit overschreven
+    worden door een (mogelijk verouderde) URL. Faalt altijd stil (index 0)."""
+    if radio_key in st.session_state:
+        return 0  # Streamlit gebruikt dan toch de sessie-waarde, index wordt genegeerd.
+    try:
+        qp_val = st.query_params.get(_SECTION_QUERY_KEY)
+    except Exception:  # noqa: BLE001
+        qp_val = None
+    if isinstance(qp_val, list):
+        qp_val = qp_val[0] if qp_val else None
+    if qp_val in _SECTIONS:
+        return _SECTIONS.index(qp_val)
+    return 0
+
+
+def _sync_section_to_url(section: str) -> None:
+    """PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04 - zie moduledocstring. Faalt
+    altijd stil - de pagina mag nooit crashen enkel omdat de URL niet
+    bijgewerkt kon worden."""
+    try:
+        if st.query_params.get(_SECTION_QUERY_KEY) != section:
+            st.query_params[_SECTION_QUERY_KEY] = section
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _fixture_key(fx_bundle: dict):
     """PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03: sleutel om dezelfde
     ontmoeting uit 2 bundels te herkennen."""
@@ -766,10 +827,14 @@ def page_lineup_lab():
     # PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: st.radio i.p.v. st.tabs -
     # zie de module-docstring. Tabs voeren ELKE tab-body uit bij elke
     # render; met een radio + if/elif draait er nog exact EEN sectie.
+    # PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04: index komt uit de URL-query-
+    # parameter bij een NIEUWE sessie (bv. na F5) - zie moduledocstring.
+    section_radio_key = f"lineup_lab_section_{sel_player_id}"
     section = st.radio(
         "Sectie", _SECTIONS, horizontal=True, label_visibility="collapsed",
-        key=f"lineup_lab_section_{sel_player_id}",
+        index=_initial_section_index(section_radio_key), key=section_radio_key,
     )
+    _sync_section_to_url(section)
     if section == SECTION_ANALYSE:
         with perf.step("SECTIE Analyseren"):
             _render_analyse_section(sel_player_id, sel_label, profiles, name_lookup_global)
