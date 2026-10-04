@@ -72,6 +72,82 @@ NIEUW, als uitbreiding op de bestaande factor-zoekfunctie:
     experimentele weergave binnen Nabeschouwing, geen aanpassing van de
     kernformule. Past Kim dit toe en wil hij dit ALGEMEEN doorvoeren, dan
     is dat een aparte, bewuste vervolgstap (buiten deze levering).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_SIMPLIFY_2026-10-04 (op verzoek van Kim, na het testen
+van de vorige versie: "Analyseer ook de matchen van mag je weglaten. Je
+moet enkel de matchen tonen van de speler die geselecteerd is voor analyse.
+maar voor berekenen model moet je uiteraard alle geldige data gebruiken.
+Beste winkansfactor zoeken is nutteloos als we via het beste model een
+beter resultaat hebben")
+--------------------------------------------------------------------------
+TWEE VEREENVOUDIGINGEN:
+  1. De "Analyseer ook de matchen van"-multiselect (en de teamgenoten-
+     detectie die ze voorstelde, PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04)
+     is VERWIJDERD. De secties "Per match: voorspeld tegenover echt",
+     "Eindresultaat van de ontmoeting" en "Beste alternatief" gebruiken nu
+     UITSLUITEND de matchen van `sel_player_id` zelf. Gevolg: "Beste
+     alternatief" zal vaker de "onvoldoende spelers gekend"-melding tonen
+     (er is geen manier meer om teamgenoten toe te voegen) - dat is
+     BEWUST zo, Kim koos dit expliciet. De kalibratie-sectie
+     (gather_all_valid_match_data) was al, en blijft, gebaseerd op ALLE
+     profielen - die bleef dus ongewijzigd.
+  2. De sectie "Beste winkansfactor zoeken (1 parameter)" is VERWIJDERD.
+     Het 2-parameter-model (schaal + bias, zie hierboven) is een STRIKTE
+     uitbreiding: bias=0 zit altijd in het doorzochte bias-bereik
+     (_BIAS_SEARCH_RANGE bevat 0), dus "Zoek beste model (schaal + bias)"
+     kan NOOIT een slechtere Brier-score opleveren dan de 1-parameter-
+     zoekfunctie - een aparte knop ervoor was overbodige UI.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 (op verzoek van Kim:
+"ik vraag me wel af of je de juiste gegevens gebruikt want ik kan me
+eerlijk gezegd niet inbeelden dat ik juiste padelstat waarden heb voor
+1667 matchen" + het concrete voorbeeld "Joris Verlee / Kim Verbeke tegen
+De Somer Kurt / Pauwels Jeroen [...] nochtans ben ik zeker dat je alle
+padelstat waardes van die match hebt")
+--------------------------------------------------------------------------
+TERECHTE TWIJFEL, en een REEEL ONDERSCHEID dat voorheen niet zichtbaar was:
+"geldige matchdata" (gather_all_valid_match_data) telde een bord al mee
+zodra ER OOK MAAR EEN RATING gevonden werd voor elke speler - via DEZELFDE
+prioriteitsketen als de rest van dit bestand (padelstat-op-datum -> meest
+recente padelstat -> vlak padelstat-veld -> OFFICIEEL KLASSEMENT ALS
+TERUGVAL). Die terugval is voor TEGENSTANDERS legitiem (hun klassement
+staat letterlijk op het uitslagenblad van die dag, dus een "echte" waarde
+van toen) - maar voor het overzicht "hoeveel matchen hebben we ECHTE
+padelstat-data" vermengde dat 2 heel verschillende databronnen tot 1 getal
+(1667), zonder het onderscheid te tonen. Kim's twijfel is dus terecht:
+1667 was het aantal matchen met IRGENDEEN bruikbare rating, niet het
+aantal met bevestigde padelstat voor alle 4 spelers.
+FIX: gather_all_valid_match_data() houdt nu per rij bij of elke kant
+(our/their) ECHTE padelstat gebruikte (bron-tekst bevat "padelstat") dan
+wel op het officiele klassement terugviel. De UI toont nu 3 aparte
+tellingen i.p.v. 1: "Bruikbare matchen (totaal)", "...waarvan met
+PADELSTAT voor alle 4 spelers", en "...waarvan min. 1 speler op officieel
+klassement terugviel" - zodat Kim zelf kan zien hoe betrouwbaar het cijfer
+1667 werkelijk is, i.p.v. dat ik dat zonder toegang tot de echte data zou
+moeten gokken.
+Het concrete voorbeeld (Joris/Kim tegen De Somer/Pauwels) is GEEN bug: de
+melding "padelstat (nog geen historiek bijgehouden voor deze speler -
+huidige waarde)" betekent letterlijk dat de "history"-array van DIE 4
+spelers in Firestore leeg is (0 regels) - ZE HEBBEN WEL een padelstat-
+rating (het vlakke "rating"-veld bestaat, vandaar dat het geen klassement-
+terugval toont), maar nog nooit is er een gedateerde historiek-regel voor
+hen weggeschreven (dat gebeurt pas vanaf de eerstvolgende refresh NA de
+historiek-functionaliteit). Dit is dus een ACCURATE beschrijving van de
+echte opslagstatus, geen fout in de logica.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_TAIL_MISCALIBRATION_2026-10-04 (observatie uit Kim's
+screenshot: kansklasse 70-100% voorspelt gemiddeld 75% maar werd slechts
+63% effectief gewonnen - de overige klassen liggen dicht bij elkaar)
+--------------------------------------------------------------------------
+Dit is zichtbaar in de bestaande kans-klassen-tabel en wordt NIET apart
+"opgelost" in deze levering - het 2-parameter schaal+bias-model optimaliseert
+de GEMIDDELDE Brier-score over ALLE klassen samen, niet per klasse. Een
+staart die systematisch afwijkt terwijl de rest goed zit, wijst eerder op
+een NIET-LINEAIRE vertekening (de curve zou in het hoge-kans-gebied
+specifiek afgevlakt moeten worden) - dat vereist een fundamenteel ander
+soort model (bv. isotone regressie of Platt scaling per segment) dan de
+huidige schaal+bias-aanpak. Dat is een grotere, aparte beslissing en wordt
+hier bewust niet ongevraagd gebouwd - enkel gesignaleerd in de UI-caption.
 """
 import datetime as _dt
 import math
@@ -198,18 +274,6 @@ def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
             "match_id": m.get("match_id"), "dedupe_key": key,
         }
     return list(seen.values())
-
-
-# --------------------------------------------------------------- teamgenoten
-def _detect_teammates(docs: Dict[str, dict], sel_player_id: str) -> set:
-    teammates = set()
-    doc = docs.get(str(sel_player_id)) or {}
-    for m in doc.get("matches", []) or []:
-        if m.get("match_type") != "interclub":
-            continue
-        if m.get("partner_user_id"):
-            teammates.add(str(m["partner_user_id"]))
-    return teammates
 
 
 # --------------------------------------------------------------- momentopnames
@@ -470,6 +534,26 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
             ]
             our_known = [v for v, _ in our_vals if v is not None]
             their_known = [v for v, _ in their_vals if v is not None]
+            # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04: bron per
+            # kant bijhouden (echte padelstat vs. officieel-klassement-
+            # terugval) - zie moduledocstring.
+            # LET OP (bevestigde fout tijdens testen): een naieve "padelstat"
+            # in label-substring-check faalt, want de FALLBACK-labels zelf
+            # bevatten de tekst "... geen padelstat gekend" - dus "padelstat"
+            # komt OOK voor in labels die GEEN padelstat gebruikten. De
+            # correcte check is net het omgekeerde: een waarde is
+            # padelstat-gebaseerd DAN EN SLECHTS DAN ALS het label NIET over
+            # "klassement" gaat en niet "onbekend" is (alle 4 echte
+            # padelstat-labels - "padelstat-historiek (op datum)", "meest
+            # recente padelstat-historiek (...)", "padelstat (nog geen
+            # historiek ...)", "momentopname (padelstat)" - bevatten nooit
+            # het woord "klassement").
+            our_is_padelstat = all(
+                s is not None and "klassement" not in s and s != "onbekend" for _, s in our_vals
+            ) if our_vals else False
+            their_is_padelstat = all(
+                s is not None and "klassement" not in s and s != "onbekend" for _, s in their_vals
+            ) if their_vals else False
             raw.append({
                 "pair": (p1, p2),
                 "our_avg": (sum(our_known) / len(our_known)) if our_known else None,
@@ -477,6 +561,7 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
                 "actual_won": board.get("won"), "score": board.get("score"),
                 "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
                 "match_date": date_text,
+                "our_is_padelstat": our_is_padelstat, "their_is_padelstat": their_is_padelstat,
             })
     return raw
 
@@ -514,8 +599,13 @@ def gather_all_valid_match_data(profiles: list) -> dict:
     ratings_cache = _load_padelstat_histories(relevant_ids)
     raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
     valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 - zie moduledocstring:
+    # opsplitsing tonen i.p.v. 1 vermengd totaal.
+    n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
+    n_fallback = len(valid_rows) - n_full_padelstat
     return {
         "valid_rows": valid_rows, "n_total_boards": len(raw), "n_valid": len(valid_rows),
+        "n_full_padelstat": n_full_padelstat, "n_fallback": n_fallback,
         "player_ids": all_ids,
     }
 
@@ -771,38 +861,20 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.session_state["retro_scale"] = saved["scale"]
             st.session_state["retro_bias"] = saved.get("bias", 0.0)
 
-    with perf.step("retro: eigen matchen ophalen (teamgenoten detecteren)"):
+    # PADEL_ANALYSIS_RETRO_SIMPLIFY_2026-10-04: geen teamgenoten-keuze meer -
+    # zie moduledocstring. Enkel de matchen van sel_player_id zelf.
+    with perf.step("retro: eigen matchen ophalen"):
         with st.spinner(f"Matchen van {sel_naam} ophalen..."):
-            sel_docs = ll.get_docs_for_players([sel_player_id])
-    teammates = _detect_teammates(sel_docs, sel_player_id)
-    teammate_options = [p for p in profiles if str(p.get("player_id")) in teammates]
-    other_options = [p for p in profiles if str(p.get("player_id")) not in teammates
-                     and str(p.get("player_id")) != sel_player_id]
-    option_labels = [sel_naam] + [name_lookup.get(str(p.get("player_id")), "?") for p in teammate_options + other_options]
-    label_to_id = {sel_naam: sel_player_id}
-    label_to_id.update({name_lookup.get(str(p.get("player_id")), "?"): str(p.get("player_id")) for p in teammate_options})
-    label_to_id.update({name_lookup.get(str(p.get("player_id")), "?"): str(p.get("player_id")) for p in other_options})
-    default_labels = [sel_naam] + [name_lookup.get(str(p.get("player_id")), "?") for p in teammate_options]
+            docs = ll.get_docs_for_players([sel_player_id])
 
     st.caption(
-        f"Vergelijkt de voorspelde winkans met de echte uitslag van eerder gespeelde interclub-matchen, MET "
-        "de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. Gebruik dit om te "
-        "controleren of de winkans-formule klopt, en wat het betere alternatief geweest zou zijn."
+        f"Vergelijkt, voor **{sel_naam}**, de voorspelde winkans met de echte uitslag van eerder gespeelde "
+        "interclub-matchen, MET de padelstat-/klassementwaarden van TOEN (niet de huidige) waar bekend. "
+        "Gebruik dit om te controleren of de winkans-formule klopt, en wat het betere alternatief geweest "
+        "zou zijn. De kalibratie verderop gebruikt wel ALLE gekende matchen van iedereen, niet enkel van "
+        f"{sel_naam}."
     )
-    gekozen_labels = st.multiselect(
-        "Analyseer ook de matchen van (voor de ontmoeting hieronder en 'Beste alternatief' - "
-        "de kalibratie verderop gebruikt ALTIJD alle gekende matchen van iedereen)",
-        option_labels, default=default_labels, key=f"retro_teammates_{sel_player_id}",
-        help=f"{sel_naam} staat er altijd bij. Standaard vooraf ingevuld met de teamgenoten waarmee "
-             f"{sel_naam} al samenspeelde.",
-    )
-    gekozen_ids = {label_to_id[lbl] for lbl in gekozen_labels if lbl in label_to_id} | {sel_player_id}
-    if gekozen_ids == {sel_player_id}:
-        docs = sel_docs
-    else:
-        with perf.step("retro: matchen van gekozen spelers ophalen"):
-            with st.spinner("Matchen van de gekozen spelers ophalen..."):
-                docs = ll.get_docs_for_players(sorted(gekozen_ids))
+    gekozen_ids = {sel_player_id}
 
     with perf.step("retro: encounter-index bouwen"):
         index = build_retro_encounter_index(docs, allowed_player_ids=gekozen_ids)
@@ -925,16 +997,30 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         with st.spinner("Alle gekende matchen doorzoeken..."):
             all_data = gather_all_valid_match_data(profiles)
     raw_rows = all_data["valid_rows"]
-    c_n1, c_n2 = st.columns(2)
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_COVERAGE_2026-10-04 - zie moduledocstring:
+    # 3 aparte tellingen i.p.v. 1 vermengd getal, zodat zichtbaar is hoeveel
+    # van de "bruikbare" matchen op ECHTE padelstat steunen en hoeveel op de
+    # officieel-klassement-terugval.
+    c_n1, c_n2, c_n3 = st.columns(3)
     with c_n1:
-        st.metric("Bruikbare matchen (rating + uitslag gekend)", all_data["n_valid"])
+        st.metric("Bruikbare matchen (totaal)", all_data["n_valid"])
     with c_n2:
-        st.metric("Totaal geziene borden", all_data["n_total_boards"])
+        st.metric("... met padelstat voor alle 4", all_data.get("n_full_padelstat", 0))
+    with c_n3:
+        st.metric("... met min. 1 klassement-terugval", all_data.get("n_fallback", 0))
+    st.caption(
+        "'Bruikbare matchen' telt elk bord waarvoor we, via padelstat OF het officiele klassement van "
+        "toen, een rating hebben voor beide kanten EN de echte uitslag kennen. De 2 kolommen ernaast "
+        "splitsen dat op: hoeveel daarvan STEUNEN VOLLEDIG op padelstat (de meest betrouwbare bron), en "
+        "hoeveel voor minstens 1 kant terugvielen op het officiele klassement (bv. omdat die speler nog "
+        "geen padelstat-rating bij ons heeft)."
+    )
     if all_data["n_total_boards"] > 0 and all_data["n_valid"] < all_data["n_total_boards"]:
         ontbrekend = all_data["n_total_boards"] - all_data["n_valid"]
         st.caption(
-            f"{ontbrekend} bord(en) vielen af - meestal omdat er voor minstens 1 speler nog geen enkele "
-            "padelstat- of officiële-klassementwaarde gekend is, of de uitslag onbekend is."
+            f"Daarnaast vielen {ontbrekend} van de in totaal {all_data['n_total_boards']} geziene borden "
+            "volledig af - meestal omdat er voor minstens 1 speler helemaal geen rating gekend is, of de "
+            "uitslag onbekend is."
         )
     if not raw_rows:
         st.info("Nog geen enkele match met zowel een gekende rating voor beide kanten als een gekende uitslag.")
@@ -987,27 +1073,16 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "systematisch verschil (bv. bij lage kansklassen te hoog, bij hoge te laag) wijst op een model "
             "dat scherper, voorzichtiger, of met een bias-term bijgesteld moet worden."
         )
-
-    st.divider()
-    st.markdown("##### Beste winkansfactor zoeken (1 parameter)")
-    st.caption("Zoekt enkel de beste schaalfactor - de curve blijft gecentreerd rond 0 verschil = 50%.")
-    if st.button("Zoek beste winkansfactor", key="retro_find_best_scale"):
-        with perf.step("retro: beste winkansfactor zoeken (find_best_scale)"):
-            with st.spinner("Factoren doorrekenen..."):
-                st.session_state["retro_best_scale_result"] = find_best_scale(raw_rows)
-    result = st.session_state.get("retro_best_scale_result")
-    if result and result.get("best"):
-        best = result["best"]
-        if best["scale"] == int(scale) and not bias:
-            st.success(f"De huidige factor ({scale:.0f}) is al de beste in het doorzochte bereik - Brier {best['brier']:.3f}.")
-        else:
-            st.info(f"Voorstel: factor **{best['scale']}**, bias 0 - Brier **{best['brier']:.3f}** (huidig: {stats['brier']:.3f}).")
-            st.button(
-                f"Toepassen: factor {best['scale']}, geen bias", key="retro_apply_best_scale",
-                on_click=_apply_scale_callback, args=(best["scale"], 0.0),
+        hoogste_bin = stats["bins"][-1] if stats["bins"] else None
+        if hoogste_bin and abs(hoogste_bin["gem_voorspeld"] - hoogste_bin["werkelijk"]) >= 8:
+            st.caption(
+                f"Let op: de hoogste kansklasse ({hoogste_bin['bereik']}) wijkt het meest af "
+                f"({hoogste_bin['gem_voorspeld']:.0f}% voorspeld tegenover {hoogste_bin['werkelijk']:.0f}% "
+                "werkelijk) - dat is een afwijking die schaal+bias alleen niet volledig kan wegwerken "
+                "(die corrigeert de hele curve gelijk, niet specifiek de staart). Dat vraagt een ander "
+                "soort model (bv. per kansklasse apart gekalibreerd) - een grotere stap die hier bewust "
+                "niet ongevraagd gebouwd is."
             )
-        if best.get("at_upper_edge"):
-            st.warning(f"Dit is de bovengrens van het doorzochte bereik (tot {max(_SCALE_SEARCH_RANGE)}) - mogelijk ligt het echte optimum hoger.")
 
     st.divider()
     st.markdown("##### Beste model zoeken (2 parameters: schaal + bias)")
