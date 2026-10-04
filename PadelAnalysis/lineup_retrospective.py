@@ -196,11 +196,7 @@ ROOT CAUSE van "Beste alternatief altijd leeg": bevestigd, en inherent aan
 de PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04-fix hierboven - die loste
 de dames-matchen-bug terecht op door ENKEL het document van de GEKOZEN
 speler op te halen, maar sloot daarmee ONBEDOELD ook de WEL gewenste
-teamgenoten (dezelfde ontmoeting, andere koppels) uit. Met <4 gekende eigen
-spelers per ontmoeting kan best_alternative_for_encounter() nooit een
-alternatieve koppelverdeling berekenen (die heeft minstens 4 spelers nodig
-om te herschikken) - en de kalibratie/"eindresultaat"-vraag hieronder heeft
-om dezelfde reden nooit de VOLLEDIGE ontmoeting gekend.
+teamgenoten (dezelfde ontmoeting, andere koppels) uit.
 FIX: `render_retrospective_tab()` bepaalt nu EERST, met een goedkope enkele
 lookup van ENKEL `sel_player_id`, welke teamgenoten in diens matchen als
 partner opduiken ("gedetecteerde ploegmaats"). Een multiselect ("Analyseer
@@ -213,106 +209,115 @@ PADEL_ANALYSIS_RETRO_PLAYER_FILTER_2026-10-04 kan niet terugkeren: een
 match komt enkel binnen als minstens 1 van de EXPLICIET gekozen spelers
 hem effectief speelde.
 `build_retro_encounter_index()` heeft nu een `allowed_player_ids`-parameter
-(een SET) i.p.v. het vroegere, enkelvoudige `sel_player_id` - met dezelfde
-betekenis (None = geen filter, geef dit nooit mee vanuit de UI) maar nu
-meerdere toegelaten spelers tegelijk. Een bord dat door 2 van de gekozen
-teamgenoten gespeeld werd (elk vanuit hun eigen document) krijgt dankzij de
-bestaande dedupe-sleutel (_board_dedupe_key(), gebaseerd op match_id/koppel,
-niet op wie het document aanlevert) maar EENMAAL een plek in de index - geen
-dubbele rijen.
-Zodra zo een ontmoeting NU >=4 bekende eigen spelers heeft, werkt "Beste
-alternatief" vanzelf (geen losse codewijziging nodig daar).
+(een SET) i.p.v. het vroegere, enkelvoudige `sel_player_id`.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 (zelfde verzoek als
 hierboven: "Dan kan je eindresultaat vergelijken met voorspeld resultaat")
 --------------------------------------------------------------------------
 NIEUW blok "Eindresultaat van de ontmoeting: voorspeld tegenover echt" -
 enkel zinvol/getoond zodra ALLE boards van de gekozen ontmoeting gekend
-zijn (typisch pas haalbaar met teamgenoten erbij, zie hierboven). Combineert
-de per-bord voorspelde winkansen tot een voorspelde kans op 2/1/0
-competitiepunten (_combine_boards_to_point_probs() - lokale, PURE kopie van
-dezelfde combinatorische logica als lineup_rotation._match_outcome_point_
-probabilities()/lineup_plan_screen._points(), BEWUST hier opnieuw
-geschreven i.p.v. geïmporteerd - zie de uitleg bovenaan dit bestand over
-waarom dit bestand zijn eigen, kleine kopieën van gedeelde rekenlogica
-gebruikt i.p.v. afhankelijkheden op andere lineup_*-modules op te bouwen)
-en vergelijkt dat met de ECHTE einduitslag (_actual_encounter_result() -
-simpel telwerk op "won" per bord, enkel als ALLE boards een gekende
-uitslag hebben). Is niet elk bord gekend, dan toont de sectie expliciet
-hoeveel borden ontbreken i.p.v. een onvolledig of misleidend cijfer.
+zijn. Combineert de per-bord voorspelde winkansen tot een voorspelde kans
+op 2/1/0 competitiepunten (_combine_boards_to_point_probs()) en vergelijkt
+dat met de ECHTE einduitslag (_actual_encounter_result()).
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_ALT_REASON_2026-10-04 (gevonden tijdens het testen van
 PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04 hierboven)
 --------------------------------------------------------------------------
-ROOT CAUSE: best_alternative_for_encounter() gaf in ALLE "niet gelukt"-
-gevallen simpelweg None terug, en de UI toonde daarbij altijd dezelfde
-tekst: "minder dan 4 spelers gekend". Dat klopte niet meer zodra er WEL
->=4 spelers gekend waren maar de optimalisatie zelf (ll.optimize_lineup_
-vs_scenario) toch leeg teruggaf (bv. geen enkele combinatie binnen de
-puntengrens) - de UI zou dan een AANTOONBAAR ONJUISTE oorzaak tonen.
-FIX: de functie geeft nu ALTIJD een dict terug (nooit None) met een
-"reason"-veld ("too_few_players" / "no_valid_combinations" / None bij
-succes) en "n_players" - de UI toont per geval de juiste, specifieke
-tekst i.p.v. 1 vaste aanname.
+best_alternative_for_encounter() geeft nu ALTIJD een dict terug (nooit
+None) met een "reason"-veld ("too_few_players" / "no_valid_combinations" /
+None bij succes) en "n_players" - de UI toont per geval de juiste,
+specifieke tekst i.p.v. 1 vaste aanname.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 (op verzoek van Kim, met
 meting: "Totaal deze render: 28.02s [...] Zwaarste eigen tijd: SECTIE
 Nabeschouwing - 5.19s" en een export met 99x "Firestore: get_padelstat_
-rating" (~17s) + 18x "get_official_klassement_via_padelstat" + 10x
-"get_player" - allemaal na elkaar, zoals bevestigd door Kim's herhaalde
-metingen)
+rating" (~17s) - allemaal na elkaar)
 --------------------------------------------------------------------------
-ROOT CAUSE, bevestigd door de code zelf na te lezen (geen gok): ondanks de
-toelichting bij PADEL_ANALYSIS_RETRO_PERF_2026-10-04 hierboven ("EEN
-fb.get_padelstat_rating() per UNIEKE speler") bleef _load_padelstat_
-histories() dit in een GEWONE, SEQUENTIELE Python-for-lus doen:
-    for pid in player_ids:
-        data = fb.get_padelstat_rating(pid) or {}
-Met tot ~100 unieke spelers (alle tegenstanders over alle seizoenen heen -
-_collect_relevant_player_ids() verzamelt immers OOK alle tegenstander-id's,
-niet enkel het eigen gekozen peloton) en ~0.15-0.19s per synchrone
-Firestore-read, gaf dat exact de gemeten ~13-17s "eigen tijd" - en zonder
-een enkele onderliggende perf_timing-stap zichtbaar, want dit bestand
-importeerde perf_timing tot nu toe NIET.
-FIX, twee delen:
-  1. _load_padelstat_histories() roept nu EERST fb._fs_prefetch(("get_
-     padelstat_rating",), player_ids) aan - DEZELFDE, reeds overal elders
-     in de app gebruikte parallelle-voorophaal-infrastructuur (zie
-     dashboard_common.py/PADEL_ANALYSIS_FIRESTORE_READ_CACHE_2026-09-29 en
-     page_lineup_lab.py's prefetch_own_player_reads). Dat haalt alle
-     ~100 reads in parallelle threads op en vult de gedeelde Firestore-
-     leescache; de for-lus erna leest dan uit die warme cache (vrijwel 0s
-     per iteratie) i.p.v. elk opnieuw een synchrone Firestore-aanroep te
-     doen. Is fb._fs_prefetch om een of andere reden niet beschikbaar
-     (bv. standalone gebruik buiten de volledige app), dan valt de functie
-     terug op een LOKALE ThreadPoolExecutor rond fb.get_padelstat_rating -
-     functioneel identiek resultaat, enkel zonder de gedeelde cache.
-  2. perf_timing wordt nu (optioneel, defensief) geïmporteerd en rond elke
-     potentieel zware stap in render_retrospective_tab() gelegd (docs
-     ophalen, encounter-index bouwen, klassement-terugval, padelstat-
-     historiek laden, ruwe data verzamelen, per-ontmoeting voorspelling,
-     "beste alternatief"). Zo toont het laadtijd-paneel voortaan WEL een
-     opsplitsing onder "SECTIE Nabeschouwing" i.p.v. 1 ondoorzichtig blok -
-     nodig om een volgend prestatieprobleem in deze sectie meteen te
-     kunnen lokaliseren zonder opnieuw te moeten gokken.
+ROOT CAUSE, bevestigd: _load_padelstat_histories() deed dit in een GEWONE,
+SEQUENTIELE Python-for-lus. FIX: roept nu EERST fb._fs_prefetch(("get_
+padelstat_rating",), player_ids) aan - dezelfde parallelle-voorophaal-
+infrastructuur die elders in de app al gebruikt wordt. perf_timing wordt
+nu ook (optioneel, defensief) geïmporteerd en rond elke potentieel zware
+stap gelegd.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04 (op verzoek van Kim: "het
 lijkt of de factor 400 die nu maximum is te klein is voor de berekening van
-de Brier score [...] boven de 50 redelijk goed maar kan ook nog iets beter"
-- met een screenshot waarin "Zoek beste winkansfactor" exact 400 (de
-bovengrens van het toen doorzochte bereik) als beste voorstelde)
+de Brier score")
 --------------------------------------------------------------------------
-ROOT CAUSE: _SCALE_SEARCH_RANGE stopte hard bij 400. Een gevonden "beste"
-factor die toevallig exact op de RAND van het doorzochte bereik ligt, is
-geen bevestigd optimum - de werkelijke beste factor kan net zo goed
-daarboven liggen; het doorzoeken stopte simpelweg te vroeg om dat te weten.
-FIX: het bereik is verruimd naar 50-800 (nog steeds pure in-memory
-berekening, dus nog steeds vrijwel instant). find_best_scale() geeft er
-bovendien een "at_upper_edge"-vlag bij terug zodra het gevonden optimum
-exact op de bovengrens van het doorzochte bereik ligt; de UI toont dan een
-expliciete waarschuwing i.p.v. het voorstel als een bevestigd optimum te
-presenteren.
+Bereik verruimd van 50-400 naar 50-800. find_best_scale() geeft een
+"at_upper_edge"-vlag terug zodra het gevonden optimum exact op de
+bovengrens ligt; de UI toont dan een expliciete waarschuwing.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_OWN_RANK_PREFETCH_2026-10-04 (op verzoek van Kim, met
+een NIEUWE, gedetailleerde meting na de vorige fix: "laadtijd nog lang" +
+CSV met "retro: officieel klassement terugval ophalen - 9.997s/10.75s",
+volledig sequentieel: 36x Firestore: get_official_klassement_via_padelstat
+(elk via een eigen get_player_profile) + 26x _official_current_rank (elk
+via een eigen get_player))
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door lineup_scout.py te lezen (op Kim's verzoek
+aangeleverd): `_build_own_official_ranks_strict()` roept per speler
+`_cached_official_rank()` aan, die intern `fb.get_official_klassement_via_
+padelstat()` (-> 1 Firestore-read "get_player_profile") en, als terugval,
+`_official_current_rank()` (-> 1 Firestore-read "get_player") aanroept -
+ALLEBEI SEQUENTIEEL, zonder enige parallellisatie, voor elke speler in
+`own_side_ids` (alle eigen spelers EN al hun gekende partners over 196
+matchen - vandaar 36+ aparte spelers i.p.v. enkel de paar effectief
+gekozen spelers).
+FIX: lineup_scout.py bevat AL een kant-en-klare, reeds elders in de app
+gebruikte oplossing - `prefetch_own_player_reads(player_ids)` - die exact
+dezelfde 3 Firestore-reads ("get_player_profile", "get_padelstat_rating",
+"get_player") parallel voorophaalt in de GEDEELDE leescache (via
+fb._fs_prefetch). Dit bestand roept die functie nu aan, met de volledige
+`own_side_ids`-lijst, VOOR `_build_own_official_ranks_strict()` wordt
+aangeroepen - de sequentiele lus daarna leest dan uit een al warme cache
+i.p.v. telkens een synchrone Firestore-aanroep te doen. Geen enkele
+wijziging in lineup_scout.py zelf nodig - de infrastructuur bestond al.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_SNAPSHOT_CACHE_2026-10-04 (op verzoek van Kim, zelfde
+meting: "retro: ruwe matchdata verzamelen (gather_raw_match_data) -
+11.06s/11.93s eigen tijd", zonder ENKELE zichtbare sub-stap)
+--------------------------------------------------------------------------
+ROOT CAUSE, bevestigd door de eigen code van dit bestand na te lezen (geen
+gok): `_find_snapshot_for()` deed een LIVE `fb.db.collection(SNAPSHOT_
+COLLECTION).limit(500).stream()`-query naar Firestore, ZONDER enige cache
+- en deze functie wordt aangeroepen EENMAAL PER ONTMOETING (niet per bord)
+binnen `gather_raw_match_data()`'s hoofdlus. Met ~98 unieke ontmoetingen
+(196 matchen / ~2 borden gemiddeld bekend per ontmoeting) gaf dat ~98
+aparte, synchrone live Firestore-queries - exact de 11s "eigen tijd" die
+nergens als aparte sub-stap verscheen, want geen van beide functies had een
+eigen perf.step()-meetpunt.
+FIX: een nieuwe, 5 minuten gecachete `_load_all_snapshots()` haalt de
+VOLLEDIGE "lineup_snapshots"-collectie EENMALIG per sessie op (dezelfde
+`@st.cache_data(ttl=300)`-aanpak als _load_padelstat_histories()).
+`_find_snapshot_for()` filtert nu PUUR in-memory (een eenvoudige lus over
+hoogstens 500 al-geladen documenten) i.p.v. voor elke aanroep een nieuwe
+live query te doen. De functiehandtekening en het gedrag naar alle
+aanroepers (predict_encounter, gather_raw_match_data, best_alternative_
+for_encounter) blijven ONGEWIJZIGD - enkel de interne implementatie is nu
+gecached i.p.v. live.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04 (op verzoek van Kim: "gekozen
+factor moet idd opgeslagen worden" - bevestigd met een vervolgmeting waarin
+de winkansfactor na een nieuwe sessie terugviel naar de standaard 207 i.p.v.
+de eerder gekozen 645)
+--------------------------------------------------------------------------
+De winkansfactor werd enkel in st.session_state bewaard - dat leeft maar
+voor 1 sessie/tabblad en is dus verdwenen bij een nieuwe keer openen van de
+app. FIX: een nieuw Firestore-document ("app_settings"/"retro_calibration")
+bewaart de laatst gekozen factor. _load_saved_scale() leest dit EENMALIG in
+bij de EERSTE render van deze sectie in een sessie (enkel als
+st.session_state nog geen "retro_scale" heeft - een lopende sessie
+overschrijft dus nooit een keuze die je net zelf maakte). _save_scale_to_
+firestore() bewaart de factor zowel bij het verslepen van de schuifregelaar
+zelf (on_change) als bij het bevestigen van een automatisch voorstel (de
+bestaande "Toepassen"-knop, _apply_best_scale_callback()). Faalt de opslag
+of het lezen (bv. geen verbinding), dan valt alles stil terug op het oude
+gedrag (sessie-only, standaard 207) - nooit de hele sectie laten crashen.
+Dit wijzigt, net als voorheen, ENKEL deze weergave in Nabeschouwing - niet
+de globale DEFAULT_WIN_PROBABILITY_SCALE die de rest van de app gebruikt.
 """
+import datetime as _dt
 import math
 import re
 from collections import defaultdict
@@ -323,7 +328,7 @@ import streamlit as st
 import lineup_lab as ll
 import firebase_service as fb
 
-# PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 - zie moduledocstring.
+# PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04 / PADEL_ANALYSIS_RETRO_OWN_RANK_PREFETCH_2026-10-04
 try:
     import perf_timing as perf
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -336,6 +341,9 @@ except Exception:  # noqa: BLE001  pragma: no cover
     perf = _PerfNoop()
 
 SNAPSHOT_COLLECTION = "lineup_snapshots"
+# PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04
+_CALIBRATION_SETTINGS_COLLECTION = "app_settings"
+_CALIBRATION_SETTINGS_DOC = "retro_calibration"
 _DEFAULT_SCALE = ll.DEFAULT_WIN_PROBABILITY_SCALE
 _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
 # PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04: verruimd van 50-400 naar 50-800.
@@ -401,13 +409,9 @@ def build_retro_encounter_index(docs: Dict[str, dict], allowed_player_ids=None) 
 def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
     """Zelfde label-afleiding als ll.list_encounters(), meest recent eerst.
     Geeft (key, label, date) terug.
-    PADEL_ANALYSIS_RETRO_SORT_FIX_2026-10-04 (op verzoek van Kim: "sortering
-    van de matchen in de lijst moet volgens datum zijn. Nieuwste eerst."):
-    ROOT CAUSE, bevestigd: de sortering gebruikte de RUWE datum-TEKST
-    ("26/09/2026", dag-eerst) als sorteersleutel. Lexicografisch sorteren
-    van dag-eerst-tekst geeft NIET de chronologische volgorde zodra de
-    maand verschilt. FIX: sorteer op `to_iso_date(x[2])` (YYYY-MM-DD, wel
-    correct lexicografisch sorteerbaar) i.p.v. de ruwe tekst."""
+    PADEL_ANALYSIS_RETRO_SORT_FIX_2026-10-04: sorteert op `to_iso_date(x[2])`
+    i.p.v. de ruwe datum-TEKST (die bij een maandverschil niet correct
+    chronologisch lexicografisch sorteert)."""
     items = []
     for key, entries in index.items():
         date, encounter = key
@@ -428,11 +432,8 @@ def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
     opp2_ranking (tekst, bv. "P200") en match_date - nodig voor de
     retrospectieve voorspelling (zie moduledocstring).
     PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: `entries` kan nu matchrecords
-    van MEERDERE eigen spelers bevatten (1 ontmoeting, meerdere koppels) -
-    de bestaande `_board_dedupe_key()` (gebaseerd op match_id/koppel, NIET
-    op welk document het record aanlevert) zorgt dat elk bord nog steeds
-    maar EENMAAL in de uitkomst verschijnt, ook als 2 teamgenoten hetzelfde
-    bord elk vanuit hun eigen perspectief aanleveren."""
+    van MEERDERE eigen spelers bevatten - de bestaande `_board_dedupe_key()`
+    zorgt dat elk bord nog steeds maar EENMAAL verschijnt."""
     seen = {}
     for pid, m in entries:
         key = _board_dedupe_key(m, pid)
@@ -471,19 +472,31 @@ def _detect_teammates(docs: Dict[str, dict], sel_player_id: str) -> set:
 
 
 # --------------------------------------------------------------- momentopnames
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_all_snapshots() -> list:
+    """PADEL_ANALYSIS_RETRO_SNAPSHOT_CACHE_2026-10-04 - zie moduledocstring.
+    EEN live Firestore-query voor de volledige sessie (5 min gecached),
+    i.p.v. een aparte live .stream()-aanroep PER ontmoeting - dat was de
+    bevestigde oorzaak van de 11s "eigen tijd" zonder zichtbare sub-stappen
+    in gather_raw_match_data()."""
+    try:
+        docs = fb.db.collection(SNAPSHOT_COLLECTION).limit(500).stream()
+        return [doc.to_dict() or {} for doc in docs]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _find_snapshot_for(date_text, opp_user_ids: set) -> Optional[dict]:
     """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: zoekt een momentopname
     (lineup_plan_screen.py) die bij deze datum en minstens 1 van deze
-    tegenstander-id's hoort. Faalt altijd stil (None)."""
+    tegenstander-id's hoort. Faalt altijd stil (None).
+    PADEL_ANALYSIS_RETRO_SNAPSHOT_CACHE_2026-10-04: leest nu uit de
+    gecachete, EENMALIG opgehaalde volledige lijst - zie moduledocstring.
+    Signatuur en gedrag naar alle aanroepers blijven ongewijzigd."""
     iso = to_iso_date(date_text)
     if not iso:
         return None
-    try:
-        docs = fb.db.collection(SNAPSHOT_COLLECTION).limit(500).stream()
-    except Exception:  # noqa: BLE001
-        return None
-    for doc in docs:
-        data = doc.to_dict() or {}
+    for data in _load_all_snapshots():
         if to_iso_date(data.get("match_date")) != iso:
             continue
         opp_players = data.get("opponent_players") or {}
@@ -497,8 +510,7 @@ def _find_snapshot_for(date_text, opp_user_ids: set) -> Optional[dict]:
 def _collect_relevant_player_ids(index: dict) -> set:
     """PADEL_ANALYSIS_RETRO_PERF_2026-10-04: alle speler-id's (eigen +
     tegenstander) die ooit voorkomen in de meegegeven encounter-index -
-    gebruikt om hun padelstat-historiek in EEN batch voor te laden (i.p.v.
-    per bord/per match apart, zie moduledocstring)."""
+    gebruikt om hun padelstat-historiek in EEN batch voor te laden."""
     ids = set()
     for entries in index.values():
         for pid, m in entries:
@@ -514,9 +526,8 @@ def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
     Haalt alle padelstat-ratings voor `player_ids` PARALLEL op, zodat de
     gewone (sequentiele) for-lus in _load_padelstat_histories() erna uit een
     warme cache leest i.p.v. elke keer een synchrone Firestore-read te doen.
-    Faalt dit (om het even welke reden), dan doet de for-lus erna het
-    gewoon zelf, sequentieel - functioneel identiek resultaat, enkel
-    trager. Deze functie mag dus NOOIT een uitzondering laten ontsnappen."""
+    Faalt dit, dan doet de for-lus erna het gewoon zelf, sequentieel - nooit
+    een uitzondering laten ontsnappen."""
     if not player_ids:
         return
     prefetch = getattr(fb, "_fs_prefetch", None)
@@ -526,9 +537,6 @@ def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
             return
         except Exception:  # noqa: BLE001
             pass
-    # Terugval: geen gedeelde prefetch-infrastructuur beschikbaar - lokale
-    # parallelle reads, zonder de gedeelde cache te vullen (elke aanroeper
-    # betaalt dan zelf 1x, maar WEL parallel i.p.v. 1-voor-1).
     try:
         from concurrent.futures import ThreadPoolExecutor
 
@@ -548,16 +556,11 @@ def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
 def _load_padelstat_histories(player_ids: tuple) -> Dict[str, dict]:
     """PADEL_ANALYSIS_RETRO_PERF_2026-10-04 - zie moduledocstring: EEN
     fb.get_padelstat_rating()-aanroep per UNIEKE speler, 5 minuten gecached.
-    Faalt een individuele speler, dan krijgt die gewoon een lege cache-entry
-    (nooit de hele batch laten crashen).
     PADEL_ANALYSIS_RETRO_FLAT_RATING_FALLBACK_2026-10-04: geeft nu per
     speler een dict {"history": [...], "flat_rating", "flat_fetched_at"}
-    terug i.p.v. enkel de "history"-lijst - zie moduledocstring voor
-    waarom het vlakke "rating"-veld (spelers nog niet ge-migreerd naar
-    de historiek) anders stil verloren ging.
+    terug i.p.v. enkel de "history"-lijst.
     PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: haalt eerst ALLES
-    parallel voor (_parallel_prefetch_padelstat) - zie moduledocstring voor
-    de bevestigde root cause (99 sequentiele reads, ~17s) en de fix."""
+    parallel voor (_parallel_prefetch_padelstat)."""
     _parallel_prefetch_padelstat(player_ids)
     out: Dict[str, dict] = {}
     for pid in player_ids:
@@ -576,7 +579,7 @@ def _load_padelstat_histories(player_ids: tuple) -> Dict[str, dict]:
 def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
     """PADEL_ANALYSIS_RETRO_PERF_2026-10-04: PURE (geen I/O) kopie van
     firebase_service.get_padelstat_rating_at()'s logica, werkend op een AL
-    ingeladen historiek-lijst - zie moduledocstring."""
+    ingeladen historiek-lijst."""
     beste = None
     for regel in history:
         t = str(regel.get("fetched_at") or "")
@@ -588,9 +591,7 @@ def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
 def _latest_rating_from_history(history: list) -> Optional[float]:
     """PADEL_ANALYSIS_RETRO_PADELSTAT_PRIORITY_2026-10-04 - zie
     moduledocstring. De MEEST RECENTE padelstat-waarde in een historiek-
-    lijst, ongeacht een datum-cutoff - gebruikt als terugval zodra er geen
-    historiek-regel exact op/voor de matchdatum bestaat, maar er WEL ooit
-    een padelstat-waarde gekend was (bv. pas sinds recent bijgehouden)."""
+    lijst, ongeacht een datum-cutoff."""
     if not history:
         return None
     beste = max(history, key=lambda r: str(r.get("fetched_at") or ""))
@@ -604,14 +605,11 @@ def _padelstat_priority_rating(
     """PADEL_ANALYSIS_RETRO_FLAT_RATING_FALLBACK_2026-10-04 /
     PADEL_ANALYSIS_RETRO_OPPONENT_PADELSTAT_2026-10-04 - zie moduledocstring.
     GEDEELDE prioriteitsketen, gebruikt door ZOWEL eigen spelers ALS
-    tegenstanders (symmetrisch, net als de hoofdanalyse):
+    tegenstanders:
       1. padelstat-historiek OP DATUM (exact);
       2. meest recente padelstat-HISTORIEK-waarde (any datum - "huidig");
-      3. het vlakke, niet-gehistoriseerde "rating"-veld (speler nog niet
-         ge-migreerd naar de historiek-structuur);
-      4. `fallback_value`/`fallback_label` - voor eigen spelers het huidige
-         officiele klassement, voor tegenstanders het officiele klassement
-         van het uitslagenblad van toen.
+      3. het vlakke, niet-gehistoriseerde "rating"-veld;
+      4. `fallback_value`/`fallback_label`.
     Geeft (waarde, bron) terug; waarde is None als ECHT niets gekend is."""
     cache_entry = ratings_cache.get(str(pid)) or {}
     history = cache_entry.get("history") or []
@@ -635,10 +633,7 @@ def _padelstat_priority_rating(
 def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
                   ratings_cache: Dict[str, dict]):
     """Effectieve rating van EEN eigen speler op `date_text` - zie
-    moduledocstring voor de volgorde van bronnen. Geeft (waarde, bron) terug;
-    waarde is None als er niets gekend is. GEEN Firestore-aanroep meer (zie
-    PADEL_ANALYSIS_RETRO_PERF_2026-10-04) - `ratings_cache` is al voor de
-    hele sessie opgehaald."""
+    moduledocstring voor de volgorde van bronnen."""
     pid = str(player_id)
     if snapshot_own and pid in snapshot_own:
         v = snapshot_own[pid]
@@ -655,11 +650,9 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
 
 def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
                        ratings_cache: Dict[str, dict]):
-    """Effectieve rating van EEN tegenstander-speler op `date_text`. GEEN
-    Firestore-aanroep meer - zie _own_value_at().
+    """Effectieve rating van EEN tegenstander-speler op `date_text`.
     PADEL_ANALYSIS_RETRO_OPPONENT_PADELSTAT_2026-10-04: gebruikt nu DEZELFDE
-    gedeelde _padelstat_priority_rating() als eigen spelers - zie
-    moduledocstring."""
+    gedeelde _padelstat_priority_rating() als eigen spelers."""
     uid = str(user_id) if user_id else None
     if snapshot_opp and uid and uid in snapshot_opp:
         v = snapshot_opp[uid]
@@ -710,9 +703,7 @@ def predict_encounter(
     boards: list, current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, use_snapshot: bool = True,
 ) -> dict:
-    """Voorspelt alle borden van 1 ontmoeting. Zoekt (indien gevraagd) 1x een
-    momentopname voor de hele ontmoeting (alle borden delen dezelfde datum/
-    tegenstander)."""
+    """Voorspelt alle borden van 1 ontmoeting."""
     snapshot = None
     if use_snapshot and boards:
         opp_ids = {b.get("opp1_user_id") for b in boards} | {b.get("opp2_user_id") for b in boards}
@@ -725,10 +716,7 @@ def predict_encounter(
 def _combine_boards_to_point_probs(win_probs: list) -> dict:
     """PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 - zie moduledocstring.
     PURE, lokale kopie van dezelfde combinatorische logica als lineup_
-    rotation._match_outcome_point_probabilities()/lineup_plan_screen._points() -
-    bewust hier opnieuw geschreven i.p.v. geïmporteerd (zie bovenaan dit
-    bestand: geen afhankelijkheden op andere lineup_*-modules). `win_probs`
-    mag None bevatten (onbekende winkans) - die telt als 50/50."""
+    rotation._match_outcome_point_probabilities()/lineup_plan_screen._points()."""
     probs = [(0.5 if p is None else max(0.0, min(1.0, float(p)))) for p in win_probs]
     n = len(probs)
     if n == 0:
@@ -749,9 +737,8 @@ def _combine_boards_to_point_probs(win_probs: list) -> dict:
 
 def _actual_encounter_result(boards: list) -> Optional[dict]:
     """PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04: telt de echte
-    uitslag van een VOLLEDIGE ontmoeting (alle boards). Geeft None terug als
-    niet ELK bord een gekende "won"-waarde heeft - toon dan liever niets dan
-    een onvolledig/misleidend cijfer."""
+    uitslag van een VOLLEDIGE ontmoeting. Geeft None terug als niet ELK
+    bord een gekende "won"-waarde heeft."""
     if not boards:
         return None
     gewonnen = [b.get("won") for b in boards]
@@ -772,9 +759,10 @@ def _actual_encounter_result(boards: list) -> Optional[dict]:
 def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cache: Dict[str, dict]) -> list:
     """PADEL_ANALYSIS_RETRO_PERF_2026-10-04 - zie moduledocstring. Verzamelt
     voor ELK bord van ELKE ontmoeting in `index` de SCHAAL-ONAFHANKELIJKE
-    ruwe data (our_avg/their_avg/actual_won) - dit is de enige stap die nog
-    (gecachete) opzoekingen doet; de eigenlijke winkans voor een willekeurige
-    factor is daarna een zuivere berekening via score_raw_at_scale()."""
+    ruwe data - dit is de enige stap die nog (gecachete) opzoekingen doet;
+    PADEL_ANALYSIS_RETRO_SNAPSHOT_CACHE_2026-10-04: _find_snapshot_for()
+    hierbinnen leest nu uit een 5 min gecachete lijst i.p.v. een live query
+    per ontmoeting - zie moduledocstring voor de bevestigde root cause."""
     raw = []
     for entries in index.values():
         boards = reconstruct_boards_with_rankings(entries)
@@ -818,8 +806,7 @@ def score_raw_at_scale(raw_rows: list, scale: float) -> list:
 # --------------------------------------------------------------- kalibratie
 def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
     """Brier-score, log loss, accuraatheid en per-kansklasse voorspeld vs.
-    werkelijk - exact dezelfde methodologie als de eerdere, handmatige
-    validatie die tot scale=207 leidde (zie lineup_lab.py)."""
+    werkelijk."""
     bin_edges = bin_edges or _CALIBRATION_BIN_EDGES
     usable = [p for p in predictions if p.get("win_probability") is not None and p.get("actual_won") is not None]
     n = len(usable)
@@ -852,14 +839,9 @@ def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
 
 def find_best_scale(raw_rows: list, scale_range=None) -> dict:
     """PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
-    Berekent de Brier-score voor elke kandidaat-factor in `scale_range`,
-    PUUR in-memory (geen Firestore) - geeft {"best": {"scale", "brier",
-    "at_upper_edge"}, "curve": [{"scale", "brier", "n"}, ...]} terug. "best"
-    is None als er nergens genoeg data is om een Brier-score te berekenen.
     PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04: "at_upper_edge" is
     True zodra het gevonden optimum exact op de bovengrens van het
-    doorzochte bereik ligt - dan is het GEEN bevestigd optimum, enkel het
-    beste binnen de grenzen die tot nu toe bekeken zijn."""
+    doorzochte bereik ligt."""
     scale_range = scale_range or _SCALE_SEARCH_RANGE
     curve = []
     best = None
@@ -882,18 +864,46 @@ def logistic_curve(scale: float, diffs=None) -> list:
     return [(d, ll.estimate_win_probability(0.0, -float(d), scale=scale)) for d in diffs]
 
 
+# --------------------------------------------------------------- winkansfactor opslaan
+def _load_saved_scale() -> Optional[float]:
+    """PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04 - zie moduledocstring.
+    Leest de laatst opgeslagen winkansfactor uit Firestore. Faalt stil
+    (None) - dan blijft het bestaande, sessie-only gedrag gewoon werken."""
+    try:
+        doc = fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_CALIBRATION_SETTINGS_DOC).get()
+        data = doc.to_dict() if doc is not None and getattr(doc, "exists", True) else None
+        if data and data.get("win_probability_scale") is not None:
+            return float(data["win_probability_scale"])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _save_scale_to_firestore(scale: float) -> None:
+    """PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04 - zie moduledocstring.
+    Faalt altijd stil - een mislukte opslag mag de rest van de pagina nooit
+    breken, enkel het "onthouden tussen sessies"-gemak gaat dan verloren."""
+    try:
+        fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_CALIBRATION_SETTINGS_DOC).set(
+            {
+                "win_probability_scale": float(scale),
+                "saved_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # --------------------------------------------------------------- beste alternatief
 def best_alternative_for_encounter(
     boards: list, docs: Dict[str, dict], current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, top_n: int = 3,
 ) -> Optional[dict]:
     """Zoekt, MET de waarden van toen en ZONDER deze ontmoeting zelf in de
-    synergie te laten meetellen (exclude_match_keys - geen lekkage van de
-    uitkomst in de eigen voorspelling), de beste alternatieve koppelverdeling
-    voor deze ontmoeting. Geeft altijd een dict terug (nooit None) met een
-    "reason"-veld (None = gelukt; "too_few_players"; "no_valid_combinations")
-    zodat de UI de ECHTE oorzaak kan tonen i.p.v. 1 generieke, soms
-    misleidende melding - zie PADEL_ANALYSIS_RETRO_ALT_REASON_2026-10-04."""
+    synergie te laten meetellen, de beste alternatieve koppelverdeling voor
+    deze ontmoeting. Geeft altijd een dict terug (nooit None) met een
+    "reason"-veld (None = gelukt; "too_few_players"; "no_valid_combinations")."""
     if not boards:
         return {"top": [], "actual": None, "reason": "too_few_players", "n_players": 0}
     players = sorted({str(p) for b in boards for p in b["pair"]})
@@ -979,30 +989,38 @@ def _render_board_row(bp: dict, name_lookup: dict) -> None:
 
 def _apply_best_scale_callback(new_scale: float) -> None:
     """PADEL_ANALYSIS_RETRO_SCALE_WIDGET_FIX_2026-10-04 - zie moduledocstring:
-    MOET via on_click (draait voor de volgende render de slider-widget
-    opnieuw instantieert), niet rechtstreeks na een if-st.button()-blok."""
+    MOET via on_click.
+    PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04: bewaart de bevestigde
+    factor nu ook blijvend in Firestore."""
     st.session_state["retro_scale"] = new_scale
     st.session_state.pop("retro_best_scale_result", None)
+    _save_scale_to_firestore(new_scale)
+
+
+def _persist_scale_callback() -> None:
+    """PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04: bewaart de waarde van
+    de schuifregelaar zelf, telkens die manueel versleept wordt."""
+    _save_scale_to_firestore(st.session_state.get("retro_scale", _DEFAULT_SCALE))
 
 
 def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     """PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03 - zie moduledocstring. Enkel
     deze functie heeft Streamlit nodig; de rest van dit bestand is daar
-    volledig los van (ook los testbaar).
-    PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: toont nu standaard ook de
-    matchen van gedetecteerde teamgenoten (aanpasbaar via multiselect) -
-    zie moduledocstring voor waarom dit de "Beste alternatief altijd
-    leeg"-klacht oplost en meer kalibratiedata oplevert.
-    PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: perf.step()-meetpunten
-    toegevoegd rond elke potentieel zware stap - zie moduledocstring."""
+    volledig los van (ook los testbaar)."""
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
     sel_player_id = str(sel_player_id)
     name_lookup = {str(p.get("player_id")): (p.get("display_name") or str(p.get("player_id"))) for p in profiles}
     sel_naam = name_lookup.get(sel_player_id, sel_player_id)
 
-    # PADEL_ANALYSIS_RETRO_TEAMMATES_2026-10-04: eerst een goedkope lookup van
-    # ENKEL sel_player_id om teamgenoten te detecteren (voorstel voor de
-    # multiselect hieronder) - zie moduledocstring.
+    # PADEL_ANALYSIS_RETRO_SCALE_PERSIST_2026-10-04: EENMALIG per sessie, bij
+    # de EERSTE render - een lopende sessie mag een actieve keuze nooit
+    # overschrijven.
+    if "retro_scale" not in st.session_state:
+        with perf.step("retro: opgeslagen winkansfactor lezen"):
+            saved_scale = _load_saved_scale()
+        if saved_scale is not None:
+            st.session_state["retro_scale"] = saved_scale
+
     with perf.step("retro: eigen matchen ophalen (teamgenoten detecteren)"):
         with st.spinner(f"Matchen van {sel_naam} ophalen..."):
             sel_docs = ll.get_docs_for_players([sel_player_id])
@@ -1045,31 +1063,30 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.info(f"Nog geen gespeelde interclub-ontmoetingen gevonden voor {sel_naam}.")
         return
 
-    # Klassement-terugval ook voor alle gekozen spelers EN hun partners (niet enkel
-    # sel_player_id zelf) - anders toont "Op basis van welke waarden?" onnodig "onbekend".
+    # Klassement-terugval ook voor alle gekozen spelers EN hun partners.
     own_side_ids = set(gekozen_ids)
     for entries in index.values():
         for _pid, m in entries:
             if m.get("partner_user_id"):
                 own_side_ids.add(str(m["partner_user_id"]))
     current_official_ranks = {}
-    with perf.step("retro: officieel klassement terugval ophalen"):
+    with perf.step(f"retro: officieel klassement terugval ophalen ({len(own_side_ids)} spelers)"):
         try:
-            from lineup_scout import _build_own_official_ranks_strict
+            from lineup_scout import _build_own_official_ranks_strict, prefetch_own_player_reads
+            # PADEL_ANALYSIS_RETRO_OWN_RANK_PREFETCH_2026-10-04 - zie
+            # moduledocstring: parallel voorophalen VOOR de sequentiele lus
+            # in _build_own_official_ranks_strict() erna draait.
+            with perf.step("retro: klassement - parallel voorophalen"):
+                prefetch_own_player_reads(sorted(own_side_ids))
             current_official_ranks = _build_own_official_ranks_strict(sorted(own_side_ids)) or {}
         except Exception:  # noqa: BLE001
             pass
 
-    # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler,
-    # 5 minuten gecached - geen Firestore-reads meer per bord/match hierna.
-    # PADEL_ANALYSIS_RETRO_PARALLEL_LOAD_2026-10-04: die batch-read gebeurt nu
-    # zelf ook parallel (zie _load_padelstat_histories) i.p.v. sequentieel.
+    # PADEL_ANALYSIS_RETRO_PERF_2026-10-04: EEN batch-read per unieke speler.
     player_ids = tuple(sorted(_collect_relevant_player_ids(index)))
     with perf.step(f"retro: padelstat-historiek laden ({len(player_ids)} spelers)"):
         ratings_cache = _load_padelstat_histories(player_ids)
 
-    # Schaal-ONAFHANKELIJKE ruwe data - 1x verzameld per sessie (hergebruikt bij
-    # schuifregelaar-bewegingen en de "beste factor zoeken"-knop hieronder).
     raw_sig = (tuple(sorted(gekozen_ids)), player_ids)
     raw_key = f"retro_raw_{sel_player_id}"
     if st.session_state.get(raw_key + "_sig") != raw_sig:
@@ -1094,14 +1111,9 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     for bp in pred["boards"]:
         _render_board_row(bp, name_lookup)
 
-    # PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04 - zie moduledocstring.
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
     n_known_boards = len(boards)
-    # PADEL_ANALYSIS_RETRO_ENCOUNTER_OUTCOME_2026-10-04: GEEN vast minimum (najaar heeft 4 borden,
-    # voorjaar 6) - dat zou bij het andere formaat altijd ten onrechte "te weinig" tonen. Matchen
-    # gebeuren wel altijd per 2 tegelijk (1 rotatie), dus een ONEVEN aantal is wel een hard signaal
-    # van onvolledigheid.
     if n_known_boards < 2 or n_known_boards % 2 != 0:
         st.caption(
             f"We kennen {n_known_boards} van de borden van deze ontmoeting - te weinig (of een oneven "
@@ -1171,16 +1183,19 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         f"interclub-matchen van de hierboven gekozen spelers die we kennen (niet enkel de bovenstaande "
         "ontmoeting). De Brier-score (lager is beter, 0 = perfect, 0.25 = niet beter dan een muntstuk) en de "
         "kans-klassen hieronder herberekenen INSTANT bij een andere factor - er gebeurt hierna geen enkele "
-        "nieuwe Firestore-opvraging meer."
+        "nieuwe Firestore-opvraging meer. De gekozen factor wordt bewaard en staat de volgende keer "
+        "automatisch weer ingevuld."
     )
     c_slider, c_curve = st.columns([2, 1])
     with c_slider:
         scale = st.slider(
             "Winkansfactor (hoe gevoelig de winkans reageert op het ratingverschil)",
             min_value=50, max_value=800, value=int(scale), step=5, key="retro_scale",
+            on_change=_persist_scale_callback,
             help=f"Huidige app-standaard: {_DEFAULT_SCALE:.0f}. Een KLEINERE factor maakt elk ratingverschil "
                  "impactvoller (steilere curve); een GROTERE factor maakt de winkans voorzichtiger "
-                 "(vlakkere curve). Dit wijzigt ENKEL de berekening hieronder, niet de rest van de app.",
+                 "(vlakkere curve). Dit wijzigt ENKEL de berekening hieronder, niet de rest van de app. "
+                 "De keuze wordt bewaard voor de volgende keer.",
         )
     with c_curve:
         st.caption(f"Bij 100 punten verschil: {_pct(ll.estimate_win_probability(0, -100, scale=scale))} winkans.")
@@ -1220,7 +1235,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "factor die scherper of voorzichtiger zou moeten staan."
         )
 
-    # PADEL_ANALYSIS_RETRO_AUTOSCALE_2026-10-04 - zie moduledocstring.
     st.divider()
     st.markdown("##### Beste winkansfactor automatisch zoeken")
     st.caption(
@@ -1243,16 +1257,10 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
                 f"Voorstel: **{best['scale']}** (Brier **{best['brier']:.3f}**) in plaats van de huidige "
                 f"**{int(scale)}** (Brier **{stats['brier']:.3f}**) - dat betekent een {richting} inschatting."
             )
-            # PADEL_ANALYSIS_RETRO_SCALE_WIDGET_FIX_2026-10-04 - zie moduledocstring:
-            # via on_click i.p.v. een if-st.button()-blok dat session_state["retro_scale"]
-            # rechtstreeks zou zetten NA het al geïnstantieerde slider-widget hierboven.
             st.button(
                 f"Toepassen: zet factor op {best['scale']}", key="retro_apply_best_scale",
                 on_click=_apply_best_scale_callback, args=(best["scale"],),
             )
-        # PADEL_ANALYSIS_RETRO_WIDER_SCALE_SEARCH_2026-10-04 - zie moduledocstring:
-        # een optimum exact op de rand van het doorzochte bereik is GEEN bevestigd
-        # optimum - waarschuw expliciet i.p.v. het als eindresultaat te presenteren.
         if best.get("at_upper_edge"):
             st.warning(
                 f"Dit is de BOVENGRENS van het doorzochte bereik (tot {max(_SCALE_SEARCH_RANGE)}) - de "
