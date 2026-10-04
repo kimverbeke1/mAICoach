@@ -1,7 +1,6 @@
 """
 lineup_scenario_matrix.py - "Wat als de tegenstander ...?": een kleine
 scenario-matrix i.p.v. honderden matchups of 1 uitgevlakt gemiddelde.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 (op verzoek van Kim: "gewoon
 overal hetzelfde gemiddelde zien is ook niet zinvol. Dus specifieke cases
@@ -13,7 +12,6 @@ KOLOMMEN = benoemde tegenstander-opstellingen (volledige ontmoeting):
   "Sterkste duo op R1M1", "Sterkste duo in rotatie 2", "Zonder <beste speler>".
 RIJEN = eigen strategieen: Aanvallend / Veilig / Robuust / Counter op Sx.
 CELLEN = exacte kans tegen precies die ene opstelling.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_V2_2026-10-03 (feedback Kim: "kan je wat
 duiding geven over hoe je tot die kansen gekomen bent", "waarom is S4 0%",
@@ -37,7 +35,6 @@ combinaties maken", "minstens 1 punt")
    opstellingen ("Statistisch #1..3"), zodat er ook bij weinig gespeelde
    ontmoetingen meer dan 1 niet-gespeeld scenario is.
 4. "Kans op minstens 1 punt" is nu de standaardweergave.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03 (feedback Kim: "graag sorteren met
 grootste gewicht bovenaan en dat wordt dan S1", "'kolom' vervangen door
@@ -54,7 +51,6 @@ leesbaarder", en de verwarring 52% (matrix) vs 24% (rotatieplanner))
    hetzelfde, met hetzelfde gewicht. Het verschil 52% vs 24% kwam doordat
    de planner per ROTATIE een eigen kans berekende (andere noemer) - dat
    valt weg.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_V4_2026-10-03 (feedback Kim: "eerst radio button
 met kans op winst tonen en dan gelijk en dan verlies")
@@ -62,7 +58,6 @@ met kans op winst tonen en dan gelijk en dan verlies")
 Radiovolgorde Winst -> Gelijk -> Verlies -> Minstens 1 punt. Beste cel per
 kolom in het vet. "Counter op Sx" enkel tonen als die specifieke opstelling
 >= 1 procentpunt beter doet dan de algemene strategieen op dat scenario.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_V5_2026-10-04 (op verzoek van Kim: "bij de
 analyse zijn een aantal zaken die een beetje overlappen [...] de
@@ -82,7 +77,6 @@ de bouwstenen pick_strategies()/compute_matrix()/build_own_options() blijven
 in dit bestand staan (geen functionaliteit verwijderd, enkel niet langer
 vanuit render_scenario_matrix() aangeroepen) mocht een latere, aparte
 "geavanceerd"-weergave ze nog nodig hebben.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 (op verzoek van Kim: "eigenlijk
 komt het er dan op neer dat we meteen de scenario analyse in die
@@ -100,7 +94,6 @@ lineup_plan_screen.py kan deze nu rechtstreeks tonen onder de S-knoppen,
 zonder het model zelf opnieuw te moeten aanroepen. Deze sectie zelf (de
 scenario-analyse) blijft ONGEWIJZIGD bestaan - Kim wil ze voorlopig nog
 niet weglaten.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SCENARIO_MATRIX_V6_2026-10-04 (op verzoek van Kim: "dan mag
 dat stukje van de scenario analyse in het begin gewoon weg", in dezelfde
@@ -119,20 +112,48 @@ zet; de Rotatieplanner hergebruikt die lijst enkel, zonder zelf opnieuw te
 rekenen. Verwijder je deze sectie ooit volledig, dan moet die berekening
 ergens anders komen te staan, anders heeft de Rotatieplanner geen
 scenario's meer om te tonen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCENARIO_REASONS_PER_ROTATION_2026-10-04 (op verzoek van Kim,
+bevestigd probleem: bij meerdere scenario-kaarten (S1-S8) stond onder
+verschillend-gelabelde kaarten dezelfde of een sterk gelijkende "waarom"-
+tekst, in een andere volgorde - leek een koppelingsfout tussen kaart en
+uitleg)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen, geen gok): _reasons() voegde
+de redenen van ALLE rotaties samen in 1 platte lijst (max. 2 per rotatie),
+ontdubbelde die en toonde de top 3 - ZONDER te vermelden welke rotatie welke
+reden opleverde. Scoort het model sterk op 1 dominant signaal in rotatie 1
+(bv. "Speler X speelt meestal Match 2 (6/6)" - een bijna-zekere waarneming),
+dan rangschikken meerdere top-scenario's (die toevallig DEZELFDE rotatie-1-
+opstelling delen, maar enkel verschillen in rotatie 2) hoog, en voor elk van
+die scenario's komen exact dezelfde rotatie-1-redenen bovenaan in de top-3 -
+in een iets andere volgorde door dict.fromkeys()/sortering op aantal
+waarnemingen. De onderliggende tegenstander-opstelling verschilt dus WEL
+degelijk (andere rotatie 2), maar dat was niet zichtbaar in de getoonde
+tekst zodra rotatie 2 nog te weinig waarnemingen had voor een eigen reden
+(_MIN_REASON_COUNT = 2 in opponent_lineup_model.py).
+FIX: _reasons() labelt de redenen nu PER ROTATIE apart ("R1: ...", "R2: ...")
+in plaats van ze samen te voegen tot 1 ongelabelde lijst. Heeft een rotatie
+geen enkele reden die de drempel haalt, dan staat er expliciet "R2: (nog
+geen duidelijk patroon)" in plaats van die rotatie stilzwijgend weg te
+laten - zo is meteen zichtbaar of 2 scenario's echt hetzelfde rotatie-1-
+scenario delen (identieke "R1: ..."-tekst) of niet, en of het verschil
+tussen 2 kaarten in rotatie 2 zit maar daar nog geen uitgesproken patroon
+is. Bij een ontmoeting met maar 1 rotatie (geen ROTATIONS_PER_ENCOUNTER > 1)
+vervalt de "R1:"-prefix (overbodig bij een enkele rotatie). Enkel de
+WEERGAVE verandert - de onderliggende modelberekening/olm.explain_rotation()
+blijft ONGEWIJZIGD.
 """
 import streamlit as st
-
 from dashboard_common import ll, _parse_match_date
 from lineup_rotation import (
     _enumerate_rotation_aware_pairings, _enumerate_own_variant_combinations,
     _compute_matchup, _opponent_lineup_weight, MATCHES_PER_ROTATION,
 )
-
 try:
     import opponent_lineup_model as olm
 except Exception:  # noqa: BLE001  pragma: no cover
     olm = None
-
 _MAX_SCENARIOS = 9
 _N_STATISTICAL = 3
 _SACRIFICE_WP = 0.30
@@ -143,8 +164,6 @@ _METRICS = {
     "Kans op minstens 1 punt": "p_ge1",
 }
 _COUNTER_MIN_GAIN = 0.01  # counter enkel tonen als die op zijn scenario >= 1 procentpunt beter doet
-
-
 # ---------------------------------------------------------------- helpers
 def _player_strength(p: dict, opponent_ratings: dict):
     uid = p.get("user_id")
@@ -153,62 +172,67 @@ def _player_strength(p: dict, opponent_ratings: dict):
     return ll.effective_simulation_rating(
         uid, opponent_ratings or {}, {uid: ll.parse_ranking(p.get("ranking"))},
     )
-
-
 def _pair_strength(board: dict, opponent_ratings: dict):
     vals = [_player_strength(p, opponent_ratings) for p in (board.get("opponent_pair") or [])]
     vals = [v for v in vals if v is not None]
     return sum(vals) / len(vals) if vals else None
-
-
 def _board_uids(board: dict) -> frozenset:
     return frozenset(str(p.get("user_id")) for p in (board.get("opponent_pair") or []) if p.get("user_id"))
-
-
 def _lineup_text_opp(boards: list) -> str:
     delen = []
     for idx, b in enumerate(boards):
         namen = "/".join(p.get("name", "?") for p in (b.get("opponent_pair") or []))
         delen.append(f"R{idx // MATCHES_PER_ROTATION + 1}M{idx % MATCHES_PER_ROTATION + 1} {namen}")
     return " \u00b7 ".join(delen)
-
-
 def _lineup_text_own(pairs: list, name_lookup: dict) -> str:
     delen = []
     for idx, pair in enumerate(pairs):
         namen = "/".join(name_lookup.get(u, u) for u in sorted(pair))
         delen.append(f"R{idx // MATCHES_PER_ROTATION + 1}M{idx % MATCHES_PER_ROTATION + 1} {namen}")
     return " \u00b7 ".join(delen)
-
-
 def _date_key(label: str):
     try:
         d = _parse_match_date(label)
     except Exception:  # noqa: BLE001
         d = None
     return d or (0, 0, 0)
-
-
 def _pct_txt(p: float) -> str:
     if p is None:
         return "-"
     if p < 0.005:
         return "<1%"
     return f"{p * 100:.0f}%"
-
-
+# PADEL_ANALYSIS_SCENARIO_REASONS_PER_ROTATION_2026-10-04 - zie moduledocstring
+# voor de volledige, bevestigde root-cause-analyse van "identieke waarom-
+# tekst onder verschillende scenario-kaarten".
 def _reasons(model_stats, key) -> str:
+    """Geeft de 'waarom'-tekst voor 1 scenario terug, nu PER ROTATIE
+    gelabeld (bv. 'R1: X speelt meestal Match 2 (6/6) · R2: Y & Z speelden
+    al 2x samen') i.p.v. alle rotaties samen te voegen tot 1 ongelabelde
+    lijst. Zo is meteen zichtbaar of 2 scenario's hetzelfde rotatie-1-
+    scenario delen (identieke 'R1: ...'-tekst) en enkel in rotatie 2
+    verschillen - voorheen kon dat verschil volledig onzichtbaar blijven
+    als rotatie 2 nog te weinig waarnemingen had voor een eigen reden."""
     if olm is None or not model_stats:
         return ""
-    redenen = []
-    for r in range(0, len(key) - 1, MATCHES_PER_ROTATION):
+    n_boards = len(key)
+    n_rot = max(1, n_boards // MATCHES_PER_ROTATION)
+    delen = []
+    for rot_idx, r in enumerate(range(0, n_boards - 1, MATCHES_PER_ROTATION), start=1):
         try:
-            redenen += olm.explain_rotation(model_stats, key[r], key[r + 1], max_reasons=2)
+            redenen_rot = olm.explain_rotation(model_stats, key[r], key[r + 1], max_reasons=2)
         except Exception:  # noqa: BLE001
-            pass
-    return " \u00b7 ".join(list(dict.fromkeys(redenen))[:3])
-
-
+            redenen_rot = []
+        redenen_rot = list(dict.fromkeys(redenen_rot))
+        prefix = f"R{rot_idx}: " if n_rot > 1 else ""
+        if redenen_rot:
+            delen.append(prefix + ", ".join(redenen_rot))
+        elif n_rot > 1:
+            # PADEL_ANALYSIS_SCENARIO_REASONS_PER_ROTATION_2026-10-04: expliciet
+            # tonen i.p.v. stilzwijgend weglaten - net dit maakte eerder 2
+            # verschillende scenario's onterecht identiek lijken.
+            delen.append(f"{prefix}(nog geen duidelijk patroon)")
+    return " \u00b7 ".join(delen)
 # ----------------------------------------------------- tegenstander-scenario's
 def build_opponent_scenarios(
     unique_opponent_lineups: dict, model_weights: dict, opponent_ratings: dict, total_boards: int,
@@ -221,14 +245,11 @@ def build_opponent_scenarios(
     }
     if not items:
         return []
-
     def _w(k):
         if model_weights:
             return model_weights.get(k, 0.0)
         return _opponent_lineup_weight(items[k])
-
     gekozen: dict = {}
-
     def _voeg_toe(key, label):
         if key is None:
             return
@@ -239,16 +260,13 @@ def build_opponent_scenarios(
         if len(gekozen) >= _MAX_SCENARIOS:
             return
         gekozen[key] = {"key": key, "boards": items[key]["boards"], "labels": [label]}
-
     def _beste(pred):
         kandidaten = [k for k in items if pred(k)]
         return max(kandidaten, key=_w) if kandidaten else None
-
     hist = [k for k, v in items.items() if v.get("is_historical")]
     hist.sort(key=lambda k: max(_date_key(l) for l in items[k]["historical_labels"]), reverse=True)
     for k in hist:
         _voeg_toe(k, "Zoals op " + ", ".join(items[k]["historical_labels"]))
-
     if model_weights:
         _voeg_toe(max(items, key=_w), "Meest waarschijnlijk (model)")
         niet_gespeeld = sorted(
@@ -257,7 +275,6 @@ def build_opponent_scenarios(
         )
         for i, k in enumerate(niet_gespeeld[:_N_STATISTICAL], start=1):
             _voeg_toe(k, f"Statistisch #{i}")
-
     paren, spelers = {}, {}
     for v in items.values():
         for b in v["boards"]:
@@ -268,7 +285,6 @@ def build_opponent_scenarios(
                 ps = _player_strength(p, opponent_ratings)
                 if ps is not None and p.get("user_id"):
                     spelers[str(p["user_id"])] = (ps, p.get("name", "?"))
-
     if paren:
         sterkste_duo = max(paren, key=paren.get)
         _voeg_toe(_beste(lambda k: _board_uids(items[k]["boards"][0]) == sterkste_duo),
@@ -284,7 +300,6 @@ def build_opponent_scenarios(
             _beste(lambda k: all(top_uid not in _board_uids(b) for b in items[k]["boards"])),
             f"Zonder {spelers[top_uid][1]}",
         )
-
     out = list(gekozen.values())
     tot = sum(_w(s["key"]) for s in out) or 1.0
     for s in out:
@@ -293,8 +308,6 @@ def build_opponent_scenarios(
     # PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: grootste gewicht = S1.
     out.sort(key=lambda s: s["weight"], reverse=True)
     return out
-
-
 def _rotation_text_opp(boards: list, rot_idx: int) -> str:
     """PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: 'M1 A / B · M2 C / D' voor 1 rotatie."""
     stuk = boards[rot_idx * MATCHES_PER_ROTATION:(rot_idx + 1) * MATCHES_PER_ROTATION]
@@ -302,8 +315,6 @@ def _rotation_text_opp(boards: list, rot_idx: int) -> str:
         f"M{m + 1} " + " / ".join(p.get("name", "?") for p in (b.get("opponent_pair") or []))
         for m, b in enumerate(stuk)
     )
-
-
 # ------------------------------------------------------------ eigen opties
 def build_own_options(available_ids, max_per_player, official_ranks_strict, player_ratings, rules) -> list:
     """PADEL_ANALYSIS_SCENARIO_MATRIX_V5_2026-10-04: niet langer aangeroepen
@@ -325,8 +336,6 @@ def build_own_options(available_ids, max_per_player, official_ranks_strict, play
             gezien.add(key)
             out.append(combo["ordered_pairs"])
     return out
-
-
 # ------------------------------------------------------------ berekening
 def compute_matrix(scenarios, own_options, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings):
     """PADEL_ANALYSIS_SCENARIO_MATRIX_V5_2026-10-04: niet langer aangeroepen
@@ -346,18 +355,14 @@ def compute_matrix(scenarios, own_options, synergy_fn, player_ratings, official_
             })
         cells.append(rij)
     return cells
-
-
 def pick_strategies(scenarios, cells) -> list:
     """PADEL_ANALYSIS_SCENARIO_MATRIX_V5_2026-10-04: niet langer aangeroepen
     vanuit render_scenario_matrix() - zie moduledocstring."""
     if not cells or not scenarios:
         return []
     w = [s["weight"] for s in scenarios]
-
     def gew(o, k):
         return sum(wi * c[k] for wi, c in zip(w, cells[o]))
-
     idx = range(len(cells))
     keuzes = [
         ("Aanvallend (max. kans op winst)", max(idx, key=lambda o: (gew(o, "p2"), gew(o, "p_ge1")))),
@@ -375,8 +380,6 @@ def pick_strategies(scenarios, cells) -> list:
     for label, o in keuzes:
         rijen.setdefault(o, []).append(label)
     return [(" + ".join(labels), o) for o, labels in rijen.items()]
-
-
 # ------------------------------------------------------------ weergave
 def render_scenario_matrix(
     unique_opponent_lineups: dict, model_weights: dict, available_ids: list, max_per_player: dict,
@@ -400,7 +403,6 @@ def render_scenario_matrix(
     if not scenarios:
         st.info("Nog geen tegenstander-opstellingen in dit formaat (met de gekozen spelers) om scenario's mee te bouwen.")
         return
-
     # PADEL_ANALYSIS_SCENARIO_MATRIX_V6_2026-10-04: korte intro i.p.v. de 2
     # lange uitlegblokken van voorheen - de volledige toelichting (wat is
     # Modelkans/Gewicht, wat doe je met deze scenario's) staat nu in de
@@ -409,9 +411,10 @@ def render_scenario_matrix(
         "Deze scenario's zijn de snelkeuzes (S1, S2, ...) in de Rotatieplanner hieronder, waar je meteen "
         "ons beste antwoord en het eindresultaat ziet."
     )
-
     # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: redenen EENMALIG berekend,
     # gedeeld met het planscherm via de sessiestate-lijst (zie moduledocstring).
+    # PADEL_ANALYSIS_SCENARIO_REASONS_PER_ROTATION_2026-10-04: _reasons() labelt
+    # nu per rotatie - zie de functie zelf voor de volledige toelichting.
     redenen_per_scenario = [_reasons(model_stats, s["key"]) for s in scenarios]
     # PADEL_ANALYSIS_SCENARIO_MATRIX_V3_2026-10-03: gedeelde bron voor het planscherm.
     st.session_state[f"scen_matrix_scen_v3_{ploeg_key}"] = [
@@ -419,7 +422,6 @@ def render_scenario_matrix(
          "weight": s["weight"], "model_prob": s.get("model_prob"), "reasons": redenen_per_scenario[i]}
         for i, s in enumerate(scenarios)
     ]
-
     n_rot = max(1, int(total_boards) // MATCHES_PER_ROTATION)
     legenda = []
     for i, s in enumerate(scenarios):
@@ -431,7 +433,6 @@ def render_scenario_matrix(
             rij[f"Rotatie {r + 1}"] = _rotation_text_opp(s["boards"], r)
         legenda.append(rij)
     st.dataframe(legenda, use_container_width=True, hide_index=True)
-
     with st.expander("Waarom deze kansen? (model)", expanded=False):
         for i, s in enumerate(scenarios):
             st.markdown(f"**S{i + 1}** - {' / '.join(s['labels'])}: {redenen_per_scenario[i] or 'geen uitgesproken patroon'}")
