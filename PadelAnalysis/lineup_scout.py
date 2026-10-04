@@ -3,10 +3,8 @@ lineup_scout.py - Volgende match laden, scout-header, eigen-ploeg-
 herkenning, en de gedeelde caching-helpers (padelstat/klassement/officieel-
 klassement/eigen-matchdocumenten) die de rest van de Opstelling-analyse-
 modules hergebruiken.
-
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie page_lineup_lab.py voor het volledige overzicht van alle modules.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27 (op verzoek van
 Kim, meermaals gemeld: "Kies eerst een speler bij 'Toon analyse voor'
@@ -15,7 +13,6 @@ hierboven. Wordt getoond bij de rangschikking. Dat is niet ok.")
 _known_ranking_context() leest UITSLUITEND reeds opgeslagen data en bepaalt
 daaruit reeks_url/fixtures/own_ploeg_id ONAFHANKELIJK van elke knop-klik of
 scout.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SHARED_FETCH_CACHE_2026-09-28 (op verzoek van Kim, na analyse
 i.s.m. opponent_scout.py + opponent_scout_ui.py: "eerste laadactie van de
@@ -39,7 +36,6 @@ opponent_scout.py voor de centrale sleutel-definitie en de volledige
 toelichting). Welke van de 2 aanroepen ook het eerst gebeurt op een
 pagina-render, de tweede aanroep hergebruikt nu de fixtures die de eerste
 al ophaalde i.p.v. ze opnieuw te fetchen.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28 (op verzoek van Kim: "laden van
 opstellingsanalyse pagina zonder al ergens op te drukken duurt lang")
@@ -55,7 +51,6 @@ _render_volgende_match_and_scout() vlak daarvoor al had gedaan:
     interclubmatchen).
 Dat was pure duplicatie - geen bug in de uitkomst, wel dubbele kost op
 exact de render waar Kim op wacht.
-
 FIX (2 delen, beide hieronder):
   1. _known_ranking_context() wordt gememoiseerd per (player_id, label) in
      st.session_state, zodat ze binnen dezelfde sessie hoogstens EEN keer
@@ -66,7 +61,6 @@ FIX (2 delen, beide hieronder):
      scout de waarden NIET al gezet heeft (zie dat bestand) - dus in het
      normale geval waarin de analyse al geladen is, gebeurt dit werk
      helemaal niet meer.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28 (op verzoek van Kim, na
 een MEETSESSIE met perf_timing.py - geen gok meer, maar cijfers)
@@ -76,7 +70,6 @@ GEMETEN (2 opeenvolgende runs, paneel "Laadtijd-analyse"):
   - run 2: totaal 10.93s, waarvan 10.16s (92.9%) in _resolve_own_ploeg_id().
     ALLE andere stappen samen bleven onder 0.6s; osu.render_scout_header()
     kostte slechts 0.002s en was dus onterecht verdacht.
-
 ROOT CAUSE (bevestigd in schedule_scraper.py): _resolve_own_ploeg_id()
 roept ss.identify_own_ploeg_id() aan. Die functie loopt over de kandidaat-
 fixtures en roept per kandidaat _fixture_player_sides() aan, die op zijn
@@ -87,12 +80,10 @@ Dat is een LIVE HTTP-scrape van het uitslagenblad, PER FIXTURE, telkens met
 een VERSE requests.Session(). De loop stopt pas zodra home_score !=
 away_score; bij een gelijke of lege uitkomst gaat hij naar de volgende
 kandidaat en scrapet opnieuw. Vandaar ~10s.
-
 Het resultaat is echter VOLLEDIG DETERMINISTISCH voor een gegeven speler +
 schema: de eigen ploeg-ID verandert niet tussen twee page-loads. Toch werd
 die hele scrape-loop bij ELKE render opnieuw uitgevoerd, want er zat
 nergens een cache omheen.
-
 FIX (bewust ENKEL in deze app-laag, NIET in schedule_scraper.py):
   - _cached_identify_own_ploeg_id() hieronder wikkelt
     ss.identify_own_ploeg_id() in @st.cache_data met een TTL van 24u. De
@@ -104,13 +95,11 @@ FIX (bewust ENKEL in deze app-laag, NIET in schedule_scraper.py):
     alles gelijk, dan kost dit 0s.
   - clear_identify_own_team_cache() wist deze cache. De knop "Ploeg opnieuw
     ophalen" (page_lineup_lab.py) bereikt ze via _clear_rank_caches().
-
 BEWUST NIET AANGEPAST: schedule_scraper.py zelf (de verse Session per
 fixture, en de loop over alle kandidaten). Die module wordt ook door de
 nachtelijke GitHub Actions-prescan gebruikt, waar deze sessie net veel aan
 gerepareerd is - een wijziging daar riskeert die werkende prescan-logica te
 breken voor een winst die deze cache hier al volledig oplevert.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29 (op verzoek van Kim, na
 een MEETSESSIE: na "Reboot app" kostte _resolve_own_ploeg_id() opnieuw
@@ -139,21 +128,53 @@ automatisch ongeldig.
 knop verhoogt een force-token in de sessie; zolang dat token > 0 is, wordt
 de Firestore-laag overgeslagen en het verse resultaat overschrijft het
 opgeslagen resultaat.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OFFICIAL_RANK_PARALLEL_FIX_2026-10-04 (op verzoek van Kim, na
+een MEETSESSIE met test_calibration_step_timing.py - geen gok, cijfers:
+totaal 208.27s, waarvan 127.60s/61% in stap 3 "officieel klassement ophalen
+(2067 unieke spelers)" en 76.05s/37% in stap 4 "padelstat-historiek ophalen
+(2067 unieke spelers)")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen):
+  1. prefetch_own_player_reads() hieronder is een NO-OP gebleken:
+     getattr(fb, "_fs_prefetch", None) geeft None terug, want
+     firebase_service.py bevat geen _fs_prefetch-functie. De early-return
+     ("if not callable(prefetch): return") wordt dus ALTIJD genomen -
+     er gebeurt geen enkele prefetch.
+  2. _build_own_official_ranks_strict() deed daardoor de ENIGE echte
+     ophaling, via een PURE, SEQUENTIELE for-loop: voor elk van de 2067
+     spelers, een voor een, een los BLOKKEREND Firestore-document-read
+     (_cached_official_rank() -> fb.get_official_klassement_via_padelstat()
+     -> fb.get_player_profile() -> 1 .document(pid).get()). Geen batching,
+     geen parallellisatie - vandaar ~2067 sequentiele netwerk-round-trips.
+  Ter vergelijking: stap 4 (_load_padelstat_histories() in
+  lineup_retrospective.py) had voor exact hetzelfde "_fs_prefetch
+  ontbreekt"-scenario AL een ThreadPoolExecutor-fallback (16 workers) -
+  vandaar dat stap 4, bij EXACT hetzelfde aantal spelers (2067), toch
+  minder dan de helft van de tijd van stap 3 kostte.
+FIX: _parallel_prefetch_official_ranks() hieronder past PRECIES datzelfde,
+al bewezen patroon toe (ThreadPoolExecutor, max 16 workers) - elke worker
+roept gewoon _cached_official_rank(pid) aan, wat de bestaande
+@st.cache_data-cache (ttl=300) vult. _build_own_official_ranks_strict()
+roept deze parallelle prefetch nu EERST aan; de daaropvolgende sequentiele
+for-loop leest daarna enkel nog uit de al-warme cache (vrijwel 0s per
+speler) in plaats van zelf een netwerk-call te doen.
+NIET aangepast: prefetch_own_player_reads() zelf blijft ongewijzigd (ze
+wordt elders nog voor andere doeleinden aangeroepen en faalt sowieso stil
+als fb._fs_prefetch ontbreekt) - deze fix voegt een APARTE, gerichte
+parallellisatie toe specifiek voor het officieel-klassement-pad, zonder
+aan dat bestaande mechanisme te raken.
 """
-
 import datetime as _dt
 import hashlib
 import json
-
 import streamlit as st
-
 from dashboard_common import (
     fb, ll, ss, osu, oa, is_scraping_available, render_cloud_scrape_trigger,
     _parse_match_date, _format_scraped_at, _clean_name,
     _get_saved_poule_url, _save_poule_url, _get_saved_schedule,
     _load_poule_fixtures, _load_poule_schedule_robust, _official_current_rank,
 )
-
 # PADEL_ANALYSIS_PERF_TIMING_STAGE2_2026-09-28: de eerste meting wees
 # 10.18s van de 10.36s toe aan _render_volgende_match_and_scout(). Deze
 # versie meet de 4 substappen BINNEN die functie, zodat duidelijk wordt
@@ -166,27 +187,20 @@ except Exception:  # noqa: BLE001  pragma: no cover
         def step(_label):
             from contextlib import nullcontext
             return nullcontext()
-
     perf = _PerfNoop()
-
 try:
     import opponent_scout as osc
 except Exception:  # noqa: BLE001  pragma: no cover
     osc = None
-
 try:
     import manual_poule_input
 except Exception:  # noqa: BLE001  pragma: no cover
     manual_poule_input = None
-
-
 @st.cache_data(ttl=600, show_spinner="Ontmoetingen ophalen...")
 def _load_encounter_index(profile_ids: tuple):
     docs = ll.get_docs_for_players(list(profile_ids))
     index = ll.build_encounter_index(docs)
     return docs, index
-
-
 def _render_manual_url_fallback(sel_player_id, sel_label, key_prefix, expanded=True):
     if manual_poule_input is not None:
         manual_poule_input.render(
@@ -207,8 +221,6 @@ def _render_manual_url_fallback(sel_player_id, sel_label, key_prefix, expanded=T
         _save_poule_url(sel_player_id, u)
         st.session_state[load_key] = True
         st.rerun()
-
-
 def _render_schema_refresh_button(sel_player_id: str) -> None:
     if is_scraping_available():
         return
@@ -222,8 +234,6 @@ def _render_schema_refresh_button(sel_player_id: str) -> None:
             key_prefix=f"vm_schema_{sel_player_id}", player_ids=str(sel_player_id),
             mode="missing", label="Schema nu verversen",
         )
-
-
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28
 # Zie de module-docstring voor de gemeten root cause (10.16s van 10.93s).
@@ -250,21 +260,13 @@ def _fixtures_signature(fixtures: list, own_interclub_matches: list) -> str:
         if m.get("match_type") == "interclub"
     )
     return json.dumps({"f": fx_part, "m": match_part}, sort_keys=True)
-
-
 # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29 - zie moduledocstring.
 OWN_TEAM_CACHE_FIELD = "own_team_identify_cache"
 _FORCE_TOKEN_KEY = "own_team_identify_force_token"
-
-
 def _own_team_force_token() -> int:
     return int(st.session_state.get(_FORCE_TOKEN_KEY, 0) or 0)
-
-
 def _signature_hash(signature: str) -> str:
     return hashlib.sha1(signature.encode("utf-8")).hexdigest()
-
-
 def _read_persisted_own_team(player_id: str, display_name: str, sig_hash: str):
     """Geeft het opgeslagen resultaat terug als handtekening EN naam
     overeenkomen, anders None. Faalt stil - dan wordt gewoon herberekend."""
@@ -279,8 +281,6 @@ def _read_persisted_own_team(player_id: str, display_name: str, sig_hash: str):
         return tuple(result)
     except Exception:  # noqa: BLE001
         return None
-
-
 def _write_persisted_own_team(player_id: str, display_name: str, sig_hash: str, result) -> None:
     """Schrijft een GELUKT resultaat weg. Faalt stil - de geheugen-cache
     werkt dan nog steeds, enkel de herstart-bescherming ontbreekt."""
@@ -298,19 +298,15 @@ def _write_persisted_own_team(player_id: str, display_name: str, sig_hash: str, 
         fb.db.collection(fb.PLAYER_PROFILES_COLLECTION).document(str(player_id)).set(payload, merge=True)
     except Exception:  # noqa: BLE001
         pass
-
-
 @st.cache_data(ttl=86400, show_spinner="Eigen ploeg bepalen (eenmalig)...")
 def _cached_identify_own_ploeg_id(
     player_id: str, display_name: str, signature: str,
     fixtures_json: str, matches_json: str, force_token: int = 0,
 ):
     """Gecachete wrapper rond ss.identify_own_ploeg_id().
-
     Laag 1 = deze @st.cache_data (geheugen). Laag 2 = Firestore
     (PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_PERSIST_2026-09-29), overleeft een
     herstart van de app. Pas als beide missen, wordt echt gescrapet.
-
     `signature` doet het echte cache-werk; `fixtures_json`/`matches_json`
     dragen de data die de onderliggende functie nodig heeft. `force_token`
     > 0 slaat de Firestore-laag over (knop "Ploeg opnieuw ophalen"). Faalt
@@ -331,8 +327,6 @@ def _cached_identify_own_ploeg_id(
         return None, None, None
     _write_persisted_own_team(player_id, display_name, sig_hash, result)
     return result
-
-
 def clear_identify_own_team_cache() -> None:
     """Wist de geheugen-cache van _cached_identify_own_ploeg_id() EN
     verhoogt het force-token, zodat de volgende aanroep ook de
@@ -343,11 +337,8 @@ def clear_identify_own_team_cache() -> None:
     except Exception:  # noqa: BLE001
         pass
     st.session_state[_FORCE_TOKEN_KEY] = _own_team_force_token() + 1
-
-
 def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_display_name=None):
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
-
     # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28: deze aanroep deed
     # een live uitslagenblad-scrape PER kandidaat-fixture en kostte gemeten
     # 10.16s bij ELKE render. Het resultaat is deterministisch, dus het
@@ -358,7 +349,6 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_di
         matches_json = json.dumps(own_interclub_matches, default=str, sort_keys=True)
     except Exception:  # noqa: BLE001 - nooit de app breken op serialisatie
         fixtures_json = matches_json = None
-
     if fixtures_json is not None and matches_json is not None:
         home_ploeg_id, away_ploeg_id, matched_fx = _cached_identify_own_ploeg_id(
             str(sel_player_id), own_display_name or "", signature,
@@ -392,37 +382,28 @@ def _resolve_own_ploeg_id(sel_player_id, fixtures, own_interclub_matches, own_di
                 st.rerun()
         return None
     return own_ploeg_id
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_own_full_doc(player_id: str):
     try:
         return fb.get_player(player_id)
     except Exception:
         return None
-
-
 # ─────────────────────────────────────────────
 # PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28
 # ─────────────────────────────────────────────
 _KNOWN_RANKING_MEMO_PREFIX = "known_ranking_ctx_v1_"
-
-
 def clear_known_ranking_context_cache() -> None:
     """Wist de sessie-memo van _known_ranking_context(). Wordt aangeroepen
     door de "Ploeg opnieuw ophalen"-knop (page_lineup_lab.py), samen met de
     andere cache-wissers, zodat een bewuste verversing ook hier doorwerkt."""
     for key in [k for k in list(st.session_state) if str(k).startswith(_KNOWN_RANKING_MEMO_PREFIX)]:
         st.session_state.pop(key, None)
-
-
 def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
     saved_fixtures, _sched_at = _get_saved_schedule(sel_player_id)
     sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [
         m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"
     ]
-
     reeks_url = _get_saved_poule_url(sel_player_id)
     if not reeks_url:
         ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
@@ -433,7 +414,6 @@ def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
                 reverse=True,
             )[0]
             reeks_url = most_recent.get("reeks_url")
-
     own_ploeg_id = None
     if saved_fixtures:
         # PADEL_ANALYSIS_IDENTIFY_OWN_TEAM_CACHE_2026-09-28: ook dit pad
@@ -449,16 +429,12 @@ def _compute_known_ranking_context(sel_player_id: str, sel_label: str):
             )
         except Exception:
             own_ploeg_id = None
-
     return reeks_url, (saved_fixtures or []), own_ploeg_id
-
-
 def _known_ranking_context(sel_player_id: str, sel_label: str):
     """PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: bepaalt
     (reeks_url, fixtures, own_ploeg_id) UITSLUITEND op basis van reeds
     opgeslagen data, ONAFHANKELIJK van de "Volgende match laden"-knop of de
     volledige tegenstander-scout.
-
     PADEL_ANALYSIS_FIRST_LOAD_DEDUPE_2026-09-28: het resultaat wordt nu
     gememoiseerd per (player_id, label) in st.session_state. Voorheen deed
     deze functie bij ELKE rerun opnieuw een volledige _get_saved_schedule()
@@ -472,21 +448,16 @@ def _known_ranking_context(sel_player_id: str, sel_label: str):
     result = _compute_known_ranking_context(sel_player_id, sel_label)
     st.session_state[memo_key] = result
     return result
-
-
 def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
     st.markdown('<div class="section-header">Volgende match</div>', unsafe_allow_html=True)
     override_url_key = f"manual_reeks_url_{sel_player_id}"
     override_team_key = f"manual_own_ploeg_id_{sel_player_id}"
     load_key = f"vm_loaded_{sel_player_id}"
-
     with perf.step("  _render_schema_refresh_button"):
         _render_schema_refresh_button(sel_player_id)
-
     with perf.step("  _cached_own_full_doc (eigen spelersdocument)"):
         sel_doc = _cached_own_full_doc(str(sel_player_id))
     own_interclub_matches = [m for m in (sel_doc or {}).get("matches", []) if m.get("match_type") == "interclub"]
-
     def _finish(fixtures, reeks_url_val):
         with perf.step("  _resolve_own_ploeg_id (eigen-ploeg-herkenning)"):
             own_ploeg_id = _resolve_own_ploeg_id(
@@ -508,7 +479,6 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             return None
         bundle, opp = header_result
         return bundle, opp, reeks_url_val, opp.get("spelgroep_id")
-
     with perf.step("  _get_saved_schedule (poule-schema uit Firestore)"):
         saved_fixtures, sched_at = _get_saved_schedule(sel_player_id)
     if saved_fixtures:
@@ -519,16 +489,13 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         with perf.step("  _render_manual_url_fallback"):
             _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_saved", expanded=False)
         return _finish(saved_fixtures, reeks_url)
-
     ic_with_url = [m for m in own_interclub_matches if m.get("reeks_url")]
     auto_reeks_url = None
     if ic_with_url:
         most_recent = sorted(ic_with_url, key=lambda m: _parse_match_date(m.get("match_date")) or (0, 0, 0), reverse=True)[0]
         auto_reeks_url = most_recent["reeks_url"]
-
     saved_url = _get_saved_poule_url(sel_player_id)
     reeks_url = st.session_state.get(override_url_key) or saved_url or auto_reeks_url
-
     if not reeks_url:
         st.info(
             f"Nog geen poule/tabel-schema gekend voor {sel_label}. Dit wordt normaal automatisch "
@@ -537,7 +504,6 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
         )
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nourl")
         return None
-
     if not st.session_state.get(load_key):
         src = "handmatig ingesteld" if (st.session_state.get(override_url_key) or saved_url) else "automatisch gevonden via je laatste interclubmatch"
         st.caption(f"Poule/tabel-link is {src}. Klik om je volgende match te laden.")
@@ -554,17 +520,14 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
                 st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_haveurl", expanded=False)
         return None
-
     with st.spinner("Wedstrijdschema ophalen..."):
         try:
             fixtures, fetch_error, meta = _load_poule_schedule_robust(sel_player_id, reeks_url)
         except Exception as e:
             fixtures, fetch_error, meta = [], str(e), None
-
     if meta is not None and fixtures and not fetch_error:
         st.session_state.pop(load_key, None)
         st.rerun()
-
     if fetch_error:
         st.warning(f"Kon het wedstrijdschema niet ophalen: {fetch_error}")
         if st.button("Opnieuw proberen", key=f"retry_vm_{sel_player_id}"):
@@ -578,7 +541,6 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_fetcherr")
         return None
-
     if not fixtures:
         st.warning("Geen wedstrijden gevonden op de poule-pagina (onverwachte paginastructuur?).")
         if st.button("Opnieuw proberen", key=f"retry_nofix_{sel_player_id}"):
@@ -591,10 +553,7 @@ def _render_volgende_match_and_scout(sel_player_id: str, sel_label: str):
             st.rerun()
         _render_manual_url_fallback(sel_player_id, sel_label, key_prefix="vm_nofix")
         return None
-
     return _finish(fixtures, reeks_url)
-
-
 def _own_team_name(fixtures: list, own_ploeg_id: str) -> str:
     for fx in fixtures or []:
         if str(fx.get("home_ploeg_id")) == str(own_ploeg_id):
@@ -602,8 +561,6 @@ def _own_team_name(fixtures: list, own_ploeg_id: str) -> str:
         if str(fx.get("away_ploeg_id")) == str(own_ploeg_id):
             return fx.get("away_name") or ""
     return ""
-
-
 def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, before_date: str) -> dict:
     """PADEL_ANALYSIS_SHARED_FETCH_CACHE_2026-09-28: geeft nu dezelfde
     GEDEELDE fetch-cache mee aan osc.scout_opponent() als
@@ -634,8 +591,6 @@ def _scout_team_all_fixtures(fixtures: list, ploeg_id: str, team_name: str, befo
         bundle = {}
     st.session_state[cache_key] = bundle
     return bundle
-
-
 def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
     if not fixtures or not own_ploeg_id or osc is None:
         return {}
@@ -670,16 +625,12 @@ def _recent_own_lineup_roster(fixtures: list, own_ploeg_id: str) -> dict:
         roster = {}
     st.session_state[cache_key] = roster
     return roster
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_own_player_rating(player_id: str):
     try:
         return oa.get_own_player_rating(str(player_id))[0]
     except Exception:
         return None
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_official_rank(player_id: str):
     try:
@@ -693,16 +644,39 @@ def _cached_official_rank(player_id: str):
         return _official_current_rank(str(player_id))
     except Exception:
         return None
-
-
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_OFFICIAL_RANK_PARALLEL_FIX_2026-10-04
+# Zie de module-docstring voor de gemeten root cause (127.60s van 208.27s,
+# 61% van de totale "Bereken kalibratie"-tijd, voor 2067 spelers).
+# ─────────────────────────────────────────────
+def _parallel_prefetch_official_ranks(player_ids) -> None:
+    """Warmt de @st.cache_data-cache van _cached_official_rank() parallel
+    voor, via een ThreadPoolExecutor (max 16 workers) - EXACT hetzelfde,
+    al bewezen patroon als _parallel_prefetch_padelstat() in
+    lineup_retrospective.py voor de padelstat-historiek (stap 4, die
+    daardoor bij EXACT hetzelfde aantal spelers (2067) toch minder dan de
+    helft van de tijd van stap 3 kostte).
+    Elke worker roept gewoon _cached_official_rank(pid) aan; het
+    RESULTAAT wordt genegeerd (de latere sequentiele loop in
+    _build_own_official_ranks_strict() leest dat resultaat alsnog, maar
+    dan uit de nu-warme cache i.p.v. zelf een netwerk-call te doen).
+    Faalt altijd stil - bij een fout hier wordt gewoon (trager, zoals
+    voorheen) sequentieel doorgerekend."""
+    ids = sorted({str(p) for p in (player_ids or []) if p})
+    if not ids:
+        return
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(16, len(ids))) as ex:
+            list(ex.map(_cached_official_rank, ids))
+    except Exception:  # noqa: BLE001
+        pass
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_docs_for_players(player_ids: tuple) -> dict:
     try:
         return ll.get_docs_for_players(list(player_ids))
     except Exception:
         return {}
-
-
 def _clear_rank_caches() -> None:
     try:
         _cached_own_player_rating.clear()
@@ -715,8 +689,6 @@ def _clear_rank_caches() -> None:
     # worden. Aparte try/except, zodat een fout hierboven dit niet
     # overslaat.
     clear_identify_own_team_cache()
-
-
 def _merge_full_opponent_roster(bundle: dict, fixtures: list, opp: dict) -> dict:
     if not bundle or not fixtures:
         return bundle
@@ -751,12 +723,8 @@ def _merge_full_opponent_roster(bundle: dict, fixtures: list, opp: dict) -> dict
         bundle["_roster_extended_with"] = [p.get("name", "?") for p in toegevoegd]
         bundle["_roster_extended_low_confidence"] = onzeker
     return bundle
-
-
 def _current_official_rank_prefer_padelstat(player_id: str):
     return _cached_official_rank(str(player_id))
-
-
 def _opponent_padelstat_ratings(bundle: dict) -> dict:
     out = {}
     for p in bundle.get("unique_players", []) or []:
@@ -767,8 +735,6 @@ def _opponent_padelstat_ratings(bundle: dict) -> dict:
         if rating is not None:
             out[str(uid)] = rating
     return out
-
-
 def _opponent_official_ranks(player_ids: list) -> dict:
     out = {}
     for pid in player_ids:
@@ -779,9 +745,13 @@ def _opponent_official_ranks(player_ids: list) -> dict:
         if rank is not None:
             out[str(pid)] = rank
     return out
-
-
 def _build_own_official_ranks_strict(available_ids: list) -> dict:
+    # PADEL_ANALYSIS_OFFICIAL_RANK_PARALLEL_FIX_2026-10-04: vult de cache
+    # van ELKE speler parallel (16 workers) VOOR de sequentiele loop
+    # hieronder begint - zie moduledocstring + _parallel_prefetch_
+    # official_ranks() voor de gemeten root cause en de uitleg waarom dit
+    # hetzelfde patroon volgt als stap 4 (padelstat-historiek).
+    _parallel_prefetch_official_ranks(available_ids)
     out = {}
     for pid in available_ids:
         try:
@@ -791,8 +761,6 @@ def _build_own_official_ranks_strict(available_ids: list) -> dict:
         if rank is not None:
             out[pid] = rank
     return out
-
-
 def _render_official_rank_warning(available_ids: list, official_ranks_strict: dict, name_lookup: dict) -> None:
     missing = ll.has_missing_official_rank(available_ids, official_ranks_strict)
     if missing:
@@ -804,8 +772,6 @@ def _render_official_rank_warning(available_ids: list, official_ranks_strict: di
             "meegeteld, wat de uitkomst kan vertekenen. Ververs het klassement van deze speler(s) "
             "voor een betrouwbaar resultaat."
         )
-
-
 def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
     if rules is None or not diagnostics:
         return ""
@@ -821,13 +787,9 @@ def _format_points_bounds_diagnostic(rules, diagnostics) -> str:
         f"puntengrens per rotatie (**{lo}-{hi}**). De berekende punten per rotatie voor deze "
         f"spelers/dit scenario lagen tussen **{pmin:.0f}** en **{pmax:.0f}**."
     )
-
-
 # PADEL_ANALYSIS_HOTFIX_2026-09-29: ontbrekende functie toegevoegd, app lag plat
 # (ImportError: cannot import name 'prefetch_own_player_reads' from lineup_scout).
 _OWN_PLAYER_READS = ("get_player_profile", "get_padelstat_rating", "get_player")
-
-
 def prefetch_own_player_reads(player_ids) -> None:
     """Leest de per-speler-reads voor de eigen spelers parallel voor in de
     gedeelde leescache. Reeds gecachete spelers worden overgeslagen. Faalt

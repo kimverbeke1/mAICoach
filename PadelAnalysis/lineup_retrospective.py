@@ -62,18 +62,43 @@ Dit raakt UITSLUITEND gather_all_valid_match_data() (de kalibratie-knop).
 De andere eerdere fixes (teamgenoten-scan-cache in session_state, lazy
 calibration achter de knop, model-consistentie) blijven ONGEWIJZIGD - dit
 is een AANVULLING op die laatste fix, geen vervanging.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PADELSTAT_PREFETCH_DOUBLE_WORK_FIX_2026-10-04 (op verzoek
+van Kim, na de meting dat stap 3 (officieel klassement) van 127.60s naar
+22.11s gebracht werd via parallellisatie in lineup_scout.py - stap 4
+(padelstat-historiek, 76.05s voor dezelfde 2067 spelers) werd daardoor de
+grootste resterende kost)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen, geen gok): de vorige versie
+van _parallel_prefetch_padelstat() haalde WEL al, parallel (ThreadPoolExecutor,
+16 workers), fb.get_padelstat_rating(pid) op voor elke speler - maar GOOIDE
+dat resultaat METEEN WEG ("pass", geen return-waarde, geen opslag). Het doel
+was uitsluitend een cache "warmen" via fb._fs_prefetch - een functie die,
+exact zoals bij prefetch_own_player_reads() in lineup_scout.py, NIET bestaat
+in firebase_service.py. _load_padelstat_histories() deed daarna ALSNOG een
+volledige, SEQUENTIELE tweede doorloop die fb.get_padelstat_rating() gewoon
+OPNIEUW aanriep, een voor een, voor elke speler. Dus: 2067 parallelle reads
+(nuttig werk, weggegooid) GEVOLGD DOOR 2067 sequentiele reads (hetzelfde
+werk, opnieuw, en dit keer wel gebruikt). De sequentiele tweede helft is
+vermoedelijk de echte 76.05s-kost.
+FIX: _parallel_prefetch_padelstat() geeft nu een dict {pid: data} terug met
+de resultaten van de parallelle ophaling zelf, in plaats van ze weg te
+gooien. _load_padelstat_histories() gebruikt dat resultaat NU RECHTSTREEKS
+i.p.v. een tweede, sequentiele ronde te doen - enkel als de parallelle
+ophaling voor een SPECIFIEKE speler toch niets opleverde (lege dict, geen
+sleutel aanwezig), valt de code terug op 1 individuele, alsnog sequentiele
+poging voor exact DIE speler (defensief, nooit een ontbrekende waarde
+stilzwijgend negeren). Het pad via fb._fs_prefetch (als die ooit wel
+bestaat) blijft ongewijzigd als eerste, voorkeurs-poging.
 """
 import datetime as _dt
 import math
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional
-
 import streamlit as st
-
 import lineup_lab as ll
 import firebase_service as fb
-
 try:
     import perf_timing as perf
 except Exception:  # noqa: BLE001  pragma: no cover
@@ -82,9 +107,7 @@ except Exception:  # noqa: BLE001  pragma: no cover
         def step(_label):
             from contextlib import nullcontext
             return nullcontext()
-
     perf = _PerfNoop()
-
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _CALIBRATION_SETTINGS_COLLECTION = "app_settings"
 _CALIBRATION_SETTINGS_DOC = "retro_calibration"
@@ -96,8 +119,6 @@ _CALIBRATION_BIN_EDGES = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
 _SCALE_BIAS_SEARCH_SCALES = list(range(50, 801, 20))
 _BIAS_SEARCH_RANGE = list(range(-150, 151, 10))
 _FORM_WEIGHT_SEARCH_RANGE = [0.0, 0.25, 0.5, 0.75, 1.0]
-
-
 # --------------------------------------------------------------- datums
 def to_iso_date(date_text) -> Optional[str]:
     """TVL-datumtekst ("26/09/2026", "26-09-2026" of al ISO) -> "YYYY-MM-DD".
@@ -114,13 +135,9 @@ def to_iso_date(date_text) -> Optional[str]:
         d, mo, y = m.groups()
         return f"{y}-{int(mo):02d}-{int(d):02d}"
     return None
-
-
 # ------------------------------------------------- encounter/board-reconstructie
 def _encounter_key(m: dict) -> tuple:
     return (m.get("match_date") or "", m.get("encounter") or "")
-
-
 def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
     mid = m.get("match_id")
     partner = m.get("partner_user_id")
@@ -131,8 +148,6 @@ def _board_dedupe_key(m: dict, fallback_pid: str) -> str:
         m.get("match_date"), m.get("encounter"), m.get("round_text"),
         m.get("score"), pair_key,
     ])
-
-
 def build_retro_encounter_index(docs: Dict[str, dict], allowed_player_ids=None) -> Dict[tuple, list]:
     """`allowed_player_ids` is een SET van toegelaten spelers, of None voor
     GEEN filter (alle spelers in `docs` tellen mee)."""
@@ -146,8 +161,6 @@ def build_retro_encounter_index(docs: Dict[str, dict], allowed_player_ids=None) 
                 continue
             index.setdefault(_encounter_key(m), []).append((pid, m))
     return index
-
-
 def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
     """Meest recent eerst, gesorteerd op echte datum (niet de ruwe tekst)."""
     items = []
@@ -163,8 +176,6 @@ def list_retro_encounters(index: Dict[tuple, list]) -> List[tuple]:
         items.append((key, label, date))
     items.sort(key=lambda x: to_iso_date(x[2]) or "", reverse=True)
     return [(k, lbl) for k, lbl, _ in items]
-
-
 def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
     """Zoals ll.reconstruct_boards(), maar behoudt ook opp1_ranking/
     opp2_ranking (tekst, bv. "P200") en match_date."""
@@ -187,8 +198,6 @@ def reconstruct_boards_with_rankings(entries: list) -> List[dict]:
             "match_id": m.get("match_id"), "dedupe_key": key,
         }
     return list(seen.values())
-
-
 def _known_opponent_ids(boards: list) -> set:
     """Verzamelt alle tegenstander-speler-id's uit een lijst borden (zoals
     teruggegeven door reconstruct_boards_with_rankings())."""
@@ -198,8 +207,6 @@ def _known_opponent_ids(boards: list) -> set:
             if uid:
                 out.add(str(uid))
     return out
-
-
 def _resolve_encounter_teammates(
     sel_player_id: str, encounter_key: tuple, profiles: list,
     exclude_ids: Optional[set] = None, max_candidates: int = 200,
@@ -251,8 +258,6 @@ def _resolve_encounter_teammates(
     }
     st.session_state[cache_key] = gevonden
     return gevonden
-
-
 # --------------------------------------------------------------- momentopnames
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_all_snapshots() -> list:
@@ -261,8 +266,6 @@ def _load_all_snapshots() -> list:
         return [doc.to_dict() or {} for doc in docs]
     except Exception:  # noqa: BLE001
         return []
-
-
 def _find_snapshot_for(date_text, opp_user_ids: set) -> Optional[dict]:
     iso = to_iso_date(date_text)
     if not iso:
@@ -275,8 +278,6 @@ def _find_snapshot_for(date_text, opp_user_ids: set) -> Optional[dict]:
             continue
         return data
     return None
-
-
 # --------------------------------------------------------------- padelstat-cache
 def _collect_relevant_player_ids(index: dict) -> set:
     ids = set()
@@ -287,50 +288,72 @@ def _collect_relevant_player_ids(index: dict) -> set:
                 if m.get(veld):
                     ids.add(str(m[veld]))
     return ids
-
-
-def _parallel_prefetch_padelstat(player_ids: tuple) -> None:
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_PADELSTAT_PREFETCH_DOUBLE_WORK_FIX_2026-10-04
+# Zie de module-docstring voor de gemeten/bevestigde root cause: de vorige
+# versie van _parallel_prefetch_padelstat() haalde parallel op maar GOOIDE
+# het resultaat WEG, waarna _load_padelstat_histories() ALSNOG een volledige
+# sequentiele tweede doorloop deed - dubbel werk, waarvan de sequentiele
+# helft de gemeten 76.05s-kost was (2067 spelers).
+# ─────────────────────────────────────────────
+def _parallel_prefetch_padelstat(player_ids: tuple) -> Dict[str, dict]:
+    """Haalt fb.get_padelstat_rating() parallel op (ThreadPoolExecutor, max
+    16 workers) voor ALLE player_ids EN geeft de resultaten DIRECT terug als
+    {pid: data-or-{}}, zodat de aanroeper dit NIET nog eens sequentieel moet
+    herhalen. Faalt een individuele read, dan krijgt die pid gewoon {}
+    (zelfde gedrag als voorheen bij een fout).
+    Als fb._fs_prefetch bestaat (momenteel niet het geval in
+    firebase_service.py), wordt die voorkeurs-weg EERST geprobeerd, als
+    pure optimalisatie/warming - de parallelle ThreadPoolExecutor-ophaling
+    hieronder gebeurt in dat geval ALSNOG, want enkel die levert de
+    daadwerkelijke data op die deze functie moet teruggeven."""
+    out: Dict[str, dict] = {}
     if not player_ids:
-        return
+        return out
     prefetch = getattr(fb, "_fs_prefetch", None)
     if callable(prefetch):
         try:
             prefetch(("get_padelstat_rating",), list(player_ids))
-            return
         except Exception:  # noqa: BLE001
             pass
     try:
         from concurrent.futures import ThreadPoolExecutor
-
-        def _warm(pid):
+        def _fetch(pid):
             try:
-                fb.get_padelstat_rating(pid)
+                return pid, (fb.get_padelstat_rating(pid) or {})
             except Exception:  # noqa: BLE001
-                pass
-
+                return pid, {}
         with ThreadPoolExecutor(max_workers=min(16, len(player_ids))) as ex:
-            list(ex.map(_warm, player_ids))
+            for pid, data in ex.map(_fetch, player_ids):
+                out[pid] = data
     except Exception:  # noqa: BLE001
         pass
-
-
+    return out
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_padelstat_histories(player_ids: tuple) -> Dict[str, dict]:
-    _parallel_prefetch_padelstat(player_ids)
+    # PADEL_ANALYSIS_PADELSTAT_PREFETCH_DOUBLE_WORK_FIX_2026-10-04: gebruikt
+    # nu RECHTSTREEKS het resultaat van de parallelle ophaling - GEEN tweede,
+    # sequentiele doorloop meer voor spelers die al een (mogelijk lege)
+    # resultaat kregen. Enkel als de parallelle fase voor een SPECIFIEKE
+    # speler faalde en geen sleutel opleverde, wordt die ENE speler alsnog
+    # individueel (sequentieel) geprobeerd - defensief, nooit stilzwijgend
+    # overslaan.
+    prefetched = _parallel_prefetch_padelstat(player_ids)
     out: Dict[str, dict] = {}
     for pid in player_ids:
-        try:
-            data = fb.get_padelstat_rating(pid) or {}
-        except Exception:  # noqa: BLE001
-            data = {}
+        if pid in prefetched:
+            data = prefetched[pid]
+        else:
+            try:
+                data = fb.get_padelstat_rating(pid) or {}
+            except Exception:  # noqa: BLE001
+                data = {}
         out[pid] = {
             "history": list(data.get("history") or []),
             "flat_rating": data.get("rating"),
             "flat_fetched_at": data.get("fetched_at"),
         }
     return out
-
-
 def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
     beste = None
     for regel in history:
@@ -338,16 +361,12 @@ def _rating_at_from_history(history: list, moment_iso: str) -> Optional[float]:
         if t and t[:len(moment_iso)] <= moment_iso and (beste is None or t >= beste[0]):
             beste = (t, regel.get("rating"))
     return beste[1] if beste else None
-
-
 def _latest_rating_from_history(history: list) -> Optional[float]:
     if not history:
         return None
     beste = max(history, key=lambda r: str(r.get("fetched_at") or ""))
     rating = beste.get("rating")
     return float(rating) if rating is not None else None
-
-
 def _padelstat_priority_rating(
     pid, date_text, ratings_cache: Dict[str, dict], fallback_value, fallback_label: str,
 ):
@@ -373,8 +392,6 @@ def _padelstat_priority_rating(
     if fallback_value is not None:
         return float(fallback_value), fallback_label
     return None, "onbekend"
-
-
 # --------------------------------------------------------------- voorspelling
 def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
                   ratings_cache: Dict[str, dict]):
@@ -390,8 +407,6 @@ def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_o
         pid, date_text, ratings_cache, fallback,
         "huidig officieel klassement (laatste redmiddel, geen padelstat gekend)",
     )
-
-
 def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
                        ratings_cache: Dict[str, dict]):
     uid = str(user_id) if user_id else None
@@ -409,8 +424,6 @@ def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
         uid, date_text, ratings_cache, official,
         "officieel klassement (van toen, uit het uitslagenblad - laatste redmiddel, geen padelstat gekend)",
     )
-
-
 def _effective_win_probability(
     our_avg, their_avg, our_ids, their_ids, scale: float, bias: float = 0.0,
     form_weight: float = 0.0, form_adjustment: Optional[Dict[str, dict]] = None,
@@ -432,8 +445,6 @@ def _effective_win_probability(
     if effective_bias:
         return _estimate_win_probability_with_bias(our_avg, their_avg, scale=scale, bias=effective_bias)
     return ll.estimate_win_probability(our_avg, their_avg, scale=scale)
-
-
 def predict_board(
     board: dict, current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, snapshot: Optional[dict] = None,
@@ -467,8 +478,6 @@ def predict_board(
         "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
         "match_date": date_text,
     }
-
-
 def predict_encounter(
     boards: list, current_official_ranks: dict, ratings_cache: Dict[str, dict],
     scale: float = _DEFAULT_SCALE, use_snapshot: bool = True,
@@ -486,8 +495,6 @@ def predict_encounter(
         for b in boards
     ]
     return {"boards": predictions, "snapshot_used": snapshot is not None}
-
-
 # ------------------------------------------- volledige-ontmoeting-uitkomst
 def _combine_boards_to_point_probs(win_probs: list) -> dict:
     probs = [(0.5 if p is None else max(0.0, min(1.0, float(p)))) for p in win_probs]
@@ -506,8 +513,6 @@ def _combine_boards_to_point_probs(win_probs: list) -> dict:
     p1 = sum(p for k, p in tot.items() if k == half)
     p0 = max(0.0, 1.0 - p2 - p1)
     return {"p2": p2, "p1": p1, "p0": p0}
-
-
 def _actual_encounter_result(boards: list) -> Optional[dict]:
     if not boards:
         return None
@@ -523,8 +528,6 @@ def _actual_encounter_result(boards: list) -> Optional[dict]:
     else:
         uitkomst = "verloren"
     return {"n_win": n_win, "n_boards": len(boards), "uitkomst": uitkomst}
-
-
 # ------------------------------------------------ schaal-onafhankelijke ruwe data
 def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cache: Dict[str, dict]) -> list:
     """Verzamelt voor ELK bord van ELKE ontmoeting in `index` de SCHAAL-
@@ -565,8 +568,6 @@ def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cac
                 "our_is_padelstat": our_is_padelstat, "their_is_padelstat": their_is_padelstat,
             })
     return raw
-
-
 def compute_individual_form_index(raw_rows: list) -> Dict[str, dict]:
     """Geeft {player_id: {"wins", "losses", "n", "winrate",
     "avg_opp_rating_won", "avg_opp_rating_lost"}} terug. Een tegenstander-
@@ -605,8 +606,6 @@ def compute_individual_form_index(raw_rows: list) -> Dict[str, dict]:
             "avg_opp_rating_lost": (sum(lost_list) / len(lost_list)) if lost_list else None,
         }
     return out
-
-
 def _format_individual_form(form_index: Dict[str, dict], player_id, name: str) -> Optional[str]:
     """Korte tekst voor 1 speler, inclusief het gemiddelde niveau van wie
     hij versloeg/van wie hij verloor."""
@@ -622,8 +621,6 @@ def _format_individual_form(form_index: Dict[str, dict], player_id, name: str) -
     if context_delen:
         basis += f" - {', '.join(context_delen)}"
     return basis
-
-
 def compute_form_adjustment(raw_rows: list, scale: float, bias: float = 0.0) -> Dict[str, dict]:
     """Geeft per speler {"n", "avg_residual"} terug: het gemiddelde VERSCHIL
     tussen "werkelijk gewonnen (1/0)" en "verwachte kans volgens rating+
@@ -645,8 +642,6 @@ def compute_form_adjustment(raw_rows: list, scale: float, bias: float = 0.0) -> 
             if uid is not None:
                 tally[str(uid)].append(-residual)
     return {pid: {"n": len(vals), "avg_residual": sum(vals) / len(vals)} for pid, vals in tally.items() if vals}
-
-
 # --------------------------------------------------------------------------
 # PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 - zie moduledocstring.
 # --------------------------------------------------------------------------
@@ -680,8 +675,6 @@ def _read_all_valid_cache(player_ids_sig: tuple) -> Optional[dict]:
         }
     except Exception:  # noqa: BLE001
         return None
-
-
 def _write_all_valid_cache(player_ids_sig: tuple, player_ids: list, valid_rows: list, n_total_boards: int) -> None:
     """Schrijft de SCHAAL-ONAFHANKELIJKE ruwe rijen weg (geen win_
     probability - die hangt af van de gekozen factor). Faalt stil."""
@@ -708,8 +701,6 @@ def _write_all_valid_cache(player_ids_sig: tuple, player_ids: list, valid_rows: 
         fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_ALL_VALID_CACHE_DOC).set(payload)
     except Exception:  # noqa: BLE001
         pass
-
-
 def gather_all_valid_match_data(
     profiles: list, debug_timings: Optional[list] = None, live_placeholder=None,
 ) -> dict:
@@ -722,22 +713,18 @@ def gather_all_valid_match_data(
     Bij een mistreffer lopen alle stappen zoals voorheen, en wordt het
     resultaat NA afloop weggeschreven voor de volgende klik/sessie."""
     import time as _time
-
     def _mark(label, t0, count=None):
         if debug_timings is not None:
             debug_timings.append({"label": label, "seconds": _time.perf_counter() - t0, "count": count})
-
     def _live(txt):
         if live_placeholder is not None:
             live_placeholder.markdown(txt)
-
     all_ids = sorted({str(p.get("player_id")) for p in profiles if p.get("player_id")})
     if not all_ids:
         return {
             "valid_rows": [], "full_padelstat_rows": [], "n_total_boards": 0, "n_valid": 0,
             "n_full_padelstat": 0, "n_fallback": 0, "form_index": {}, "player_ids": [],
         }
-
     sig = tuple(all_ids)
     t0_cache = _time.perf_counter()
     _live(f"**Cache controleren** voor {len(all_ids)} profielen...")
@@ -754,7 +741,6 @@ def gather_all_valid_match_data(
     else:
         _live(f"**Geen bruikbare cache** (verlopen, leeg of andere spelerslijst) - volledige berekening start...")
         _mark("0. persistente cache: mistreffer", t0_cache)
-
         _live(f"**Stap 1/6:** documenten ophalen voor **{len(all_ids)}** profielen - bezig...")
         t0 = _time.perf_counter()
         with perf.step(f"retro: get_docs_for_players (ALLE {len(all_ids)} profielen)"):
@@ -766,7 +752,6 @@ def gather_all_valid_match_data(
         dt1 = _time.perf_counter() - t0
         _live(f"**Stap 1/6:** documenten ophalen voor {len(all_ids)} profielen - klaar ({dt1:.1f}s), {len(docs)} documenten terug.")
         _mark(f"1. get_docs_for_players ({len(all_ids)} profielen opgevraagd)", t0, len(all_ids))
-
         t0 = _time.perf_counter()
         index = build_retro_encounter_index(docs, allowed_player_ids=None)
         n_encounters = len(index)
@@ -774,7 +759,6 @@ def gather_all_valid_match_data(
         dt2 = _time.perf_counter() - t0
         _live(f"**Stap 2/6:** encounter-index gebouwd ({dt2:.1f}s) - {n_encounters} ontmoetingen, {n_boards_seen} matchrecords.")
         _mark(f"2. encounter-index bouwen ({n_encounters} ontmoetingen, {n_boards_seen} matchrecords)", t0, n_boards_seen)
-
         relevant_ids = tuple(sorted(_collect_relevant_player_ids(index)))
         _live(f"**Stap 3/6:** officieel klassement ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
         t0 = _time.perf_counter()
@@ -789,7 +773,6 @@ def gather_all_valid_match_data(
         dt3 = _time.perf_counter() - t0
         _live(f"**Stap 3/6:** officieel klassement - klaar ({dt3:.1f}s), {len(current_official_ranks)} spelers met een klassement.")
         _mark(f"3. officieel klassement ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
-
         _live(f"**Stap 4/6:** padelstat-historiek ophalen voor **{len(relevant_ids)}** unieke spelers - bezig...")
         t0 = _time.perf_counter()
         with perf.step(f"retro: padelstat-historiek (kalibratie, {len(relevant_ids)} spelers)"):
@@ -797,7 +780,6 @@ def gather_all_valid_match_data(
         dt4 = _time.perf_counter() - t0
         _live(f"**Stap 4/6:** padelstat-historiek - klaar ({dt4:.1f}s).")
         _mark(f"4. padelstat-historiek ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
-
         _live(f"**Stap 5/6:** winkans per bord berekenen voor **{n_boards_seen}** matchrecords - bezig...")
         t0 = _time.perf_counter()
         with perf.step("retro: gather_raw_match_data (per-bord-voorspelling, kalibratie)"):
@@ -805,13 +787,11 @@ def gather_all_valid_match_data(
         dt5 = _time.perf_counter() - t0
         _live(f"**Stap 5/6:** winkans per bord - klaar ({dt5:.1f}s), {len(raw)} borden berekend.")
         _mark(f"5. per-bord voorspelling berekenen ({len(raw)} borden)", t0, len(raw))
-
         t0 = _time.perf_counter()
         valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
         n_total_boards = len(raw)
         dt6 = _time.perf_counter() - t0
         _mark("6a. filteren geldige rijen", t0, len(valid_rows))
-
         t0 = _time.perf_counter()
         _write_all_valid_cache(sig, all_ids, valid_rows, n_total_boards)
         dt_write = _time.perf_counter() - t0
@@ -820,7 +800,6 @@ def gather_all_valid_match_data(
             f"({dt_write:.1f}s) voor de volgende klik. **Totaal: {dt1+dt2+dt3+dt4+dt5+dt6+dt_write:.1f}s.**"
         )
         _mark("6b. resultaat wegschrijven naar persistente cache", t0)
-
     n_full_padelstat = sum(1 for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat"))
     n_fallback = len(valid_rows) - n_full_padelstat
     full_padelstat_rows = [r for r in valid_rows if r.get("our_is_padelstat") and r.get("their_is_padelstat")]
@@ -831,8 +810,6 @@ def gather_all_valid_match_data(
         "n_full_padelstat": n_full_padelstat, "n_fallback": n_fallback,
         "form_index": form_index, "player_ids": all_ids,
     }
-
-
 def score_raw_at_scale(raw_rows: list, scale: float, bias: float = 0.0, form_weight: float = 0.0,
                        form_adjustment: Optional[Dict[str, dict]] = None) -> list:
     """Vult elke rij uit gather_raw_match_data() aan met win_probability -
@@ -847,8 +824,6 @@ def score_raw_at_scale(raw_rows: list, scale: float, bias: float = 0.0, form_wei
         )
         out.append({**r, "win_probability": wp})
     return out
-
-
 # --------------------------------------------------------------- kalibratie
 def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
     bin_edges = bin_edges or _CALIBRATION_BIN_EDGES
@@ -879,8 +854,6 @@ def calibration_stats(predictions: list, bin_edges=None) -> Optional[dict]:
         "n": n, "brier": brier, "log_loss": log_loss, "accuracy": accuracy,
         "mean_predicted": mean_pred, "mean_actual": mean_actual, "bins": bins,
     }
-
-
 def _estimate_win_probability_with_bias(our_avg, their_avg, scale: float, bias: float = 0.0):
     """PURE, lokale uitbreiding van ll.estimate_win_probability() met een
     extra bias/verschuiving-term op het ratingverschil."""
@@ -891,8 +864,6 @@ def _estimate_win_probability_with_bias(our_avg, their_avg, scale: float, bias: 
         return 1.0 / (1.0 + math.pow(10.0, -diff / scale))
     except OverflowError:
         return 0.0 if diff < 0 else 1.0
-
-
 def find_best_scale_and_bias(
     raw_rows: list, scales=None, biases=None, form_weights=None,
 ) -> dict:
@@ -918,13 +889,9 @@ def find_best_scale_and_bias(
                 if best is None or stats["brier"] < best["brier"]:
                     best = {"scale": s, "bias": b, "form_weight": fw, "brier": stats["brier"], "n": stats["n"]}
     return {"best": best, "curve": curve, "form_adjustment": form_adjustment}
-
-
 def logistic_curve(scale: float, diffs=None) -> list:
     diffs = diffs if diffs is not None else list(range(-400, 401, 10))
     return [(d, ll.estimate_win_probability(0.0, -float(d), scale=scale)) for d in diffs]
-
-
 # --------------------------------------------------------------- winkansfactor opslaan
 def _load_saved_scale() -> dict:
     """Leest de laatst opgeslagen winkansfactor, bias EN form_weight uit
@@ -941,8 +908,6 @@ def _load_saved_scale() -> dict:
     except Exception:  # noqa: BLE001
         pass
     return {}
-
-
 def _save_scale_to_firestore(scale: float, bias: float = 0.0, form_weight: float = 0.0) -> None:
     try:
         fb.db.collection(_CALIBRATION_SETTINGS_COLLECTION).document(_CALIBRATION_SETTINGS_DOC).set(
@@ -956,8 +921,6 @@ def _save_scale_to_firestore(scale: float, bias: float = 0.0, form_weight: float
         )
     except Exception:  # noqa: BLE001
         pass
-
-
 # --------------------------------------------------------------- beste alternatief
 def best_alternative_for_encounter(
     boards: list, docs: Dict[str, dict], current_official_ranks: dict, ratings_cache: Dict[str, dict],
@@ -1016,26 +979,18 @@ def best_alternative_for_encounter(
         None,
     )
     return {"top": results, "actual": actual_result, "reason": None, "n_players": len(players)}
-
-
 # --------------------------------------------------------------------------
 # Streamlit-weergave
 # --------------------------------------------------------------------------
 def _pct(v) -> str:
     return f"{v * 100:.0f}%" if v is not None else "onbekend"
-
-
 def _outcome_color(predicted_wp, actual_won) -> str:
     if predicted_wp is None or actual_won is None:
         return "gray"
     correct = (predicted_wp >= 0.5) == bool(actual_won)
     return "green" if correct else "red"
-
-
 def _source_is_padelstat(sources) -> bool:
     return all(s is not None and "klassement" not in s and s != "onbekend" for s in (sources or []))
-
-
 def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str, dict]] = None) -> None:
     p1, p2 = bp["pair"]
     ons = f"{name_lookup.get(p1, p1)} / {name_lookup.get(p2, p2)}"
@@ -1075,16 +1030,12 @@ def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str
                 "Individuele vorm nog niet beschikbaar - klik onderaan de pagina op 'Bereken kalibratie' "
                 "om dit (en de modelcontrole) te berekenen."
             )
-
-
 def _apply_scale_callback(new_scale: float, new_bias: float = 0.0, new_form_weight: float = 0.0) -> None:
     st.session_state["retro_scale"] = new_scale
     st.session_state["retro_bias"] = new_bias
     st.session_state["retro_form_weight"] = new_form_weight
     st.session_state.pop("retro_best_scale_bias_result", None)
     _save_scale_to_firestore(new_scale, new_bias, new_form_weight)
-
-
 def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
     sel_player_id = str(sel_player_id)
