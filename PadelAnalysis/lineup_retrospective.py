@@ -135,7 +135,29 @@ bleek een gevolg van een VERLOPEN GitHub fine-grained personal access
 token waardoor de nachtelijke scrape-workflow stil faalde voor ~74% van
 alle profielen sinds eind september. GEEN actie nodig in dit bestand -
 lost zichzelf op zodra het token vernieuwd is en de profielen opnieuw
-gescraped zijn.
+gescraped zijn. (Aanvulling 2026-10-05: bij Nico Recour bleek een
+herscrape niet te helpen door een bug in het MERGE-VANGNET van
+scrape_player.py - zie PADEL_ANALYSIS_MERGE_VANGNET_KEEPS_NEW_2026-10-05
+in dat bestand.)
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_MATCH_WORDING_SCORE_2026-10-05 (op verzoek van Kim: "Je
+spreekt altijd over borden. Vervang borden altijd door 'Matchen' en bord
+door Match. Toon ook duidelijk de score 3-1, 4-0 en spreek niet van 1 van
+de 4 gewonnen of zoiets.")
+--------------------------------------------------------------------------
+Enkel ZICHTBARE TEKST gewijzigd (interne variabelen/functienamen met
+"board" blijven, om geen regressie te riskeren):
+  - overal "bord/borden" -> "match/matchen" in captions, debug-blokken,
+    tabelkolom ("Bord" -> "Match") en de live voortgangsmeldingen van de
+    kalibratie;
+  - de echte uitslag van de ontmoeting wordt nu als SCORE getoond:
+    "Echt: gewonnen (3-1)" i.p.v. "3 van 4 borden gewonnen";
+  - ontbreken er matchen (oneven of < 2 gekend), dan toont de pagina nu
+    toch de score van de GEKENDE matchen, met duidelijk hoeveel er nog
+    ontbreken (bv. "Gekende uitslag: 2-1 - 1 match ontbreekt nog in de
+    data"), i.p.v. enkel te melden dat er te weinig zijn.
+_actual_encounter_result() geeft daarvoor ook n_lost en een score-tekst
+terug; de bestaande velden (n_win, n_boards, uitkomst) blijven ongewijzigd.
 """
 import datetime as _dt
 import math
@@ -597,12 +619,15 @@ def _combine_boards_to_point_probs(win_probs: list) -> dict:
     p0 = max(0.0, 1.0 - p2 - p1)
     return {"p2": p2, "p1": p1, "p0": p0}
 def _actual_encounter_result(boards: list) -> Optional[dict]:
+    """PADEL_ANALYSIS_RETRO_MATCH_WORDING_SCORE_2026-10-05: geeft naast de
+    bestaande velden ook n_lost en de score als tekst ("3-1") terug."""
     if not boards:
         return None
     gewonnen = [b.get("won") for b in boards]
     if any(w is None for w in gewonnen):
         return None
     n_win = sum(1 for w in gewonnen if w)
+    n_lost = len(boards) - n_win
     half = len(boards) / 2.0
     if n_win > half:
         uitkomst = "gewonnen"
@@ -610,7 +635,10 @@ def _actual_encounter_result(boards: list) -> Optional[dict]:
         uitkomst = "gelijk"
     else:
         uitkomst = "verloren"
-    return {"n_win": n_win, "n_boards": len(boards), "uitkomst": uitkomst}
+    return {
+        "n_win": n_win, "n_lost": n_lost, "n_boards": len(boards),
+        "uitkomst": uitkomst, "score_txt": f"{n_win}-{n_lost}",
+    }
 # ------------------------------------------------ schaal-onafhankelijke ruwe data
 def gather_raw_match_data(index: dict, current_official_ranks: dict, ratings_cache: Dict[str, dict]) -> list:
     """Verzamelt voor ELK bord van ELKE ontmoeting in `index` de SCHAAL-
@@ -863,13 +891,13 @@ def gather_all_valid_match_data(
         dt4 = _time.perf_counter() - t0
         _live(f"**Stap 4/6:** padelstat-historiek - klaar ({dt4:.1f}s).")
         _mark(f"4. padelstat-historiek ophalen ({len(relevant_ids)} unieke spelers)", t0, len(relevant_ids))
-        _live(f"**Stap 5/6:** winkans per bord berekenen voor **{n_boards_seen}** matchrecords - bezig...")
+        _live(f"**Stap 5/6:** winkans per match berekenen voor **{n_boards_seen}** matchrecords - bezig...")
         t0 = _time.perf_counter()
-        with perf.step("retro: gather_raw_match_data (per-bord-voorspelling, kalibratie)"):
+        with perf.step("retro: gather_raw_match_data (per-match-voorspelling, kalibratie)"):
             raw = gather_raw_match_data(index, current_official_ranks, ratings_cache)
         dt5 = _time.perf_counter() - t0
-        _live(f"**Stap 5/6:** winkans per bord - klaar ({dt5:.1f}s), {len(raw)} borden berekend.")
-        _mark(f"5. per-bord voorspelling berekenen ({len(raw)} borden)", t0, len(raw))
+        _live(f"**Stap 5/6:** winkans per match - klaar ({dt5:.1f}s), {len(raw)} matchen berekend.")
+        _mark(f"5. per-match voorspelling berekenen ({len(raw)} matchen)", t0, len(raw))
         t0 = _time.perf_counter()
         valid_rows = [r for r in raw if r.get("our_avg") is not None and r.get("their_avg") is not None and r.get("actual_won") is not None]
         n_total_boards = len(raw)
@@ -1213,8 +1241,8 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     boards = [b for b in boards if not (set(b["pair"]) & gekende_tegenstanders)]
     if n_mirrored_dropped:
         st.caption(
-            f"{n_mirrored_dropped} bord(en) genegeerd: dit bleek dezelfde fysieke wedstrijd, maar dan "
-            "geregistreerd vanuit het perspectief van hun eigen teamgenoten (ons/tegenstander omgewisseld)."
+            f"{n_mirrored_dropped} match(en) genegeerd: dit bleek dezelfde match, maar dan "
+            "geregistreerd vanuit het perspectief van de tegenstander (ons/tegenstander omgewisseld)."
         )
     own_side_ids = set(own_side)
     current_official_ranks = {}
@@ -1242,27 +1270,31 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
     n_known_boards = len(boards)
+    # PADEL_ANALYSIS_RETRO_MATCH_WORDING_SCORE_2026-10-05: uitslag als score.
+    actual = _actual_encounter_result(boards)
     if n_known_boards < 2 or n_known_boards % 2 != 0:
         st.caption(
-            f"We kennen {n_known_boards} van de borden van deze ontmoeting - te weinig (of een oneven "
-            "aantal, wat altijd op een ontbrekend bord wijst) voor een betrouwbaar eindresultaat."
+            f"We kennen {n_known_boards} match(en) van deze ontmoeting - te weinig (of een oneven "
+            "aantal, wat altijd op een ontbrekende match wijst) voor een betrouwbaar voorspeld eindresultaat."
         )
+        if actual is not None:
+            st.markdown(
+                f"Gekende uitslag: **{actual['score_txt']}** - minstens 1 match ontbreekt nog in de data "
+                "(die speler is nog niet bijgewerkt)."
+            )
     else:
         encounter_pp = _combine_boards_to_point_probs([bp["win_probability"] for bp in pred["boards"]])
-        st.caption(f"Gebaseerd op alle {n_known_boards} gekende borden van deze ontmoeting.")
+        st.caption(f"Gebaseerd op alle {n_known_boards} gekende matchen van deze ontmoeting.")
         st.markdown(
-            f"Voorspeld (op basis van {n_known_boards} gekende borden): "
+            f"Voorspeld: "
             f":green[**{encounter_pp['p2'] * 100:.0f}% winst**] \u00b7 "
             f":orange[**{encounter_pp['p1'] * 100:.0f}% gelijk**] \u00b7 "
             f":red[**{encounter_pp['p0'] * 100:.0f}% verlies**]"
         )
-        actual = _actual_encounter_result(boards)
         if actual is None:
-            st.caption("De echte uitslag van 1 of meer van deze borden is niet gekend - geen vergelijking mogelijk.")
+            st.caption("De echte uitslag van 1 of meer van deze matchen is niet gekend - geen vergelijking mogelijk.")
         else:
-            st.markdown(
-                f"Echt: **{actual['uitkomst']}** ({actual['n_win']} van {actual['n_boards']} borden gewonnen)."
-            )
+            st.markdown(f"Echt: **{actual['uitkomst']} ({actual['score_txt']})**")
     st.divider()
     st.markdown("#### Beste alternatief (achteraf, met dezelfde waarden van toen)")
     with perf.step("retro: beste alternatief doorrekenen"):
@@ -1273,21 +1305,21 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             f"Onvoldoende eigen spelers gekend voor deze ontmoeting ({alt.get('n_players', 0)} van de nodige 4)."
         )
         dbg = alt.get("debug") or {}
-        with st.expander("Debug: welke borden/spelers zag deze berekening?", expanded=True):
+        with st.expander("Debug: welke matchen/spelers zag deze berekening?", expanded=True):
             st.caption(
-                f"Gevonden: {dbg.get('n_boards', len(dbg.get('boards', [])))} bord(en), "
+                f"Gevonden: {dbg.get('n_boards', len(dbg.get('boards', [])))} match(en), "
                 f"{len(dbg.get('players', []))} unieke speler(s): "
                 + (", ".join(name_lookup.get(p, p) for p in dbg.get("players", [])) or "(geen)")
             )
             st.dataframe(
-                [{"Bord": i + 1, "Ons koppel": " / ".join(name_lookup.get(p, p) for p in b["pair"]),
+                [{"Match": i + 1, "Ons koppel": " / ".join(name_lookup.get(p, p) for p in b["pair"]),
                   "Tegen": f"{b.get('opp1_name', '?')} / {b.get('opp2_name', '?')}", "Score": b.get("score"),
                   "Match-ID": b.get("match_id")}
                  for i, b in enumerate(dbg.get("boards", []))],
                 use_container_width=True, hide_index=True,
             )
             st.caption(
-                "Als dit minder borden toont dan de regels hierboven bij 'Per match', dan is dat de "
+                "Als dit minder matchen toont dan de regels hierboven bij 'Per match', dan is dat de "
                 "rechtstreekse oorzaak - vergelijk de 2 lijsten."
             )
     elif alt.get("reason") == "no_valid_combinations":

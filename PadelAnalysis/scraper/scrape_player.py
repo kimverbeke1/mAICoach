@@ -64,6 +64,34 @@ ghost-profielen uit 2017 e.d. oplevert.
 matches_added_this_run (het bestaande, reeds gebruikte AANTAL) blijft bestaan
 en is nu consistent gelijk aan len(new_matches_this_run), voor achterwaartse
 compatibiliteit met bestaande aanroepers die enkel de teller lazen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MERGE_VANGNET_KEEPS_NEW_2026-10-05 (op verzoek van Kim: na een
+herscrape van Nico Recour (617771) ontbrak de match van 26/09 nog steeds in
+de nabeschouwing; log: "MERGE-VANGNET: union-merge zou 7 bestaande match(es)
+laten verdwijnen (48 -> 41) ... Merge: 48 -> 48 matches (geen netto
+wijziging)" terwijl de huidige periode 6 interclubmatchen opleverde)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen; test_merge_vangnet_fix.py
+toont het op het echte document): het bestaande document bevat EXACTE
+DUBBELS (zelfde match_id, partner, tegenstanders en ronde - opgeslagen voor
+PADEL_ANALYSIS_BOARD_IDENTITY_FIX_2026-09-15; bij Carl Ide (545144) zichtbaar
+als records [0]/[4], [1]/[5], ...). In _merge_matches() vallen die dubbels
+in by_identity samen tot 1 sleutel, waardoor "merged" kleiner wordt dan de
+RUWE lengte van existing_matches. Het vangnet zag dat als dataverlies en
+viel terug op `merged = list(existing_matches)` - de ONGEWIJZIGDE oude lijst,
+dus ZONDER de nieuw gescrapete matchen. Elke nieuwe match van die speler werd
+zo bij elke run stilzwijgend weggegooid, zolang de oude dubbels bestonden.
+(Bij Carl Ide trad het vangnet niet in werking: daar vielen 4 dubbels samen
+EN kwamen 4 nieuwe matchen bij, 40 -> 40 - vandaar "geen netto wijziging"
+naast "Netto nieuwe matches deze run: 4".)
+FIX: in de vangnet-tak worden de bestaande matches nog steeds ONGEWIJZIGD
+behouden (incl. de oude dubbels - het aantal daalt dus nooit, zodat ook de
+write guard in firebase_service.py niet ingrijpt), maar elke NIEUWE match
+waarvan de identiteit nog niet in het bestaande document voorkwam, wordt er
+nu ACHTERAAN aan toegevoegd i.p.v. weggegooid. Een bestaande match met
+dezelfde identiteit wordt in deze tak niet overschreven (veilig, conservatief).
+De oude dubbels zijn onschadelijk voor de app: de nabeschouwing en de
+opstelling-reconstructie ontdubbelen per match_id + koppel.
 """
 import logging
 import sys
@@ -234,9 +262,14 @@ def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict]) -> tup
     PADEL_ANALYSIS_BOARD_IDENTITY_FIX_2026-09-15).
     VANGNET: een union-merge kan per definitie nooit minder resultaten
     opleveren dan er bestaande matches waren. Gebeurt dat toch, dan is de
-    identiteitsfunctie te grof en zouden we stilletjes historiek weggooien.
-    In dat geval behouden we de bestaande matches ongemoeid en loggen we een
-    expliciete fout, zodat het probleem zichtbaar wordt i.p.v. dataverlies.
+    identiteitsfunctie te grof (of bevat het document oude exacte dubbels)
+    en zouden we stilletjes historiek weggooien. In dat geval behouden we de
+    bestaande matches ongemoeid en loggen we een expliciete fout, zodat het
+    probleem zichtbaar wordt i.p.v. dataverlies.
+    PADEL_ANALYSIS_MERGE_VANGNET_KEEPS_NEW_2026-10-05: in die vangnet-tak
+    worden de echt NIEUWE matchen (identiteit nog niet in het bestaande
+    document) voortaan ACHTERAAN toegevoegd i.p.v. mee weggegooid - zie
+    moduledocstring.
     Returns: (merged_matches, previous_total, new_total)
     """
     existing_matches = []
@@ -253,17 +286,26 @@ def _merge_matches(existing_doc: Optional[dict], new_matches: list[dict]) -> tup
         logger.error(
             f"MERGE-VANGNET: union-merge zou {verloren} bestaande match(es) laten "
             f"verdwijnen ({len(existing_matches)} -> {len(merged)}). Dat kan niet "
-            f"kloppen bij een union; de match-identiteit is te grof. Bestaande "
-            f"matches worden behouden."
+            f"kloppen bij een union; de match-identiteit is te grof of het document "
+            f"bevat oude dubbels. Bestaande matches worden behouden."
         )
-        behouden: dict = {}
-        for m in existing_matches:
-            behouden[_match_identity(m)] = m
-        for m in merged:
-            behouden.setdefault(_match_identity(m), m)
-        merged = list(behouden.values())
-        if len(merged) < len(existing_matches):
-            merged = list(existing_matches)
+        # PADEL_ANALYSIS_MERGE_VANGNET_KEEPS_NEW_2026-10-05: bestaande lijst
+        # ONGEWIJZIGD behouden + echt nieuwe matchen ACHTERAAN toevoegen.
+        existing_identities = {_match_identity(m) for m in existing_matches}
+        echt_nieuw = []
+        gezien_nieuw = set()
+        for m in new_matches:
+            ident = _match_identity(m)
+            if ident in existing_identities or ident in gezien_nieuw:
+                continue
+            gezien_nieuw.add(ident)
+            echt_nieuw.append(m)
+        merged = list(existing_matches) + echt_nieuw
+        if echt_nieuw:
+            logger.info(
+                f"MERGE-VANGNET: {len(echt_nieuw)} nieuwe match(es) toegevoegd bovenop de "
+                f"ongewijzigde bestaande lijst."
+            )
     return merged, len(existing_matches), len(merged)
 # ---------------------------------------------------------------------------
 # PADEL_ANALYSIS_NEW_MATCHES_THIS_RUN_2026-09-20: zie module-docstring.

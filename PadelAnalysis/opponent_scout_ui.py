@@ -115,6 +115,33 @@ verschijnt nu als aparte stap "Firestore: alle spelersdocumenten
 (global_docs)" in het laadtijd-paneel.
 Hashing/pickling (bv. als het ooit aan een @st.cache_data-functie wordt
 meegegeven) levert een gewone, volledig geladen dict op.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SYNC_FULL_ROSTER_2026-10-05 (op verzoek van Kim: "bij
+opstelling analyse heb ik ook eens haal nieuwe wedstrijden gedaan [...]
+Daar zie ik trouwens dat je 5 spelers scraped. Geen idee of je de andere
+dan later ook nog scrapete want er zijn er meer dan 5.")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen): de knop "Ontbrekende
+gegevens ophalen / Controleren op nieuwe wedstrijden" in render_scout_header()
+kreeg bundle["unique_players"] mee - en die bundle komt van
+osc.scout_opponent() met lookback=1 (standaard): ENKEL de spelers uit de
+LAATSTE ontmoeting(en) van de tegenstander. De volledige roster (alle
+spelers die dit seizoen voor hen speelden) wordt pas NADIEN, in
+page_lineup_lab.py via lineup_scout._merge_full_opponent_roster(),
+aangevuld - te laat voor deze knop. De overige spelers werden dus NIET
+mee gescrapet; ze werden enkel later ververst als de nachtelijke run dat
+toevallig deed.
+FIX: _full_roster_for_sync() bepaalt, voor DEZELFDE tegenstander, de
+spelers uit ALLE dit seizoen gespeelde ontmoetingen (zelfde aanroep als
+lineup_scout._scout_team_all_fixtures(), met de gedeelde proces-brede
+fetch-cache, dus zonder dubbele fetches) en voegt ze samen met
+bundle["unique_players"]. De sync-knop krijgt nu die VOLLEDIGE lijst.
+Gecachet per (ploeg, datum) in st.session_state; faalt het, dan valt het
+stil terug op de oude, kortere lijst.
+VERDUIDELIJKING (geen wijziging): deze knop hoort bij 'Volgende match' en
+werkt dus ALTIJD op de eerstvolgende tegenstander. Voor een andere ploeg
+uit de poule staat dezelfde knop in het tabblad 'Andere ploegen', bij de
+gekozen ploeg.
 """
 from __future__ import annotations
 import time
@@ -151,23 +178,17 @@ try:
 except Exception:  # pragma: no cover
     pss = None
 PADELSTAT_WORKFLOW_FILE = "refresh-padelstat.yml"
-
 # PADEL_ANALYSIS_SCOUT_HEADER_PREFETCH_2026-09-29 - zie moduledocstring.
 try:
     import perf_timing as _perf
 except Exception:  # noqa: BLE001  pragma: no cover
     _perf = None
-
 _ROSTER_READS = ("get_player", "get_player_profile", "get_padelstat_rating")
-
-
 def _step(label: str):
     if _perf is None:
         from contextlib import nullcontext
         return nullcontext()
     return _perf.step(label)
-
-
 def _prefetch_roster_reads(unique_players: list) -> None:
     """Leest de per-speler-Firestore-reads van deze ploeg parallel voor in
     de gedeelde leescache. Doet niets als die niet geinstalleerd is."""
@@ -181,8 +202,6 @@ def _prefetch_roster_reads(unique_players: list) -> None:
         functie(_ROSTER_READS, pids)
     except Exception:  # noqa: BLE001 - voorophalen mag nooit de pagina breken
         pass
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_all_player_docs() -> dict:
     try:
@@ -190,66 +209,44 @@ def _load_all_player_docs() -> dict:
         return {d.id: (d.to_dict() or {}) for d in docs}
     except Exception:
         return {}
-
-
 def load_all_player_docs() -> dict:
     return _load_all_player_docs()
-
-
 # PADEL_ANALYSIS_LAZY_GLOBAL_DOCS_2026-09-29 - zie moduledocstring.
 from collections.abc import Mapping as _Mapping
-
-
 class _LazyAllPlayerDocs(_Mapping):
     """Alleen-lezen Mapping rond _load_all_player_docs(), die pas laadt bij
     het eerste echte gebruik. Elke lees-operatie gaat via _data()."""
-
     __slots__ = ("_cache",)
-
     def __init__(self) -> None:
         self._cache = None
-
     def _data(self) -> dict:
         if self._cache is None:
             with _step("Firestore: alle spelersdocumenten (global_docs)"):
                 self._cache = _load_all_player_docs() or {}
         return self._cache
-
     def __getitem__(self, key):
         return self._data()[key]
-
     def __iter__(self):
         return iter(self._data())
-
     def __len__(self) -> int:
         return len(self._data())
-
     def __bool__(self) -> bool:
         return bool(self._data())
-
     def __contains__(self, key) -> bool:
         return key in self._data()
-
     def get(self, key, default=None):
         return self._data().get(key, default)
-
     def keys(self):
         return self._data().keys()
-
     def values(self):
         return self._data().values()
-
     def items(self):
         return self._data().items()
-
     def __reduce__(self):
         return (dict, (dict(self._data()),))
-
     def __repr__(self) -> str:
         status = "niet geladen" if self._cache is None else f"{len(self._cache)} spelers"
         return f"<_LazyAllPlayerDocs {status}>"
-
-
 def _is_known(player_id: str) -> bool:
     try:
         if fb.get_player_profile(player_id):
@@ -261,28 +258,20 @@ def _is_known(player_id: str) -> bool:
         return bool(doc.get("matches"))
     except Exception:
         return False
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_is_known(player_id: str) -> bool:
     return _is_known(player_id)
-
-
 def clear_is_known_cache() -> None:
     try:
         _cached_is_known.clear()
     except Exception:
         pass
-
-
 def _unknown_players(bundle: dict) -> list[dict]:
     return [
         player
         for player in (bundle.get("unique_players", []) or [])
         if not _cached_is_known(player["user_id"])
     ]
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _data_completeness(player_id: str) -> dict:
     doc, doc_ok = {}, True
@@ -318,8 +307,6 @@ def _data_completeness(player_id: str) -> dict:
         "klassement_uncertain": klassement_uncertain,
         "padelstat_uncertain": padelstat_uncertain,
     }
-
-
 def _has_incomplete_data(player_id: str) -> tuple[bool, list[str]]:
     c = _data_completeness(player_id)
     redenen = []
@@ -336,8 +323,6 @@ def _has_incomplete_data(player_id: str) -> tuple[bool, list[str]]:
     elif c.get("padelstat_uncertain"):
         redenen.append("playing strength kon niet gecontroleerd worden (probeer later opnieuw)")
     return bool(redenen), redenen
-
-
 def _ensure_klassement(player_ids: list[str], progress_label: str = "Klassement") -> None:
     if not is_scraping_available():
         st.caption(
@@ -385,8 +370,6 @@ def _ensure_klassement(player_ids: list[str], progress_label: str = "Klassement"
     progress.progress(1.0, text=f"{progress_label}: klaar.")
     _load_all_player_docs.clear()
     osc.clear_known_matches_cache()
-
-
 def _ensure_padelstat(
     players: list[dict],
     progress_label: str = "Padelstat",
@@ -451,8 +434,6 @@ def _ensure_padelstat(
             result["fout"] += 1
     progress.progress(1.0, text=f"{progress_label}: klaar.")
     return result
-
-
 def _ensure_fresh_padelstat_for_roster(
     unique_players: list[dict], auto_scrape: bool, team_name: Optional[str] = None,
 ) -> None:
@@ -476,8 +457,6 @@ def _ensure_fresh_padelstat_for_roster(
         st.write(f"🎯 Playing strength-verversing gestart voor {len(unique_players)} speler(s) (meestal 1-3 min).")
     else:
         st.write("⚠️ Playing strength-verversing kon niet gestart worden.")
-
-
 def _run_scout_and_scrape(
     fixtures: list[dict],
     opp: dict,
@@ -551,8 +530,6 @@ def _run_scout_and_scrape(
         _ensure_fresh_padelstat_for_roster(known_players, auto_scrape=auto_scrape, team_name=opp.get("name"))
         status.update(label="Analyse afgerond", state="complete")
         return bundle
-
-
 def _run_full_team_refresh(
     unique_players: list[dict],
     lookback_periods: int = 3,
@@ -593,8 +570,6 @@ def _run_full_team_refresh(
     result["klassement_gestart"] = True
     osc.clear_known_matches_cache()
     return result
-
-
 def _render_unified_team_sync_trigger(
     unique_players: list[dict], key_prefix: str, team_name: Optional[str] = None,
 ) -> dict:
@@ -627,7 +602,7 @@ def _render_unified_team_sync_trigger(
             f"{n_incomplete} speler(s) die nog effectief onvolledig zijn."
         )
     else:
-        label = "🔄 Controleren op nieuwe wedstrijden"
+        label = f"🔄 Controleren op nieuwe wedstrijden ({len(all_ids)} speler(s))"
         help_text = (
             "Deze ploeg is al volledig gekend. Controleert enkel of er intussen nieuwe "
             "wedstrijden bijkwamen (playing strength wordt sowieso al automatisch bij elke "
@@ -701,8 +676,45 @@ def _render_unified_team_sync_trigger(
         osc.clear_known_matches_cache()
         st.rerun()
     return {"missing_matchdata": len(missing_matchdata_ids), "missing_klassement": len(missing_klassement_ids)}
-
-
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_SYNC_FULL_ROSTER_2026-10-05 - zie moduledocstring.
+# ─────────────────────────────────────────────
+def _full_roster_for_sync(fixtures: list[dict], opp: dict, next_match: dict, bundle: dict) -> list[dict]:
+    """Spelers uit ALLE dit seizoen gespeelde ontmoetingen van deze
+    tegenstander, samengevoegd met bundle["unique_players"] (die enkel de
+    laatste ontmoeting(en) bevat). Gecachet per (ploeg, datum); faalt stil
+    en geeft dan de oude, kortere lijst terug."""
+    basis = list(bundle.get("unique_players") or [])
+    ploeg_id = str(opp.get("ploeg_id") or "")
+    before_date = (next_match or {}).get("date_text") or ""
+    if not ploeg_id or not fixtures:
+        return basis
+    cache_key = f"osu_full_roster_sync_{ploeg_id}_{before_date}"
+    extra = st.session_state.get(cache_key)
+    if extra is None:
+        extra = []
+        try:
+            with _step("scout: volledige roster voor sync-knop"):
+                played = osc.get_opponent_previous_fixtures(fixtures, ploeg_id, before_date, lookback=99)
+                n = len(played)
+                if n:
+                    full_bundle = osc.scout_opponent(
+                        fixtures, opp.get("name") or "", ploeg_id, before_date,
+                        lookback=n, min_players=0, max_lookback=n,
+                        fetched_cache=osc.get_shared_fetch_cache(ploeg_id),
+                    )
+                    extra = list(full_bundle.get("unique_players") or [])
+        except Exception:  # noqa: BLE001 - nooit de pagina breken
+            extra = []
+        st.session_state[cache_key] = extra
+    gezien = {str(p.get("user_id")) for p in basis if p.get("user_id")}
+    samen = list(basis)
+    for p in extra:
+        uid = str(p.get("user_id") or "")
+        if uid and uid not in gezien:
+            gezien.add(uid)
+            samen.append(p)
+    return samen
 def render_scout_header(
     sel_player_id: str,
     fixtures: list[dict],
@@ -769,8 +781,10 @@ def render_scout_header(
                 ),
             ):
                 with st.status("Volledige ploeg verversen...", expanded=True) as status:
+                    # PADEL_ANALYSIS_SYNC_FULL_ROSTER_2026-10-05: volledige roster.
                     refresh_result = _run_full_team_refresh(
-                        bundle["unique_players"], lookback_periods=3, force=False, team_name=opp.get("name"),
+                        _full_roster_for_sync(fixtures, opp, next_match, bundle),
+                        lookback_periods=3, force=False, team_name=opp.get("name"),
                     )
                     p = refresh_result["padelstat"]
                     st.write(
@@ -793,30 +807,29 @@ def render_scout_header(
         _prefetch_roster_reads(bundle["unique_players"])
     if bundle:
         if not can_scrape and bundle.get("unique_players"):
+            # PADEL_ANALYSIS_SYNC_FULL_ROSTER_2026-10-05: de knop werkt nu op
+            # de VOLLEDIGE seizoensroster i.p.v. enkel de laatste ontmoeting.
+            sync_players = _full_roster_for_sync(fixtures, opp, next_match, bundle)
+            if len(sync_players) > len(bundle["unique_players"]):
+                _prefetch_roster_reads(sync_players)
             with _step("scout: volledigheidscheck + sync-knop"):
                 _render_unified_team_sync_trigger(
-                    bundle["unique_players"], key_prefix=f"scout_{sel_player_id}", team_name=opp.get("name"),
+                    sync_players, key_prefix=f"scout_{sel_player_id}", team_name=opp.get("name"),
                 )
     if not bundle or not bundle.get("unique_players"):
         return (bundle, opp) if bundle else None
     return bundle, opp
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_docs_for_players(player_ids: tuple) -> dict:
     try:
         return ll.get_docs_for_players(list(player_ids))
     except Exception:
         return {}
-
-
 def clear_opponent_docs_cache() -> None:
     try:
         _cached_docs_for_players.clear()
     except Exception:
         pass
-
-
 def prepare_team_docs(
     bundle: dict, sel_player_id: str,
 ) -> tuple[dict, dict]:
@@ -835,8 +848,6 @@ def prepare_team_docs(
     # (enkel bij een herbouw van het team-rapport) - zie moduledocstring.
     global_docs = _LazyAllPlayerDocs()
     return all_docs, global_docs
-
-
 def render_scout_block(
     sel_player_id: str,
     fixtures: list[dict],
@@ -864,6 +875,4 @@ def render_scout_block(
         key_prefix=f"scout_team_{sel_player_id}",
     )
     return bundle, opp
-
-
 render_unified_team_sync_trigger = _render_unified_team_sync_trigger
