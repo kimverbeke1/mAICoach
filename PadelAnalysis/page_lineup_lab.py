@@ -275,6 +275,19 @@ bestaan - enkel de TOEGANG tot dit overzicht via deze pagina is weg, geen
 functionaliteit verwijderd of data gewist. Mocht dit overzicht later alsnog
 nodig blijken, volstaat het om SECTION_SAVED terug toe te voegen aan
 _SECTIONS en de if/elif-keten.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05 (op verzoek van Kim:
+"achteraf bekeken is de tab 'andere ploeg' niet relevant. Als gebruiker wil
+je by default de volgende match zien om te analyseren maar je zou daar ook
+de andere ploegen van je poule moeten kunnen analyseren, enkel de ploegen
+waar je nog tegen moet spelen.")
+--------------------------------------------------------------------------
+De sectie "Andere ploegen" (SECTION_POULE) is weg uit de sectiekiezer. In
+"Analyseren" kies je nu zelf de tegenstander uit de NOG TE SPELEN matchen
+van je eigen ploeg (standaard de eerstvolgende) - zie opponent_scout_ui.py,
+PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05. poule_teams_ui.py blijft
+bestaan maar wordt niet meer aangeroepen. Een oude URL met
+?lineup_section=Andere ploegen valt vanzelf terug op "Analyseren".
 """
 import streamlit as st
 from dashboard_common import (
@@ -347,7 +360,9 @@ SECTION_POULE = "Andere ploegen"
 SECTION_RETRO = "Nabeschouwing"  # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03
 # PADEL_ANALYSIS_REMOVE_SAVED_ANALYSES_TAB_2026-10-05: SECTION_SAVED
 # ("Opgeslagen analyses") is uit deze lijst verwijderd - zie moduledocstring.
-_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_RETRO]
+# PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05: "Andere ploegen" is uit
+# de sectiekiezer gehaald - de tegenstanderkeuze zit nu in "Analyseren".
+_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_RETRO]
 # PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04: zie moduledocstring.
 _SECTION_QUERY_KEY = "lineup_section"
 def _initial_section_index(radio_key: str) -> int:
@@ -452,6 +467,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
         before_date = (next_match or {}).get("date_text") or ""
     except Exception:
         before_date = ""
+    # PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05: datum van de in
+    # 'Analyseren' GEKOZEN match heeft voorrang (zie opponent_scout_ui.py).
+    before_date = st.session_state.get(f"scout_match_date_{opp.get('ploeg_id')}") or before_date
     # PADEL_ANALYSIS_LINEUP_SNAPSHOT_2026-10-03: datum van de volgende ontmoeting, voor de
     # momentopname die het planscherm bewaart (nabeschouwing met de waarden van toen).
     st.session_state[f"next_match_date_{opp.get('ploeg_id')}"] = before_date
@@ -896,13 +914,6 @@ def page_lineup_lab():
                 "is nog niet gekend (dit wordt normaal automatisch aangevuld via de dagelijkse "
                 "update, of open de sectie 'Analyseren' en laad 'Volgende match')."
             )
-    elif section == SECTION_POULE:
-        with perf.step("SECTIE Andere ploegen (poule_teams_ui)"):
-            try:
-                import poule_teams_ui as ptu
-                ptu.render_poule_teams_tab(str(sel_player_id), name_lookup_global, go_to_player_fn=_go_to_player)
-            except Exception as exc:
-                st.warning(f"Kon deze sectie niet laden: {exc}")
     elif section == SECTION_RETRO:
         # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: hangt NIET af van de scout-
         # keten - werkt rechtstreeks op de al gescrapete eigen matchdata.

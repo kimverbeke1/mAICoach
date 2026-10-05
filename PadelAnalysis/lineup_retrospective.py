@@ -158,6 +158,21 @@ Enkel ZICHTBARE TEKST gewijzigd (interne variabelen/functienamen met
     data"), i.p.v. enkel te melden dat er te weinig zijn.
 _actual_encounter_result() geeft daarvoor ook n_lost en een score-tekst
 terug; de bestaande velden (n_win, n_boards, uitkomst) blijven ongewijzigd.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_CALIBRATION_PROPOSAL_2026-10-05 (op verzoek van Kim: "Ik zou
+ook graag de kalibratiewaardes zien. Dan bij bereken kalibratie een voorstel
+die je al dan niet kan accepteren.")
+--------------------------------------------------------------------------
+  - Bovenaan de kalibratiesectie staat nu ALTIJD (ook zonder berekening)
+    een tabel met de huidige waarden: winkansfactor, bias, vorm-gewicht en
+    wanneer ze laatst aangepast werden.
+  - "Bereken kalibratie" berekent nu in 1 klik zowel de score van de
+    huidige waarden ALS een voorstel (find_best_scale_and_bias - voorheen
+    een aparte knop "Zoek beste model"). Het voorstel staat naast de
+    huidige waarden in een tabel, met "Voorstel accepteren" (bewaart in
+    Firestore) en "Voorstel negeren" (niets wijzigt). Zijn de huidige
+    waarden al de beste, dan staat er enkel een bevestiging.
+  - De debug-tabel met stap-tijden staat nu ingeklapt onderaan.
 """
 import datetime as _dt
 import math
@@ -1015,6 +1030,7 @@ def _load_saved_scale() -> dict:
                 "scale": float(data["win_probability_scale"]),
                 "bias": float(data.get("win_probability_bias") or 0.0),
                 "form_weight": float(data.get("win_probability_form_weight") or 0.0),
+                "saved_at": data.get("saved_at"),
             }
     except Exception:  # noqa: BLE001
         pass
@@ -1141,12 +1157,22 @@ def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str
                 "Individuele vorm nog niet beschikbaar - klik onderaan de pagina op 'Bereken kalibratie' "
                 "om dit (en de modelcontrole) te berekenen."
             )
+def _format_saved_at(value) -> str:
+    try:
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%d/%m/%Y %H:%M")
+    except Exception:  # noqa: BLE001
+        return str(value)
 def _apply_scale_callback(new_scale: float, new_bias: float = 0.0, new_form_weight: float = 0.0) -> None:
     st.session_state["retro_scale"] = new_scale
     st.session_state["retro_bias"] = new_bias
     st.session_state["retro_form_weight"] = new_form_weight
     st.session_state.pop("retro_best_scale_bias_result", None)
+    st.session_state["retro_scale_saved_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     _save_scale_to_firestore(new_scale, new_bias, new_form_weight)
+def _reject_proposal_callback() -> None:
+    """PADEL_ANALYSIS_CALIBRATION_PROPOSAL_2026-10-05: voorstel negeren -
+    de huidige instelling blijft ongewijzigd."""
+    st.session_state.pop("retro_best_scale_bias_result", None)
 def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown('<div class="section-header">Nabeschouwing</div>', unsafe_allow_html=True)
     sel_player_id = str(sel_player_id)
@@ -1159,6 +1185,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.session_state["retro_scale"] = saved["scale"]
             st.session_state["retro_bias"] = saved.get("bias", 0.0)
             st.session_state["retro_form_weight"] = saved.get("form_weight", 0.0)
+            st.session_state["retro_scale_saved_at"] = saved.get("saved_at")
     scale = st.session_state.get("retro_scale", _DEFAULT_SCALE)
     bias = st.session_state.get("retro_bias", 0.0)
     form_weight = st.session_state.get("retro_form_weight", 0.0)
@@ -1348,10 +1375,20 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.caption("De effectief gespeelde opstelling was (zo goed als) de beste mogelijke keuze.")
     st.divider()
     st.markdown("#### Kalibratie over alle gekende matchen (enkel padelstat)")
+    # PADEL_ANALYSIS_CALIBRATION_PROPOSAL_2026-10-05 - zie moduledocstring.
+    opgeslagen = st.session_state.get("retro_scale_saved_at")
+    st.markdown("**Huidige kalibratiewaarden** (gelden ook voor 'Per match' en 'Beste alternatief' hierboven):")
+    st.dataframe(
+        [{"Winkansfactor (schaal)": f"{scale:.0f}", "Bias": f"{bias:+.0f}",
+          "Vorm-gewicht": f"{form_weight:+.2f}",
+          "Laatst aangepast": _format_saved_at(opgeslagen) if opgeslagen else "standaardwaarde (nooit aangepast)"}],
+        use_container_width=True, hide_index=True,
+    )
     st.caption(
-        "Dit doorzoekt ALLE interclub-matchen in de database (niet enkel die van "
-        f"{sel_naam}) - de eerste keer (of na 1 uur) duurt dit even, daarna is het binnen het uur "
-        "vrijwel instant dankzij een gedeelde, opgeslagen cache."
+        "'Bereken kalibratie' doorzoekt ALLE interclub-matchen in de database (niet enkel die van "
+        f"{sel_naam}), toont hoe goed de huidige waarden scoren en doet een voorstel voor betere waarden, "
+        "dat je zelf kan accepteren of negeren. De eerste keer (of na 1 uur) duurt dit even, daarna is "
+        "het binnen het uur vrijwel instant dankzij een gedeelde, opgeslagen cache."
     )
     if st.button("Bereken kalibratie (over alle gekende matchen)", key="retro_compute_calibration"):
         import time as _time
@@ -1362,29 +1399,18 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             st.session_state["retro_all_valid_data"] = gather_all_valid_match_data(
                 profiles, debug_timings=debug_timings, live_placeholder=live_placeholder,
             )
+        rows_voor_voorstel = st.session_state["retro_all_valid_data"].get("full_padelstat_rows") or []
+        if rows_voor_voorstel:
+            live_placeholder.markdown("**Voorstel berekenen** (schaal x bias x vorm-gewicht doorrekenen)...")
+            t0 = _time.perf_counter()
+            with perf.step("retro: voorstel berekenen (find_best_scale_and_bias)"):
+                st.session_state["retro_best_scale_bias_result"] = find_best_scale_and_bias(rows_voor_voorstel)
+            debug_timings.append({"label": "7. voorstel berekenen", "seconds": _time.perf_counter() - t0, "count": len(rows_voor_voorstel)})
         st.session_state["retro_calibration_debug"] = {
             "steps": debug_timings, "total_seconds": _time.perf_counter() - _t_totaal,
             "n_profiles": len(profiles),
         }
         st.rerun()
-    debug_info = st.session_state.get("retro_calibration_debug")
-    if debug_info:
-        with st.expander(
-            f"Debug: laatste berekening duurde {debug_info['total_seconds']:.1f}s "
-            f"({debug_info['n_profiles']} profielen in de database)", expanded=True,
-        ):
-            st.dataframe(
-                [{"Stap": s["label"], "Tijd (s)": f"{s['seconds']:.2f}",
-                  "Aandeel": f"{(s['seconds'] / debug_info['total_seconds'] * 100):.0f}%" if debug_info["total_seconds"] else "-"}
-                 for s in debug_info["steps"]],
-                use_container_width=True, hide_index=True,
-            )
-            traagste = max(debug_info["steps"], key=lambda s: s["seconds"]) if debug_info["steps"] else None
-            if traagste and debug_info["total_seconds"] > 3:
-                st.warning(
-                    f"Traagste stap: **{traagste['label']}** ({traagste['seconds']:.1f}s, "
-                    f"{traagste['seconds'] / debug_info['total_seconds'] * 100:.0f}% van de totale tijd)."
-                )
     if all_data is None:
         st.info("Nog niet berekend in deze sessie - klik hierboven op de knop.")
         return
@@ -1395,17 +1421,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             "niet berekend worden."
         )
         return
-    form_txt = f", vorm-gewicht {form_weight:+.2f}" if form_weight else ""
-    st.markdown(f"Huidige instelling: **factor {scale:.0f}**, **bias {bias:+.0f}**{form_txt}.")
-    st.caption(
-        "Deze instelling geldt OOK voor 'Per match' en 'Beste alternatief' hierboven. Wijzig uitsluitend "
-        "via 'Zoek beste model' hieronder + 'Toepassen'."
-    )
     with perf.step("retro: kalibratie herberekenen (score_raw_at_scale)"):
         stats = calibration_stats(score_raw_at_scale(raw_rows, scale, bias=bias, form_weight=form_weight, form_adjustment=form_adjustment))
     if not stats:
         st.info("Nog geen matchen met zowel een gekende winkans als een gekende uitslag.")
         return
+    st.markdown("##### Hoe goed scoren de huidige waarden?")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Brier-score", f"{stats['brier']:.3f}", help="Lager = beter. 0.25 = niet beter dan een muntstuk.")
@@ -1413,11 +1434,6 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         st.metric("Accuraatheid", f"{stats['accuracy'] * 100:.0f}%", help="Hoe vaak de favoriet (>=50%) ook echt won.")
     with c3:
         st.metric("Aantal matchen", f"{stats['n']}")
-    if stats["brier"] >= 0.245:
-        st.warning(
-            f"Een Brier-score van {stats['brier']:.3f} ligt zeer dicht bij 0.25 - amper beter dan een muntje "
-            "opgooien. Probeer hieronder 'Beste model zoeken'."
-        )
     st.caption(
         f"Gemiddeld voorspeld: {stats['mean_predicted'] * 100:.0f}% - gemiddeld werkelijk gewonnen: "
         f"{stats['mean_actual'] * 100:.0f}%."
@@ -1429,41 +1445,49 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             use_container_width=True, hide_index=True,
         )
         st.caption("Idealiter liggen 'Gem. voorspeld' en 'Werkelijk gewonnen' per rij dicht bij elkaar.")
-        hoogste_bin = stats["bins"][-1] if stats["bins"] else None
-        if hoogste_bin and abs(hoogste_bin["gem_voorspeld"] - hoogste_bin["werkelijk"]) >= 8:
-            st.caption(
-                f"Let op: de hoogste kansklasse ({hoogste_bin['bereik']}) wijkt het meest af "
-                f"({hoogste_bin['gem_voorspeld']:.0f}% voorspeld tegenover {hoogste_bin['werkelijk']:.0f}% werkelijk)."
-            )
-    st.divider()
-    st.markdown("##### Beste model zoeken (schaal + bias + individuele vorm)")
-    st.caption(
-        "Zoekt een schaalfactor, een vaste bias-verschuiving EN hoeveel gewicht de sterkte-gecorrigeerde "
-        "individuele vorm van elke speler krijgt. form_weight=0 zit altijd in de zoekruimte, dus dit kan "
-        "nooit slechter zijn dan zonder vorm-term."
-    )
-    if st.button("Zoek beste model (schaal + bias + vorm)", key="retro_find_best_scale_bias"):
-        with perf.step("retro: beste model zoeken (find_best_scale_and_bias)"):
-            with st.spinner("Rooster van factor x bias x vorm-gewicht doorrekenen (kan even duren)..."):
-                st.session_state["retro_best_scale_bias_result"] = find_best_scale_and_bias(raw_rows)
     result2 = st.session_state.get("retro_best_scale_bias_result")
     if result2 and result2.get("best"):
         best2 = result2["best"]
         verbetering = stats["brier"] - best2["brier"]
-        form_part = f", vorm-gewicht **{best2['form_weight']:+.2f}**" if best2.get("form_weight") else ""
-        st.info(
-            f"Voorstel: factor **{best2['scale']}**, bias **{best2['bias']:+.0f}**{form_part} - Brier "
-            f"**{best2['brier']:.3f}** (huidig: {stats['brier']:.3f}, verbetering: {verbetering:+.3f})."
+        st.markdown("##### Voorstel")
+        st.dataframe(
+            [
+                {"": "Huidig", "Winkansfactor": f"{scale:.0f}", "Bias": f"{bias:+.0f}",
+                 "Vorm-gewicht": f"{form_weight:+.2f}", "Brier-score": f"{stats['brier']:.3f}"},
+                {"": "Voorstel", "Winkansfactor": f"{best2['scale']:.0f}", "Bias": f"{best2['bias']:+.0f}",
+                 "Vorm-gewicht": f"{best2.get('form_weight', 0.0):+.2f}", "Brier-score": f"{best2['brier']:.3f}"},
+            ],
+            use_container_width=True, hide_index=True,
         )
-        if best2.get("form_weight"):
+        zelfde = (
+            float(best2["scale"]) == float(scale) and float(best2["bias"]) == float(bias)
+            and float(best2.get("form_weight", 0.0)) == float(form_weight)
+        )
+        if zelfde or verbetering <= 0:
+            st.success("De huidige waarden zijn al de beste - niets aan te passen.")
+        else:
             st.caption(
-                "De vorm-term gaf hier een meetbare verbetering - individuele vorm (gecorrigeerd voor "
-                "tegenstandersterkte) kan het model dus verbeteren."
+                f"Verbetering van de Brier-score: {verbetering:+.3f} (lager is beter)."
+                + (" Kleine verbetering - accepteren is optioneel." if verbetering < 0.005 else "")
             )
-        elif verbetering < 0.005:
-            st.caption("De verbetering is klein - noch bias noch vorm lijken hier veel extra te helpen.")
-        st.button(
-            f"Toepassen: factor {best2['scale']}, bias {best2['bias']:+.0f}, vorm {best2.get('form_weight', 0.0):+.2f}",
-            key="retro_apply_best_scale_bias",
-            on_click=_apply_scale_callback, args=(best2["scale"], best2["bias"], best2.get("form_weight", 0.0)),
-        )
+            ca, cn = st.columns(2)
+            with ca:
+                st.button(
+                    "Voorstel accepteren", key="retro_accept_proposal", type="primary",
+                    on_click=_apply_scale_callback,
+                    args=(best2["scale"], best2["bias"], best2.get("form_weight", 0.0)),
+                )
+            with cn:
+                st.button("Voorstel negeren", key="retro_reject_proposal", on_click=_reject_proposal_callback)
+    debug_info = st.session_state.get("retro_calibration_debug")
+    if debug_info:
+        with st.expander(
+            f"Debug: laatste berekening duurde {debug_info['total_seconds']:.1f}s "
+            f"({debug_info['n_profiles']} profielen in de database)", expanded=False,
+        ):
+            st.dataframe(
+                [{"Stap": s["label"], "Tijd (s)": f"{s['seconds']:.2f}",
+                  "Aandeel": f"{(s['seconds'] / debug_info['total_seconds'] * 100):.0f}%" if debug_info["total_seconds"] else "-"}
+                 for s in debug_info["steps"]],
+                use_container_width=True, hide_index=True,
+            )

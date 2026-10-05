@@ -142,6 +142,18 @@ VERDUIDELIJKING (geen wijziging): deze knop hoort bij 'Volgende match' en
 werkt dus ALTIJD op de eerstvolgende tegenstander. Voor een andere ploeg
 uit de poule staat dezelfde knop in het tabblad 'Andere ploegen', bij de
 gekozen ploeg.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05 (op verzoek van Kim: het
+tabblad 'Andere ploegen' is niet relevant; in 'Analyseren' wil je standaard
+de volgende match zien, maar ook elke andere ploeg uit je poule waar je NOG
+tegen moet spelen kunnen analyseren)
+--------------------------------------------------------------------------
+render_scout_header() toont nu een keuzelijst met enkel de nog te spelen
+matchen van de eigen ploeg (standaard de eerstvolgende). De gekozen match
+vervangt 'next_match' - scout_key, opgeslagen analyse, sync-knop en de
+volledige opstelling-analyse werken dus ongewijzigd, maar op de gekozen
+tegenstander. Elke match heeft zijn eigen scout_key, dus een eerder
+berekende analyse per tegenstander blijft bewaard bij het wisselen.
 """
 from __future__ import annotations
 import time
@@ -715,6 +727,30 @@ def _full_roster_for_sync(fixtures: list[dict], opp: dict, next_match: dict, bun
             gezien.add(uid)
             samen.append(p)
     return samen
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05 - zie moduledocstring.
+# ─────────────────────────────────────────────
+def _pick_upcoming_fixture(team_fixtures: list[dict], default_fx: dict, own_ploeg_id: str,
+                           sel_player_id: str) -> dict:
+    """Keuzelijst met ENKEL de nog te spelen matchen van de eigen ploeg
+    (standaard de eerstvolgende). Bij 1 resterende match: geen keuzelijst.
+    Alle verdere logica (scout_key, analyse, opstelling) werkt ongewijzigd
+    op de gekozen match, omdat die gewoon als 'next_match' doorgegeven wordt."""
+    upcoming = [fx for fx in (team_fixtures or []) if not fx.get("played")]
+    if default_fx not in upcoming:
+        upcoming = [default_fx] + upcoming
+    if len(upcoming) <= 1:
+        return default_fx
+    def _label(fx):
+        o = ss.opponent_of(fx, own_ploeg_id) or {}
+        volgende = " (volgende match)" if fx is default_fx else ""
+        return f"{fx.get('date_text', '?')} - {o.get('name', '?')}{volgende}"
+    labels = [_label(fx) for fx in upcoming]
+    keuze = st.selectbox(
+        "Tegenstander om te analyseren (enkel nog te spelen matchen)", labels,
+        index=upcoming.index(default_fx), key=f"opp_pick_upcoming_{sel_player_id}",
+    )
+    return upcoming[labels.index(keuze)]
 def render_scout_header(
     sel_player_id: str,
     fixtures: list[dict],
@@ -726,8 +762,14 @@ def render_scout_header(
     if not next_match:
         st.success("Geen nog te spelen wedstrijden gevonden voor dit schema.")
         return None
+    # PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05 - zie moduledocstring.
+    next_match = _pick_upcoming_fixture(team_fixtures, next_match, own_ploeg_id, sel_player_id)
     opp = ss.opponent_of(next_match, own_ploeg_id)
     opp["spelgroep_id"] = next_match.get("spelgroep_id")
+    # PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05: datum van de GEKOZEN
+    # match, zodat page_lineup_lab.py de historiek van de tegenstander tot
+    # die datum gebruikt (i.p.v. hun eigen eerstvolgende match).
+    st.session_state[f"scout_match_date_{opp.get('ploeg_id')}"] = next_match.get("date_text") or ""
     st.markdown(
         f"**{next_match['date_text']}** - tegen **{opp['name']}** "
         f"({next_match.get('poule_label', '')})"
