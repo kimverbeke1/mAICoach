@@ -557,8 +557,10 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
     with perf.step("eigen spelers: parallel voorophalen"):
         prefetch_own_player_reads(available_ids)
     official_ranks_for_suggestion = _build_own_official_ranks_strict(available_ids)
+    # PADEL_ANALYSIS_RULES_PER_OWN_TEAM_2026-10-05: reglement per EIGEN ploeg
+    # (was per tegenstander) - zie lineup_rules.py.
     tournament_rules_dict, rules_label = _render_tournament_rules_selector(
-        opp["ploeg_id"], sel_player_id,
+        own_ploeg_id or opp["ploeg_id"], sel_player_id,
         available_official_ranks=[official_ranks_for_suggestion.get(pid) for pid in available_ids],
     )
     # PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29: formaat uit het reglement, niet geraden.
