@@ -34,6 +34,10 @@ page_lineup_lab.py bewaart die fixtures/own_ploeg_id sindsdien in
 st.session_state (zie PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19 in dat
 bestand). Is dat nog niet gebeurd, dan toont dit tabblad een duidelijke
 verwijzing i.p.v. zelf een parallelle, dubbele scrape-flow op te zetten.
+(Sinds PADEL_ANALYSIS_POULE_TEAMS_CONTEXT_FIX_2026-10-05 vult
+page_lineup_lab.py deze sessiewaarden VOORAF aan uit reeds opgeslagen data,
+zodat die verwijzing in de praktijk enkel nog verschijnt als er echt nog
+geen poule-schema gekend is.)
 LOOKBACK: in tegenstelling tot de eerstvolgende tegenstander (waar 1-2
 recente wedstrijden meestal volstaan) wil je van een WILLEKEURIGE poule-
 ploeg typisch hun VOLLEDIGE seizoenshistoriek zien — er is immers geen
@@ -88,22 +92,47 @@ FIX, drie onderdelen:
      voor deze ploeg, een EXPLICIETE melding dat de analyse verouderd is en
      een herhaalde klik op "analyseren" nodig heeft — i.p.v. de oude,
      mogelijk misleidende melding stilzwijgend te laten staan.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_POULE_TEAMS_CONTEXT_FIX_2026-10-05 (op verzoek van Kim: bij
+"Andere ploegen" toonde de overzichtstabel van o.a. PADEL CLUB VISION 21 B
+"Matchen deze poule: 0", "Winrate deze poule: -", "Partner deze poule: -"
+voor ELKE speler - "niet mogelijk want ze hebben wel al matchen gespeeld!")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd met poule_spelgroep_rapport.txt + de code, geen gok):
+render_poule_teams_tab() riep oa.get_team_report() en oa.render_team_header()
+aan met current_reeks_url=None EN current_spelgroep_id=None. De kolommen
+"deze poule" in opponent_analysis.py zijn STRIKT gefilterd op spelgroep-ID -
+zonder spelgroep-ID is er geen poulecontext en blijft "deze poule" ALTIJD 0,
+voor ELKE ploeg in dit tabblad. Het rapport bevestigde dat de data er wel
+degelijk is: de VISION 21 B-spelers hebben elk 4 matchen in spelgroep
+702071, maar het filter kreeg nooit een spelgroep-ID om op te zoeken.
+FIX: _poule_context() bepaalt de reeks_url + spelgroep_id van de poule van
+de GESELECTEERDE speler (de andere ploegen zitten per definitie in DIEZELFDE
+poule): eerst uit de sessie (vm_reeks_url_cache_<sel_player_id>, gezet door
+"Analyseren"/de Rangschikking-sectie), anders uit de persistent opgeslagen
+poule-URL (dashboard_common._get_saved_poule_url()). De spelgroepId wordt
+uit de query-string van die URL gehaald. Beide worden nu meegegeven aan
+get_team_report() en render_team_header(). Lukt het bepalen niet, dan
+blijft het gedrag exact zoals voorheen (None) en verschijnt er een korte
+caption die dat uitlegt - nooit een crash.
+LET OP: een eerder bewaard team-rapport (opgebouwd met spelgroep None) kan
+nog in Firestore staan; opponent_analysis._rebuild_reason() krijgt nu wel
+een spelgroep_id mee. Toont de tabel na deze fix nog steeds 0, klik dan
+eenmaal op "Verversen" in de analysekop om het rapport te herbouwen.
 """
 from __future__ import annotations
-
 from typing import Callable, Optional
-
+from urllib.parse import urlparse, parse_qs
 import streamlit as st
-
 import lineup_lab as ll
 import opponent_analysis as oa
 import opponent_scout as osc
 import opponent_scout_ui as osu
 import schedule_scraper as ss
 import team_freshness as tf
-from dashboard_common import _get_saved_schedule, _format_scraped_at, render_cloud_scrape_trigger
-
-
+from dashboard_common import (
+    _get_saved_schedule, _format_scraped_at, render_cloud_scrape_trigger, _get_saved_poule_url,
+)
 def _extract_poule_teams(fixtures: list[dict], own_ploeg_id: Optional[str]) -> list[dict]:
     """Geeft alle UNIEKE ploegen terug die in `fixtures` voorkomen (zowel
     thuis als uit), MET hun poule_label, gesorteerd op naam — de eigen ploeg
@@ -125,8 +154,6 @@ def _extract_poule_teams(fixtures: list[dict], own_ploeg_id: Optional[str]) -> l
                     "poule_label": fx.get("poule_label") or "?",
                 }
     return sorted(teams.values(), key=lambda t: (t["poule_label"], t["name"]))
-
-
 def _team_lookback(fixtures: list[dict], ploeg_id: str) -> int:
     """PADEL_ANALYSIS_POULE_TEAMS_TAB_2026-09-19: geeft het aantal reeds
     GESPEELDE wedstrijden van deze ploeg terug — gebruikt als lookback voor
@@ -137,8 +164,6 @@ def _team_lookback(fixtures: list[dict], ploeg_id: str) -> int:
     team_fixtures = ss.get_team_fixtures(fixtures, ploeg_id)
     played = sum(1 for fx in team_fixtures if fx.get("played"))
     return max(played, 1)
-
-
 def _freshest_fixtures(sel_player_id: str, session_fixtures: list[dict]) -> tuple[list[dict], Optional[str]]:
     """PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: geeft de
     meest ACTUEEL PERSISTEERDE schedule terug (via
@@ -155,8 +180,33 @@ def _freshest_fixtures(sel_player_id: str, session_fixtures: list[dict]) -> tupl
     if saved_fixtures:
         return saved_fixtures, sched_at
     return session_fixtures, None
-
-
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_POULE_TEAMS_CONTEXT_FIX_2026-10-05 - zie moduledocstring.
+# ─────────────────────────────────────────────
+def _spelgroep_from_url(reeks_url: Optional[str]) -> Optional[str]:
+    """Haalt de spelgroepId uit de query-string van een TVL poule/tabel-URL
+    (bv. ...interclub-poule-tabel?afdelingId=..&spelgroepId=702071&pouleId=..).
+    Geeft None terug als dat niet lukt - nooit een gok."""
+    if not reeks_url:
+        return None
+    try:
+        qs = parse_qs(urlparse(str(reeks_url)).query)
+        val = (qs.get("spelgroepId") or [None])[0]
+        return str(val) if val else None
+    except Exception:  # noqa: BLE001
+        return None
+def _poule_context(sel_player_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Geeft (reeks_url, spelgroep_id) van de poule van de geselecteerde
+    speler terug. Eerst uit de sessie (gezet door 'Analyseren'/
+    'Rangschikking'), anders uit de persistent opgeslagen poule-URL. Faalt
+    stil: (None, None) als er niets gekend is."""
+    reeks_url = st.session_state.get(f"vm_reeks_url_cache_{sel_player_id}")
+    if not reeks_url:
+        try:
+            reeks_url = _get_saved_poule_url(sel_player_id) or None
+        except Exception:  # noqa: BLE001
+            reeks_url = None
+    return reeks_url, _spelgroep_from_url(reeks_url)
 def render_poule_teams_tab(
     sel_player_id: str,
     name_lookup_global: dict,
@@ -172,8 +222,8 @@ def render_poule_teams_tab(
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
     if not session_fixtures or not own_ploeg_id:
         st.info(
-            "Laad eerst je poule-schema via '📅 Volgende match laden' in het tabblad '🔍 Analyseren' "
-            "— dat schema wordt hier hergebruikt, zonder opnieuw te moeten ophalen."
+            "Nog geen poule-schema gekend voor deze speler. Laad het via '📅 Volgende match laden' in "
+            "het tabblad '🔍 Analyseren' — normaal wordt dit ook automatisch aangevuld door de dagelijkse update."
         )
         return
     # PADEL_ANALYSIS_STALE_SCHEDULE_POULE_TEAM_FIX_2026-09-21: gebruik de
@@ -288,14 +338,22 @@ def render_poule_teams_tab(
         osu.render_unified_team_sync_trigger(unique_players, key_prefix=key_prefix, team_name=chosen["name"])
     all_docs = ll.get_docs_for_players([p["user_id"] for p in unique_players])
     global_docs = osu.load_all_player_docs()
+    # PADEL_ANALYSIS_POULE_TEAMS_CONTEXT_FIX_2026-10-05: poulecontext meegeven
+    # (was None/None) - zie moduledocstring.
+    reeks_url, spelgroep_id = _poule_context(sel_player_id)
+    if not spelgroep_id:
+        st.caption(
+            "ℹ️ De poule (spelgroep) van deze speler is nog niet gekend - de kolommen 'deze poule' "
+            "kunnen daardoor leeg blijven. Open eenmaal 'Analyseren' of 'Rangschikking' om dit aan te vullen."
+        )
     report = oa.get_team_report(
         bundle, opp, all_docs,
-        current_reeks_url=None, current_spelgroep_id=None,
+        current_reeks_url=reeks_url, current_spelgroep_id=spelgroep_id,
         global_docs=global_docs, key_prefix=key_prefix,
     )
     report = oa.render_team_header(
         report, bundle, opp, all_docs,
-        current_reeks_url=None, current_spelgroep_id=None,
+        current_reeks_url=reeks_url, current_spelgroep_id=spelgroep_id,
         global_docs=global_docs, key_prefix=key_prefix,
     )
     oa.render_overview_and_detail(report, go_to_player_fn=go_to_player_fn, key_prefix=key_prefix)
