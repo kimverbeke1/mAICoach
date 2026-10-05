@@ -1,7 +1,6 @@
 """
 lineup_plan_screen.py - Planscherm voor een VOLLEDIGE ontmoeting (najaar:
 2 rotaties x 2 matchen), aanpasbaar speler per speler.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PLAN_SCREEN_2026-10-03 (op verzoek van Kim: "Je stelt die beter
 samen voor met dan meteen ook een eindresultaat van die keuze getoond. Zo zie
@@ -45,199 +44,72 @@ waarden en officiele klassementen van ALLE spelers op dat moment, de
 winkans-schaal, en het laatst ingevulde plan (wij + tegenstander). Basis voor
 een latere tab "Nabeschouwing" (voorspeld vs. echte uitslag, kalibratie).
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04 (feedback Kim: "er staat bvb op de
-knoppen: S1: 24%: S2:22%. Beter zou zijn om ook kort te tonen wat dat
-Scenario is. als je iets koos dan had ik eerst niet gezien dat er effectief
-iets geselecteerd was. Als het knoppen zijn dan dat wel tonen dat die knoppen
-geselecteerd is (groen?)" + "Ik denk dat het beter is om gewoon die vergelijk
-de voorstellen te tonen en dan met een knop bij elke rij 1 van die rijen te
-kunnen kiezen (ook tonen dat die knop gekozen is.)" + "in de tabel mag je ook
-de beste opstelling tonen voor de speler voor wie we de analyse doen")
+PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04 (feedback Kim: knoppen tonen welk
+scenario actief is, voorstellen als tabel met "Kies"-knop per rij, extra rij
+"Beste voor <naam>")
 --------------------------------------------------------------------------
-1. SCENARIO-KNOPPEN: de korte omschrijving stond al als caption ONDER elke
-   knop (ongewijzigd) - NIEUW is dat de knop die exact overeenkomt met de
-   huidige tegenstander-invulling nu VISUEEL afwijkt: een vinkje in de
-   knoptekst EN type="primary" (de gekleurde/opgevulde Streamlit-knopstijl,
-   t.o.v. de normale omlijnde knop) i.p.v. een losse caption die je kon
-   missen. Daarvoor wordt opp_sel/opp_plan nu AL gelezen VOOR de knoppen
-   gerenderd worden (was voorheen pas erna).
-2. "ONZE PLOEG - VOORSTELLEN": de aparte knoppenrij met percentages is WEG.
-   In de plaats: enkel nog de vergelijkingstabel (niet langer in een
-   ingeklapte expander - "gewoon tonen"), met per rij een "Kies"-knop. De
-   rij die exact overeenkomt met de huidige invulling krijgt een vinkje,
-   vetgedrukte tekst en de knop wordt (uitgeschakeld) "Actief \u2713" i.p.v.
-   "Kies". Kolom "Gelijk" blijft (Kim: "net die kolom toont waar het
-   verschil in opstelling zit"), naast "Min. 1 punt" (= Winst + Gelijk).
-3. NIEUWE RIJ "Beste voor <naam>": de speler voor wie de analyse loopt
-   (page_lineup_lab.py's spelerskeuze bovenaan) wordt via st.session_state
-   ("viewing_player_id_<ploeg_id>", gezet door page_lineup_lab.py) herkend;
-   onder de bestaande 4 voorstellen komt een 5de rij met het plan dat voor
-   PRECIES DIE speler de hoogste gemiddelde persoonlijke winkans geeft over
-   de match(en) waarin hij/zij voorkomt (tegen de huidige opp_dist) - zelfde
-   aanpak als de vroegere "Beste opstelling voor mezelf" in de matchup-tabel
-   (die daar nu WEG is, zie lineup_matchup_table.py), maar dan contextueel
-   t.o.v. het scenario dat je hier aan het plannen bent.
+1. De S-knop die overeenkomt met de huidige tegenstander-invulling krijgt een
+   vinkje en type="primary".
+2. "Onze ploeg - voorstellen" = vergelijkingstabel met per rij "Kies"; de
+   actieve rij krijgt een vinkje en "Actief".
+3. 5de rij "Beste voor <naam>" (viewing_player_id_<ploeg_id>).
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 (op verzoek van Kim: "de
-teksten wat S1, S2 mogen iets duidelijker en multiline. Je mag ook de
-waarom van deze kansen tonen. Eigenlijk komt het er dan op neer dat we
-meteen de scenario analyse in die rotatieplanner integreren [...] voorstel
-opstellingen rotatieplanner mag in mooiere tabel. Ik zie dat er in alle
-plannen verschillende identieke opstellingen zijn [...] je kan dus beter
-tonen: Beste plan en dan (opofferen tussen haakjes of toch zeker wat meer
-info waarom dat het beste plan is). Minstens 1 punt is trouwens ook dezelfde
-opstelling. dus beter dan maar gewoon die 2 opstellingen tonen met uitleg")
+PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: duidelijkere S-knop-
+captions met "Waarom", inklapbaar scenario-overzicht, identieke voorstellen
+samengevoegd tot 1 rij (_merge_duplicate_rows).
 --------------------------------------------------------------------------
-1. S-KNOPPEN DUIDELIJKER: de caption onder elke knop toont nu de VOLLEDIGE
-   scenario-omschrijving (geen afkapping meer op 48 tekens) plus, op een
-   aparte regel, de "waarom"-redenen van het model (bv. "Waarom: Roels &
-   Logghe speelden al 3x samen"). Die redenen komen nu mee in de gedeelde
-   scenario-lijst (zie lineup_scenario_matrix.py, PADEL_ANALYSIS_ROTATION_
-   INTEGRATION_2026-10-04) - geen nieuwe modelaanroep hier nodig.
-2. SCENARIO-OVERZICHT IN DE PLANNER: een nieuwe, inklapbare tabel ("Scenario-
-   overzicht") net onder de S-knoppen toont Scenario/Gewicht/Wat/Rotatie 1/
-   Rotatie 2/Waarom voor alle scenario's - dezelfde gegevens als de aparte
-   scenario-analyse-sectie, nu ook rechtstreeks in de Rotatieplanner. De
-   aparte sectie zelf blijft ONGEWIJZIGD bestaan (Kim: "nog niet direct die
-   scenario analyse weglaten") - dit is een AANVULLING, geen vervanging.
-3. VOORSTELLEN SAMENVOEGEN: identieke opstellingen (bv. "Beste plan" en
-   "Opofferen" die toevallig dezelfde koppelverdeling opleveren) worden niet
-   langer als aparte, dubbele rijen getoond. _merge_duplicate_rows() groepeert
-   voorstellen op hun EXACTE opstelling (ongeacht rij-volgorde) en toont ze
-   als 1 rij met gecombineerde titel ("Beste plan = Opofferen") en
-   gecombineerde uitleg ("meeste verwachte punten; onze 2 zwakste spelers
-   samen in 1 match") - zo zie je in 1 oogopslag WAAROM een opstelling onder
-   meerdere strategieen de beste is, i.p.v. dezelfde rij meermaals te zien.
+PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: art. 6.6-overtreding inline in het
+rood op de matchkaart, spelers die al in de andere match van de rotatie
+staan blijven kiesbaar met suffix " - al bij M<x>", leesbaar "tegen"-label,
+"Rotatie 1 is gespeeld" bij Rotatie 1 zelf.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04 (feedback Kim: "Als ik bij de
-rotaties manueel dingen aanpas krijg ik onderaan bvb: Tegenstander rotatie 1:
-sterkste duo staat niet op M1 [...] Is beter om gewoon dgans die match in het
-rood te tonen." + "je mag toelaten dat je eenzelfde speler kiest die al bvb
-in de andere match van de rotatie speelt, maar in dat geval moet je die naam
-al tonen in de lijst dat dat zo is" + "De tekst bij tegenstander is helemaal
-lichtgrijs en niet zo goed leesbaar" + "Rotatie 1 is gespeeld is nu een
-checkbox die wat verloren staat [...] Ik zou dan ook gewoon die dingen bij de
-rotatie 1 zelf zetten en niet daarboven")
+PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: haalbaarheid na rotatie 1 (bij 0-2
+of 2-0 geen Gespreid/Opofferen) + voorstellen in een kader.
 --------------------------------------------------------------------------
-1. ART. 6.6-OVERTREDING INLINE IN HET ROOD: de "sterkste duo staat niet op
-   M1"-melding verschijnt niet langer als losse tekstregel onderaan de
-   pagina, maar als rode kop ("Match 1" -> ":red[Match 1 - NIET sterkste
-   duo (art. 6.6)]") op BEIDE matchkaarten van de betrokken rotatie, voor
-   zowel onze als hun opstelling apart gecontroleerd. De overige controles
-   (speler 2x in dezelfde rotatie, koppel 2x in de ontmoeting, puntengrens,
-   max. matchen per speler) blijven ONGEWIJZIGD als tekstregel onderaan
-   staan - dat zijn controles over de HELE rotatie/ontmoeting, niet over 1
-   specifieke match, en lenen zich niet tot een inline-kleur op 1 kaart.
-2. SPELER AL GEKOZEN IN ANDERE MATCH VAN DEZE ROTATIE: _options_for() sloot
-   zulke spelers voorheen volledig uit de keuzelijst. Nu blijven ze gewoon
-   kiesbaar (het reglement verbiedt dit niet expliciet op UI-niveau, en Kim
-   wil dit "voor de zekerheid" kunnen uitproberen), maar de keuzelijst zelf
-   toont het al: "Naam - al bij M<x>" als suffix, dus je ziet VOOR je kiest
-   dat die speler al ergens anders in deze rotatie staat. Kiest je hem
-   toch, dan markeert _check_rotation() dit (ongewijzigd: "een speler staat
-   2x in dezelfde rotatie") als foutregel onderaan.
-3. LEESBAARHEID "tegen"-label: de losse <div>-styling tussen de 2 kolommen
-   kreeg geen expliciete tekstkleur - op sommige (donkere) Streamlit-thema's
-   viel die daardoor terug op een lichtgrijze standaardkleur. Nu expliciet
-   "color:inherit" (volgt de normale themakleur, net als de rest van de
-   tekst) en iets groter lettertype voor leesbaarheid.
-4. "ROTATIE 1 IS GESPEELD": verplaatst van helemaal bovenaan de pagina naar
-   ONDER de kop "Rotatie 1" zelf (vlak voor de 2 matchkaarten van rotatie
-   1), in een lichte, omkaderde balk - dus niet langer "los" bovenaan,
-   maar zichtbaar bij het onderdeel waar het betrekking op heeft.
+PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04: een gekozen speler verdwijnt niet
+meer automatisch op "- Kies -" wanneer enkel de " - al bij M<x>"-suffix
+wijzigt (_strip_suffix); is hij echt niet meer beschikbaar, dan een rode
+melding.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04 (feedback Kim: "Als rotatie 1
-gespeeld is en je kiest dan de uitslag, dan kan het zijn dat de origineel
-gekozen opstelling niet meer de beste is [...] stel dat het 0-2 is (wij
-verliezen) dan moet onze strategie aangepast worden om alles op alles te
-zetten voor 2-2 wat dan uiteraard geen opofferingsmatch meer mag zijn [...]
-moet natuurlijk wel nog mogelijk zijn want als we maar 4 spelers hebben zijn
-er niet vele combinaties meer mogelijk" + "Onze ploeg staat nog steeds niet
-in mooi kader!")
+PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05 (op verzoek van Kim, akkoord met
+het voorstel: "Per plan een kleine verdeling van het aantal gewonnen matchen
+(0 t.e.m. 4) en het verwachte aantal", "≈ gelijkwaardig"-label bij plannen
+binnen ±1 procentpunt, de regel "Onze 2 zwakste spelers ... samen" schrappen)
 --------------------------------------------------------------------------
-1. HAALBAARHEID NA ROTATIE 1: met de echte tussenstand (0/1/2 gewonnen
-   matchen in rotatie 1) ligt het MAXIMAAL haalbare eindresultaat al vast:
-     - stand 0 (0-2): zelfs met 2 winsten in rotatie 2 kom je op 2 van de 4
-       - dus NOOIT winst (2 ploegpunten), hoogstens gelijk (1 punt) als we
-       BEIDE resterende matchen winnen. "Opofferen" is dan zinloos (er is
-       geen enkele match meer om bewust prijs te geven - beide MOETEN
-       gewonnen worden voor het enige nog haalbare resultaat).
-     - stand 2 (2-0): zelfs met 2 verliezen in rotatie 2 blijf je op 2 van
-       de 4 - dus NOOIT verlies, hoogstens gelijk. "Gespreid"/"Opofferen"
-       zijn dan evenmin zinvol: ELKE geldige rotatie 2 geeft hetzelfde
-       gegarandeerde minimum.
-     - stand 1 (1-1): het volledige bereik (winst/gelijk/verlies) blijft
-       open - hier blijven ALLE 4 presets (incl. Gespreid/Opofferen)
-       zinvolle, onderscheiden keuzes.
-   _forced_outcome_after_r1() berekent dit (louter telwerk op k en het
-   aantal resterende matchen, GEEN kansberekening nodig) en geeft een
-   duidelijke banner ("Winst is niet meer mogelijk - enige haalbare resultaat
-   is gelijkspel (2-2); beide resterende matchen moeten gewonnen worden.").
-   Bij stand 0 of 2 worden de rijen "Gespreid" en "Opofferen" NIET getoond
-   (ze zouden sowieso identiek zijn aan "Beste plan"/"Minstens 1 punt" via
-   _merge_duplicate_rows, of een nodeloos zwakkere, misleidende rij tonen) -
-   "Beste plan" optimaliseert in dat geval vanzelf voor het enige haalbare
-   doel (_score() reduceert immers naar "maximaliseer p1" als p2 structureel
-   0 is, en naar "p0 structureel 0" bij stand 2). Bij stand 1 verandert er
-   niets - alle 4 presets blijven zoals voorheen.
-   Met slechts 4 beschikbare spelers kan rotatie 2 maar op 1 (of een
-   handvol) manier(en) ingevuld worden - dat is in orde, _own_plans() geeft
-   dan gewoon een kortere (of lege) lijst terug; "Geen reglementair geldig
-   plan"-melding blijft ongewijzigd bestaan voor dat laatste geval.
-2. "ONZE PLOEG - VOORSTELLEN" IN EEN KADER: de volledige tabel (kop + alle
-   rijen) staat nu in st.container(border=True) - zelfde kadersstijl als de
-   matchkaarten eronder, i.p.v. kale kolommen zonder omlijning.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 (op verzoek van Kim: "Ik zie ook
-rare fenomenen als ik van speler wil wisselen. soms verdwijnt een speler
-terug automatisch op kies. Dat wil ik nooit. Je mag wel op rood zetten als
-er iets niet klopt.")
---------------------------------------------------------------------------
-ROOT CAUSE, bevestigd door de code na te lezen: _slot_box() herstelde een
-opgeslagen keuze die niet meer letterlijk in de (herberekende) optielijst
-voorkwam door te zoeken naar een optie die BEGINT MET de volledige oude
-tekst (inclusief een eventuele " - al bij M<x>"-toevoeging). Die toevoeging
-hangt af van wat er op dat moment in de ANDERE match van dezelfde rotatie
-staat (zie PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04 hierboven) en kan dus
-van render tot render VERSCHIJNEN of VERDWIJNEN, zonder dat de speler zelf
-ergens anders naartoe verhuisde. Verdween de toevoeging (bv. omdat de
-andere match nu een andere speler bevat), dan matchte de oude, LANGERE
-opgeslagen tekst niet meer met de nieuwe, KORTERE optie (geen exacte match,
-en de oude tekst "begint" ook niet met de nieuwe, kortere optie) - de
-functie viel dan terug op "- Kies -" en de speler verdween, hoewel hij nog
-perfect geldig was.
-FIX: zowel de opgeslagen waarde als elke kandidaat-optie worden nu eerst
-ONTDAAN van een eventuele " - al bij M<x>"-toevoeging (_strip_suffix())
-voor ze vergeleken worden. Verdwijnt of verschijnt de toevoeging, dan blijft
-de speler nu gewoon staan - enkel de zichtbare suffix wijzigt mee.
-Is de speler ECHT niet meer beschikbaar (bv. volledig weggeklikt uit de
-tegenstander-selectie, dus zijn basisnaam komt ook na het strippen nergens
-in de optielijst voor), dan wordt het veld nog steeds leeggemaakt - maar
-NOOIT meer stilzwijgend: een rode melding ("X is niet meer beschikbaar -
-kies opnieuw.") verschijnt dan net boven het veld, zoals gevraagd.
+1. _Ctx.win_count_dist() berekent per plan de exacte kansverdeling van het
+   TOTAAL aantal gewonnen matchen (0..4), gewogen over dezelfde opp_dist als
+   de winst/gelijk/verlies-kolommen (zelfde onafhankelijke winkansen per
+   match; na "Rotatie 1 is gespeeld" verschoven met de echte stand). Elke
+   rij toont daaronder "Gewonnen matchen: 0 x% · 1 y% · ... · verwacht z".
+2. Liggen winst/gelijk/verlies van twee rijen telkens binnen 1 procentpunt,
+   dan krijgen ze het label "≈ gelijkwaardig met <ander voorstel>", met
+   onder de tabel 1 korte uitleg: het verschil zit enkel in welke speler
+   welke kans krijgt, niet in het verwachte ploegresultaat.
+4. Bij S1 wordt het label "Meest waarschijnlijk (model)" weggelaten als er
+   nog een ander label is - S1 is per definitie het waarschijnlijkste.
+3. De caption "Onze 2 zwakste spelers ..." is weg; enkel de bron van de
+   tegenstander blijft (kort) staan. De zwakste-2-bepaling zelf blijft
+   bestaan, want "Gespreid"/"Opofferen" hebben ze nodig.
 """
 import datetime as _dt
 import re
 import traceback
-
 import streamlit as st
-
 from dashboard_common import ll, fb
 from lineup_scout import _cached_official_rank, _cached_own_player_rating
 from lineup_rotation import (
     _generate_rotation_candidates, _rank_pairs_with_padelstat_tiebreak, _norm_name,
     MATCHES_PER_ROTATION,
 )
-
 try:
     import opponent_lineup_model as olm
 except Exception:  # noqa: BLE001  pragma: no cover
     olm = None
-
 _N_ROT = 2
 _R2_PRED_TOP = 6
 _GEEN = "- Kies -"
 _SNAPSHOT_COLLECTION = "lineup_snapshots"
+_EQUIV_TOL = 0.01  # PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: ±1 procentpunt
 _PRESETS = [
     ("best", "Beste plan", "meeste verwachte punten"),
     ("spread", "Gespreid", "onze 2 zwakste spelers nooit samen"),
@@ -247,25 +119,22 @@ _PRESETS = [
 _SLOTS = [(r, m, i) for r in range(_N_ROT) for m in range(MATCHES_PER_ROTATION) for i in range(2)]
 # PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 - zie moduledocstring.
 _SUFFIX_RE = re.compile(r" - al bij M\d+$")
-
-
 def _strip_suffix(label: str) -> str:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04: verwijdert een eventuele
-    " - al bij M<x>"-toevoeging, zodat de ONDERLIGGENDE spelerskeuze
-    vergeleken kan worden ongeacht of die toevoeging er nu wel/niet bij
-    staat - zie moduledocstring voor de bevestigde root cause."""
+    """Verwijdert een eventuele " - al bij M<x>"-toevoeging."""
     if not label:
         return label
     return _SUFFIX_RE.sub("", label)
-
-
 # ---------------------------------------------------------------- rekenkern
 def _wins_dist(a, b) -> list:
     a = 0.5 if a is None else a
     b = 0.5 if b is None else b
     return [(1 - a) * (1 - b), a * (1 - b) + b * (1 - a), a * b]
-
-
+def _convolve(x: list, y: list) -> list:
+    out = [0.0] * (len(x) + len(y) - 1)
+    for i, px in enumerate(x):
+        for j, py in enumerate(y):
+            out[i + j] += px * py
+    return out
 def _points(dists: list) -> dict:
     tot = {0: 1.0}
     n = 0
@@ -280,8 +149,6 @@ def _points(dists: list) -> dict:
     p2 = sum(p for k, p in tot.items() if k > half)
     p1 = sum(p for k, p in tot.items() if k == half)
     return {"p2": p2, "p1": p1, "p0": max(0.0, 1.0 - p2 - p1)}
-
-
 def _points_with_offset(d2: list, k: int) -> dict:
     half = (MATCHES_PER_ROTATION * _N_ROT) / 2.0
     p2 = p1 = 0.0
@@ -292,14 +159,8 @@ def _points_with_offset(d2: list, k: int) -> dict:
         elif t == half:
             p1 += pj
     return {"p2": p2, "p1": p1, "p0": max(0.0, 1.0 - p2 - p1)}
-
-
 def _forced_outcome_after_r1(played_k):
-    """PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04 - zie moduledocstring.
-    Geeft (banner_tekst_of_None, toon_spread_en_sacrifice: bool) terug, op
-    basis van PUUR TELWERK (geen kans nodig): met `played_k` matchen al
-    gewonnen in rotatie 1 en MATCHES_PER_ROTATION matchen nog te spelen in
-    rotatie 2, wat is het bereik van het eindtotaal?"""
+    """PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04 - zie moduledocstring."""
     if played_k is None:
         return None, True
     half = (MATCHES_PER_ROTATION * _N_ROT) / 2.0
@@ -318,14 +179,10 @@ def _forced_outcome_after_r1(played_k):
             "plan' - enkel 'Beste plan' optimaliseert nog voor de volle winst."
         ), False
     return None, True
-
-
 def _score(kind: str, pp: dict) -> tuple:
     if kind == "safe":
         return (pp["p2"] + pp["p1"], pp["p2"])
     return (2 * pp["p2"] + pp["p1"], pp["p2"])
-
-
 class _Ctx:
     def __init__(self, player_ratings, official_ranks_strict, opponent_ratings, opp_ranks):
         self.pr = player_ratings or {}
@@ -333,14 +190,11 @@ class _Ctx:
         self.opr = opponent_ratings or {}
         self.opp_ranks = opp_ranks or {}
         self.cache = {}
-
     def strength(self, uid):
         return ll.effective_simulation_rating(uid, self.pr, self.orank)
-
     def opp_strength(self, uid):
         r = self.opp_ranks.get(uid)
         return ll.effective_simulation_rating(uid, self.opr, {uid: float(r) if r is not None else None})
-
     def wp(self, own_pair, opp_pair):
         key = (frozenset(own_pair), frozenset(opp_pair))
         if key not in self.cache:
@@ -351,7 +205,6 @@ class _Ctx:
                 sum(theirs) / len(theirs) if theirs else None,
             )
         return self.cache[key]
-
     def outcome(self, plan, opp_dist, played_k=None):
         acc = {"p2": 0.0, "p1": 0.0, "p0": 0.0}
         tw = sum(w for *_, w in opp_dist) or 1.0
@@ -365,7 +218,23 @@ class _Ctx:
             for k in acc:
                 acc[k] += (w / tw) * pp[k]
         return acc
-
+    def win_count_dist(self, plan, opp_dist, played_k=None) -> list:
+        """PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: kansverdeling van het
+        TOTAAL aantal gewonnen matchen (index 0..4), gewogen over opp_dist.
+        Na "Rotatie 1 is gespeeld" is rotatie 1 een vaststaand aantal."""
+        n_tot = MATCHES_PER_ROTATION * _N_ROT
+        acc = [0.0] * (n_tot + 1)
+        tw = sum(w for *_, w in opp_dist) or 1.0
+        for o1, o2, w in opp_dist:
+            d2 = _wins_dist(self.wp(plan[1][0], o2[0]), self.wp(plan[1][1], o2[1]))
+            if played_k is None:
+                d1 = _wins_dist(self.wp(plan[0][0], o1[0]), self.wp(plan[0][1], o1[1]))
+                tot = _convolve(d1, d2)
+            else:
+                tot = [0.0] * played_k + list(d2)
+            for k, p in enumerate(tot[: n_tot + 1]):
+                acc[k] += (w / tw) * p
+        return acc
     def match_wp(self, own_pair, r, m, opp_dist):
         tw = sum(w for *_, w in opp_dist) or 1.0
         tot = 0.0
@@ -373,8 +242,6 @@ class _Ctx:
             v = self.wp(own_pair, (o1 if r == 0 else o2)[m])
             tot += (w / tw) * (0.5 if v is None else v)
         return tot
-
-
 def _own_plans(available_ids, synergy_fn, official_ranks_strict, player_ratings, opponent_ratings,
                rules, max_per_player, fixed_r1=None) -> list:
     budget = {str(p): int((max_per_player or {}).get(p, _N_ROT) or 0) for p in available_ids}
@@ -401,20 +268,15 @@ def _own_plans(available_ids, synergy_fn, official_ranks_strict, player_ratings,
         for c in r2_raw:
             plans.append([[frozenset(p) for p in r1], [frozenset(p) for p in c["ordered_pairs"]]])
     return plans
-
-
 def _weakest_two(available_ids, ctx: _Ctx):
     sterk = sorted((ctx.strength(u), u) for u in available_ids if ctx.strength(u) is not None)
     if len(sterk) < 4:
         return None
     return frozenset({sterk[0][1], sterk[1][1]})
-
-
 def _personal_avg_wp(plan: list, viewing_player_id: str, ctx: "_Ctx", opp_dist: list):
     """PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: gemiddelde persoonlijke
     winkans van `viewing_player_id` over de match(en) waarin die speler in
-    `plan` voorkomt (tegen `opp_dist`). None als die speler nergens in dit
-    plan speelt."""
+    `plan` voorkomt (tegen `opp_dist`). None als die speler nergens speelt."""
     probs = []
     for r in range(len(plan)):
         for m in range(len(plan[r])):
@@ -422,14 +284,8 @@ def _personal_avg_wp(plan: list, viewing_player_id: str, ctx: "_Ctx", opp_dist: 
             if viewing_player_id in pair:
                 probs.append(ctx.match_wp(pair, r, m, opp_dist))
     return (sum(probs) / len(probs)) if probs else None
-
-
 def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_id=None,
                   include_spread_sacrifice=True) -> dict:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: `include_spread_sacrifice`
-    laat "Gespreid"/"Opofferen" weg wanneer het eindresultaat na rotatie 1
-    al vastligt (zie _forced_outcome_after_r1 / moduledocstring) - die 2
-    presets zijn dan niet onderscheidend of zelfs misleidend."""
     out = {}
     scored = [(p, ctx.outcome(p, opp_dist, played_k)) for p in plans]
     for kind, _, _ in _PRESETS:
@@ -443,32 +299,17 @@ def _pick_presets(plans, opp_dist, ctx, weakest, played_k=None, viewing_player_i
             pool = scored
         if pool:
             out[kind] = max(pool, key=lambda x: _score("safe" if kind == "safe" else "best", x[1]))
-    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: 5de voorstel - beste voor de
-    # specifieke speler voor wie de analyse loopt (zie moduledocstring).
     if viewing_player_id:
         outcome_by_id = {id(p): o for p, o in scored}
-        personal = [
-            (_personal_avg_wp(p, viewing_player_id, ctx, opp_dist), p) for p in plans
-        ]
+        personal = [(_personal_avg_wp(p, viewing_player_id, ctx, opp_dist), p) for p in plans]
         personal = [(score, p) for score, p in personal if score is not None]
         if personal:
             _, beste_plan = max(personal, key=lambda x: x[0])
             out["self"] = (beste_plan, outcome_by_id[id(beste_plan)])
     return out
-
-
 def _canon_plan(plan: list) -> tuple:
-    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: canonieke sleutel van
-    een plan (ongeacht rotatie-/matchvolgorde) - gebruikt om identieke
-    voorstellen te herkennen en samen te voegen."""
     return tuple(sorted(tuple(sorted(tuple(sorted(p)) for p in rot)) for rot in plan))
-
-
 def _merge_duplicate_rows(rijen: list) -> list:
-    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04 - zie moduledocstring:
-    voegt rijen met EXACT dezelfde opstelling samen tot 1 rij met
-    gecombineerde titel ("Beste plan = Opofferen") en gecombineerde,
-    ontdubbelde uitleg. Volgorde van eerste voorkomen blijft behouden."""
     merged: dict = {}
     volgorde = []
     for kind, titel, uitleg, plan, pp in rijen:
@@ -488,31 +329,39 @@ def _merge_duplicate_rows(rijen: list) -> list:
         )
         for ck in volgorde
     ]
-
-
+def _equivalent_groups(rijen: list) -> dict:
+    """PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: {rij-index: [titels van
+    andere rijen]} voor rijen waarvan winst/gelijk/verlies telkens binnen
+    _EQUIV_TOL van elkaar liggen."""
+    out = {}
+    for i, (_, _, _, _, pi) in enumerate(rijen):
+        for j, (_, tj, _, _, pj) in enumerate(rijen):
+            if i == j:
+                continue
+            if all(abs(pi[k] - pj[k]) <= _EQUIV_TOL for k in ("p2", "p1", "p0")):
+                out.setdefault(i, []).append(tj)
+    return out
+def _dist_txt(dist: list) -> str:
+    """PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: 'Gewonnen matchen: 0 5% ·
+    1 20% · ... · verwacht 2.3'."""
+    verwacht = sum(k * p for k, p in enumerate(dist))
+    delen = " \u00b7 ".join(f"{k}: {p * 100:.0f}%" for k, p in enumerate(dist))
+    return f"Gewonnen matchen \u2014 {delen} \u00b7 verwacht **{verwacht:.1f}**"
 def _predict_r2(bundle, roster, r1, opp_ranks, opp_ps, rules):
     if olm is None:
         return []
     stats = olm.build_opponent_stats(bundle, MATCHES_PER_ROTATION)
-
     def _order(pairs):
         return _rank_pairs_with_padelstat_tiebreak(pairs, opp_ranks, opp_ps)
-
     pred = olm.predict_rotation_scenarios(
         stats, roster, _order, opp_ranks, rules=rules,
         excluded_pairs={frozenset(p) for p in r1}, top_n=_R2_PRED_TOP,
     )["scenarios"]
-    return [([frozenset(p) for p in s["pairs"][0]], s["prob"]) if False else
-            (s["pairs"], s["prob"]) for s in pred]
-
-
+    return [(s["pairs"], s["prob"]) for s in pred]
 # ------------------------------------------------------------ controles
 def _rotation_order_violation(r_pairs, ranks) -> bool:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: True als het duo op Match 2
-    een HOGERE puntensom heeft dan het duo op Match 1 (art. 6.6: sterkste
-    duo hoort op Match 1) - enkel bepaalbaar als beide officiele klassementen
-    van alle 4 spelers gekend zijn; anders False (niet controleerbaar, geen
-    fout tonen op basis van onvolledige data)."""
+    """True als het duo op Match 2 een HOGERE puntensom heeft dan het duo op
+    Match 1 (art. 6.6) - enkel als alle 4 klassementen gekend zijn."""
     if len(r_pairs) != 2:
         return False
     waarden = [ranks.get(u) for p in r_pairs for u in p]
@@ -521,14 +370,7 @@ def _rotation_order_violation(r_pairs, ranks) -> bool:
     s1 = sum(ranks.get(u) or 0 for u in r_pairs[0])
     s2 = sum(ranks.get(u) or 0 for u in r_pairs[1])
     return s2 > s1
-
-
 def _check_rotation(r_pairs, ranks, rules, wie, r_idx, include_order=True) -> list:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: `include_order=False` laat
-    de art. 6.6-melding hier weg - die wordt elders INLINE (rood op de
-    betrokken matchkaart) getoond i.p.v. als losse tekstregel, zie
-    moduledocstring. De overige controles (duplicate speler, puntengrens)
-    blijven hier ongewijzigd."""
     fouten = []
     spelers = [u for p in r_pairs for u in p]
     if len(set(spelers)) != len(spelers):
@@ -545,12 +387,7 @@ def _check_rotation(r_pairs, ranks, rules, wie, r_idx, include_order=True) -> li
         s2 = sum(ranks.get(u) or 0 for u in r_pairs[1])
         fouten.append(f"{wie} rotatie {r_idx + 1}: sterkste duo staat niet op M1 (art. 6.6: {s1:.0f} < {s2:.0f}).")
     return fouten
-
-
 def _check_encounter(plan, ranks, rules, wie, max_per_player=None) -> list:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: roept _check_rotation nu
-    aan met include_order=False - de art. 6.6-melding wordt apart, inline
-    per matchkaart getoond (zie _render_match_card / moduledocstring)."""
     fouten = []
     for r, rot in enumerate(plan):
         if rot:
@@ -567,31 +404,18 @@ def _check_encounter(plan, ranks, rules, wie, max_per_player=None) -> list:
             if n > int(max_per_player.get(u, _N_ROT) or 0):
                 fouten.append(f"{wie}: een speler speelt {n} matchen (max. {max_per_player.get(u)}).")
     return fouten
-
-
 # ------------------------------------------------------------ selectie
 def _read_sel(prefix, label_of) -> dict:
     uid_of = {v: k for k, v in label_of.items()}
     out = {}
     for slot in _SLOTS:
         v = st.session_state.get(f"{prefix}_{slot[0]}{slot[1]}{slot[2]}")
+        if v is not None:
+            v = _strip_suffix(v)
         if v in uid_of:
             out[slot] = uid_of[v]
     return out
-
-
 def _options_for(slot, sel, volgorde, label_of) -> list:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: spelers die al in de ANDERE
-    match van DEZELFDE rotatie gekozen zijn, worden niet langer uitgesloten
-    (Kim: "je mag toelaten dat je eenzelfde speler kiest die al [...] in de
-    andere match van de rotatie speelt") - ze krijgen een suffix
-    " - al bij M<x>" in de lijst, zodat dat VOOR het kiezen al zichtbaar is.
-    Een speler die al de PARTNER is op dit slot (dus zichzelf, voor het
-    andere slot van hetzelfde koppel) wordt wel nog steeds overgeslagen -
-    anders zou je 1 speler 2x in hetzelfde koppel kunnen zetten.
-    Een koppel dat in de ANDERE rotatie al samen speelde, blijft uitgesloten
-    (ongewijzigd) - dat is een harde reglementregel (max. 1x samen per
-    ontmoeting), geen tactische keuze."""
     r, m, i = slot
     zelfde_match_partner = sel.get((r, m, 1 - i))
     andere_matches_in_rotatie = {
@@ -617,16 +441,7 @@ def _options_for(slot, sel, volgorde, label_of) -> list:
                 break
         opties.append(f"{label_of[u]}{suffix}")
     return opties
-
-
 def _slot_box(prefix, slot, sel, volgorde, label_of, label_txt):
-    """PADEL_ANALYSIS_PLAN_SCREEN_V6_2026-10-04 - zie moduledocstring: een
-    opgeslagen keuze wordt nu vergeleken ZONDER een eventuele " - al bij
-    M<x>"-toevoeging - die toevoeging mag vrij verschijnen/verdwijnen tussen
-    renders zonder de onderliggende spelerskeuze te verliezen. Enkel als de
-    speler ECHT nergens meer in de optielijst voorkomt (ook niet na het
-    strippen van de toevoeging), wordt het veld geleegd - en dan NOOIT
-    stilzwijgend: een rode melding verschijnt erboven."""
     key = f"{prefix}_{slot[0]}{slot[1]}{slot[2]}"
     opties = _options_for(slot, sel, volgorde, label_of)
     huidige = st.session_state.get(key)
@@ -645,8 +460,6 @@ def _slot_box(prefix, slot, sel, volgorde, label_of, label_txt):
         sel[slot] = uid_of.get(basis)
     else:
         sel.pop(slot, None)
-
-
 def _slots_to_plan(sel, rotations=range(_N_ROT)):
     plan = []
     for r in rotations:
@@ -658,8 +471,6 @@ def _slots_to_plan(sel, rotations=range(_N_ROT)):
             rot.append(frozenset({a, b}))
         plan.append(rot)
     return plan
-
-
 def _fill(prefix, plan, label_of, rotations=range(_N_ROT)) -> bool:
     waarden = {}
     for r in rotations:
@@ -671,48 +482,41 @@ def _fill(prefix, plan, label_of, rotations=range(_N_ROT)) -> bool:
                 waarden[f"{prefix}_{r}{m}{i}"] = label_of[pair[i]]
     st.session_state.update(waarden)
     return True
-
-
 def _clear(prefix):
     for slot in _SLOTS:
         st.session_state[f"{prefix}_{slot[0]}{slot[1]}{slot[2]}"] = _GEEN
-
-
 # ------------------------------------------------------------ weergave
 def _pct_md(pp: dict) -> str:
     return (f":green[**{pp['p2'] * 100:.0f}% winst**] \u00b7 :orange[**{pp['p1'] * 100:.0f}% gelijk**] \u00b7 "
             f":red[**{pp['p0'] * 100:.0f}% verlies**]")
-
-
 def _ps_sum(uids, fn):
     vals = [fn(u) for u in uids]
     vals = [v for v in vals if v is not None]
     return sum(vals) if vals else None
-
-
 def _plan_txt(plan, names) -> str:
     return "  |  ".join(
         f"R{r + 1}: " + " \u00b7 ".join(" / ".join(names.get(u, u) for u in sorted(p)) for p in rot)
         for r, rot in enumerate(plan)
     )
-
-
+_MEEST_WAARSCHIJNLIJK = "Meest waarschijnlijk (model)"
+def _labels_txt(s: dict) -> str:
+    """PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: S1 is per definitie het
+    scenario met het grootste gewicht - het label "Meest waarschijnlijk
+    (model)" voegt daar niets toe en wordt weggelaten als er nog een ander
+    label is (bv. "Zoals op 27/09")."""
+    labels = list(s.get("labels") or [])
+    if s.get("name") == "S1" and len(labels) > 1:
+        labels = [l for l in labels if l != _MEEST_WAARSCHIJNLIJK]
+    return " / ".join(labels)
 def _rotation_pairs_text(boards: list) -> tuple:
-    """PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: 'M1 A / B' per match,
-    gegroepeerd per rotatie - lokale, minimale kopie van lineup_scenario_
-    matrix._rotation_text_opp() (geen import, om koppeling tussen de 2
-    modules te vermijden)."""
     rot1 = boards[0:MATCHES_PER_ROTATION]
     rot2 = boards[MATCHES_PER_ROTATION:2 * MATCHES_PER_ROTATION]
-
     def _fmt(rot):
         return "  \u00b7  ".join(
             f"M{m + 1} " + " / ".join(p.get("name", "?") for p in (b.get("opponent_pair") or []))
             for m, b in enumerate(rot)
         )
     return _fmt(rot1), _fmt(rot2)
-
-
 def _save_snapshot(ploeg_id, opp_name, available_ids, own_names, own_ranks, own_ps,
                    opp_uids, opp_names, opp_ranks, opp_ps, own_plan, opp_plan) -> None:
     """PADEL_ANALYSIS_LINEUP_SNAPSHOT_2026-10-03 - zie moduledocstring. Faalt altijd stil."""
@@ -751,14 +555,11 @@ def _save_snapshot(ploeg_id, opp_name, available_ids, own_names, own_ranks, own_
         st.session_state[flag] = plan_sig
     except Exception:  # noqa: BLE001
         pass
-
-
 def render_plan_screen(*args, **kwargs) -> None:
     """Veilige wrapper: een fout toont een melding i.p.v. een blanco pagina."""
     try:
         _render_plan_screen(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001
-        # st.rerun()/st.stop() werken via een (Streamlit-)exceptie - die NIET opvangen.
         if type(exc).__name__ in ("RerunException", "StopException") or any(
             k.__name__ == "ScriptControlException" for k in type(exc).__mro__
         ):
@@ -766,27 +567,17 @@ def render_plan_screen(*args, **kwargs) -> None:
         st.error(f"Planscherm kon niet getoond worden: {type(exc).__name__}: {exc}")
         with st.expander("Technische details (stuur dit door bij een fout)", expanded=False):
             st.code(traceback.format_exc())
-
-
 def _render_match_card(
     r, m, own_prefix, opp_prefix, own_sel, opp_sel, own_volgorde, opp_volgorde,
     own_label, opp_label, names_all, ctx, opp_dist, own_ranks, opp_ranks,
     played_k=None,
 ) -> None:
-    """PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: 1 matchkaart. Toont, indien
-    van toepassing, een RODE kop ("NIET sterkste duo, art. 6.6") voor onze
-    en/of hun kant van DEZE rotatie i.p.v. enkel een tekstregel onderaan de
-    pagina - zie moduledocstring."""
     own_rot_pairs = [own_sel.get((r, mm, 0)) and frozenset({own_sel[(r, mm, 0)], own_sel.get((r, mm, 1))})
                      for mm in range(MATCHES_PER_ROTATION)]
     opp_rot_pairs = [opp_sel.get((r, mm, 0)) and frozenset({opp_sel[(r, mm, 0)], opp_sel.get((r, mm, 1))})
                      for mm in range(MATCHES_PER_ROTATION)]
-    own_order_bad = (
-        None not in own_rot_pairs and _rotation_order_violation(own_rot_pairs, own_ranks)
-    )
-    opp_order_bad = (
-        None not in opp_rot_pairs and _rotation_order_violation(opp_rot_pairs, opp_ranks)
-    )
+    own_order_bad = None not in own_rot_pairs and _rotation_order_violation(own_rot_pairs, own_ranks)
+    opp_order_bad = None not in opp_rot_pairs and _rotation_order_violation(opp_rot_pairs, opp_ranks)
     with st.container(border=True):
         kop = f"**R{r + 1} \u00b7 Match {m + 1}**"
         if own_order_bad:
@@ -828,8 +619,6 @@ def _render_match_card(
             regel += f"  \u2192  :{kleur}[**{wpv * 100:.0f}% winkans**]{extra}"
         if regel:
             st.markdown(regel)
-
-
 def _render_plan_screen(
     available_ids, synergy_fn, official_ranks_strict, name_lookup_global, ploeg_id,
     player_ratings, opponent_ratings, tournament_rules_dict, max_per_player,
@@ -842,33 +631,25 @@ def _render_plan_screen(
     opp_ps = {u: v for u in roster_uids if (v := _cached_own_player_rating(u)) is not None}
     own_ps = {str(k): v for k, v in (player_ratings or {}).items() if v is not None}
     ctx = _Ctx(player_ratings, official_ranks_strict, opponent_ratings, opp_ranks)
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: de speler voor wie de analyse
-    # loopt (gezet door page_lineup_lab.py) - voor de "Beste voor <naam>"-rij.
     viewing_player_id = st.session_state.get(f"viewing_player_id_{ploeg_id}")
     if viewing_player_id is not None:
         viewing_player_id = str(viewing_player_id)
         if viewing_player_id not in available_ids:
             viewing_player_id = None
-
     def _lbl(naam, rk, ps):
         info = " \u00b7 ".join(x for x in [f"P{int(rk)}" if rk is not None else "P?",
                                       f"ps {int(ps)}" if ps is not None else ""] if x)
         return f"{naam} ({info})"
-
     opp_names = {str(p.get("user_id")): p.get("name", "?") for p in unique_opp_players if p.get("user_id")}
     own_names = {u: name_lookup_global.get(u, u) for u in available_ids}
     opp_label = {u: _lbl(opp_names[u], opp_ranks.get(u), opp_ps.get(u)) for u in roster_uids}
     own_label = {u: _lbl(own_names[u], official_ranks_strict.get(u), own_ps.get(u)) for u in available_ids}
     names_all = {**own_names, **opp_names}
-
     # ---- scenario's: EXACT die van de scenario-analyse
     naam_naar_uid = {_norm_name(n): u for u, n in opp_names.items()}
-
     def _to_uid(p):
         u = str(p.get("user_id") or "")
         return u if u in opp_names else naam_naar_uid.get(_norm_name(p.get("name")))
-
     scen = []
     for i, s in enumerate(st.session_state.get(f"scen_matrix_scen_v3_{ploeg_id}") or []):
         pairs = []
@@ -880,25 +661,16 @@ def _render_plan_screen(
             scen.append({
                 "name": f"S{i + 1}", "labels": s.get("labels") or [],
                 "pairs": [pairs[0:2], pairs[2:4]], "w": s["weight"],
-                # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: redenen + ruwe
-                # boards meegeven, voor de duidelijkere caption en het
-                # scenario-overzicht hieronder.
                 "reasons": s.get("reasons") or "", "model_prob": s.get("model_prob"),
                 "boards": s.get("boards") or [],
             })
-
     st.markdown('<div class="section-header">Rotatieplanner - plan voor de volledige ontmoeting</div>', unsafe_allow_html=True)
     st.caption(
         "Stel beide rotaties samen, voor de tegenstander en voor ons, speler per speler. Het eindresultaat "
         "onderaan wordt bij elke wijziging meteen herrekend. Gebruik de knoppen als vertrekpunt."
     )
-
     opp_prefix = f"plan_opp_v2_{ploeg_id}"
     own_prefix = f"plan_own_v2_{ploeg_id}"
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: opp_sel VOOR de scenario-knoppen
-    # lezen (was voorheen pas erna), zodat we meteen kunnen tonen welk scenario
-    # (indien van toepassing) al actief/geselecteerd is.
     opp_sel_voor_knoppen = _read_sel(opp_prefix, opp_label)
     opp_plan_voor_knoppen = _slots_to_plan(opp_sel_voor_knoppen)
     active_scenario_name = None
@@ -907,7 +679,6 @@ def _render_plan_screen(
             if s["pairs"][0] == opp_plan_voor_knoppen[0] and s["pairs"][1] == opp_plan_voor_knoppen[1]:
                 active_scenario_name = s["name"]
                 break
-
     # ---- tegenstander snelkeuze
     st.markdown("**Tegenstander - snelkeuze** (zelfde scenario's en gewichten als de scenario-analyse)")
     if scen:
@@ -917,9 +688,8 @@ def _render_plan_screen(
             for col, s in zip(cols, scen[start:start + per_rij]):
                 with col:
                     is_active = (s["name"] == active_scenario_name)
-                    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: vinkje + "primary"-stijl
-                    # (gevulde knopkleur) voor het actief geselecteerde scenario.
-                    btn_label = f"{'\u2713 ' if is_active else ''}{s['name']} \u00b7 {s['w'] * 100:.0f}%"
+                    vink = "\u2713 " if is_active else ""
+                    btn_label = f"{vink}{s['name']} \u00b7 {s['w'] * 100:.0f}%"
                     if st.button(
                         btn_label, key=f"{opp_prefix}_use_{s['name']}", use_container_width=True,
                         type=("primary" if is_active else "secondary"),
@@ -927,17 +697,11 @@ def _render_plan_screen(
                         if _fill(opp_prefix, s["pairs"], opp_label):
                             st.rerun(scope="fragment")
                         st.warning("Een speler van dit scenario zit niet in de tegenstander-selectie.")
-                    # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: volledige
-                    # omschrijving (geen afkapping meer) + aparte "waarom"-regel.
-                    st.caption(" / ".join(s["labels"]))
+                    st.caption(_labels_txt(s))
                     if s.get("reasons"):
                         st.caption(f"*Waarom:* {s['reasons']}")
     else:
         st.caption("Nog geen scenario's - klik eerst op 'Bereken' in de scenario-analyse, of vul de tegenstander zelf in.")
-
-    # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: scenario-overzicht
-    # rechtstreeks in de planner - zie moduledocstring. Vervangt de losse
-    # scenario-analyse-sectie NIET (die blijft ongewijzigd bestaan).
     if scen:
         with st.expander("Scenario-overzicht (uit de scenario-analyse)", expanded=False):
             st.caption(
@@ -949,16 +713,14 @@ def _render_plan_screen(
                 r1_txt, r2_txt = _rotation_pairs_text(s.get("boards") or [])
                 rijen_scen.append({
                     "Scenario": s["name"], "Gewicht": f"{s['w'] * 100:.0f}%",
-                    "Wat": " / ".join(s["labels"]), "Rotatie 1": r1_txt, "Rotatie 2": r2_txt,
+                    "Wat": _labels_txt(s), "Rotatie 1": r1_txt, "Rotatie 2": r2_txt,
                     "Waarom": s.get("reasons") or "",
                 })
             st.dataframe(rijen_scen, use_container_width=True, hide_index=True)
-
     if st.button("Tegenstander leegmaken", key=f"{opp_prefix}_clear"):
         _clear(opp_prefix)
         st.rerun(scope="fragment")
-
-    # ---- huidige keuzes (voor opties, verdeling en voorstellen)
+    # ---- huidige keuzes
     opp_sel = _read_sel(opp_prefix, opp_label)
     own_sel = _read_sel(own_prefix, own_label)
     opp_plan = _slots_to_plan(opp_sel)
@@ -973,21 +735,13 @@ def _render_plan_screen(
     else:
         opp_dist = [(s["pairs"][0], s["pairs"][1], s["w"]) for s in scen]
         opp_bron = f"gewogen over S1-S{len(scen)}" if scen else ""
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: "Rotatie 1 is gespeeld"
-    # verplaatst naar bij de Rotatie 1-kop zelf (zie verderop, net voor de 2
-    # matchkaarten van rotatie 1) i.p.v. hier, los, bovenaan de pagina.
     played_k = None
     if st.session_state.get(f"plan_r1_played_v2_{ploeg_id}"):
         uitslag_opgeslagen = st.session_state.get(f"plan_r1_score_v2_{ploeg_id}", "2-0")
         played_k = {"2-0": 2, "1-1": 1, "0-2": 0}[uitslag_opgeslagen]
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: haalbaarheid na rotatie 1 -
-    # zie moduledocstring. Puur telwerk, geen kans nodig.
     forced_banner, toon_spread_sacrifice = _forced_outcome_after_r1(played_k)
     if forced_banner:
         st.markdown(forced_banner)
-
     # ---- onze voorstellen
     fixed_r1 = None
     if played_k is not None:
@@ -1006,13 +760,7 @@ def _render_plan_screen(
             st.session_state[pk + "_sig"] = sig
         plans = st.session_state.get(pk) or []
     weakest = _weakest_two(available_ids, ctx)
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: huidige invulling - gebruikt om
-    # de actieve rij in de voorstellen-tabel te markeren.
     own_plan_now = _slots_to_plan(own_sel)
-
-    # PADEL_ANALYSIS_PLAN_SCREEN_V5_2026-10-04: de volledige voorstellen-
-    # sectie (kop + tabel) in 1 kader - zie moduledocstring.
     with st.container(border=True):
         st.markdown("**Onze ploeg - voorstellen**" + (" (enkel rotatie 2)" if played_k is not None else ""))
         if not opp_dist:
@@ -1038,22 +786,22 @@ def _render_plan_screen(
             if not rijen:
                 st.warning("Geen enkel voorstel kon berekend worden met de huidige instellingen.")
             else:
-                # PADEL_ANALYSIS_ROTATION_INTEGRATION_2026-10-04: identieke
-                # opstellingen samenvoegen tot 1 rij - zie moduledocstring.
                 rijen = _merge_duplicate_rows(rijen)
-                # PADEL_ANALYSIS_PLAN_SCREEN_V3_2026-10-04: enkel nog de vergelijkingstabel,
-                # NIET langer ingeklapt, met een "Kies"-knop per rij en een duidelijke
-                # markering van de rij die al actief is - zie moduledocstring.
+                # PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05 - zie moduledocstring.
+                gelijkwaardig = _equivalent_groups(rijen)
                 kop = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
                 for c, h in zip(kop, ["Voorstel", "Plan", "Winst", "Gelijk", "Verlies", "Min. 1p", ""]):
                     c.markdown(f"**{h}**")
-                for kind, titel, uitleg, plan, pp in rijen:
+                for r_idx, (kind, titel, uitleg, plan, pp) in enumerate(rijen):
                     is_active = own_plan_now is not None and own_plan_now == plan
                     rij = st.columns([1.6, 3.0, 0.7, 0.7, 0.7, 0.9, 0.9])
                     titel_txt = f"\u2713 **{titel}**" if is_active else f"**{titel}**"
                     rij[0].markdown(titel_txt)
                     rij[0].caption(uitleg)
+                    if r_idx in gelijkwaardig:
+                        rij[0].markdown(f":blue[\u2248 gelijkwaardig met {', '.join(gelijkwaardig[r_idx])}]")
                     rij[1].markdown(_plan_txt(plan, names_all))
+                    rij[1].markdown(_dist_txt(ctx.win_count_dist(plan, opp_dist, played_k)))
                     rij[2].markdown(f":green[**{pp['p2'] * 100:.0f}%**]" if is_active else f"{pp['p2'] * 100:.0f}%")
                     rij[3].markdown(f"{pp['p1'] * 100:.0f}%")
                     rij[4].markdown(f"{pp['p0'] * 100:.0f}%")
@@ -1064,29 +812,26 @@ def _render_plan_screen(
                         elif st.button("Kies", key=f"{own_prefix}_p_{kind}", use_container_width=True):
                             if _fill(own_prefix, plan, own_label, rotations=[1] if played_k is not None else range(_N_ROT)):
                                 st.rerun(scope="fragment")
-            if weakest:
-                st.caption("Onze 2 zwakste spelers (padelstat, anders klassement): "
-                           + " en ".join(names_all.get(u, u) for u in sorted(weakest))
-                           + (f". Tegenstander: {opp_bron}." if opp_bron else "."))
+                if gelijkwaardig:
+                    st.caption(
+                        "\u2248 gelijkwaardig: winst, gelijk en verlies liggen binnen 1 procentpunt. Het verschil "
+                        "zit enkel in welke speler welke kans krijgt, niet in het verwachte ploegresultaat."
+                    )
+        if opp_bron:
+            st.caption(f"Tegenstander: {opp_bron}.")
     if st.button("Onze ploeg leegmaken", key=f"{own_prefix}_clear"):
         _clear(own_prefix)
         st.rerun(scope="fragment")
-
-    # ---- per rotatie: kop (+ "gespeeld"-balk bij rotatie 1) en de matchkaarten
+    # ---- per rotatie
     own_volgorde = sorted(available_ids, key=lambda u: -(ctx.strength(u) or 0))
     opp_volgorde = sorted(roster_uids, key=lambda u: -(opp_ranks.get(u) or 0))
     for r in range(_N_ROT):
         st.markdown(f"#### Rotatie {r + 1}")
         if r == 0:
-            # PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: "Rotatie 1 is
-            # gespeeld" nu HIER, bij Rotatie 1 zelf, i.p.v. los bovenaan de
-            # hele pagina - zie moduledocstring.
             with st.container(border=True):
                 c_g, c_u = st.columns([1, 2])
                 with c_g:
-                    gespeeld = st.checkbox(
-                        "Rotatie 1 is gespeeld", key=f"plan_r1_played_v2_{ploeg_id}",
-                    )
+                    gespeeld = st.checkbox("Rotatie 1 is gespeeld", key=f"plan_r1_played_v2_{ploeg_id}")
                 if gespeeld:
                     with c_u:
                         st.radio(
@@ -1099,12 +844,7 @@ def _render_plan_screen(
                 own_label, opp_label, names_all, ctx, opp_dist, official_ranks_strict, opp_ranks,
                 played_k=played_k,
             )
-
     # ---- controles + eindresultaat
-    # PADEL_ANALYSIS_PLAN_SCREEN_V4_2026-10-04: de art. 6.6-overtreding wordt
-    # nu INLINE op de matchkaart getoond (zie _render_match_card hierboven),
-    # dus _check_encounter() (include_order=False intern) rapporteert hier
-    # enkel nog de overige, ontmoeting-brede controles.
     opp_plan = _slots_to_plan(opp_sel)
     opp_rots = [_slots_to_plan(opp_sel, rotations=[r]) for r in range(_N_ROT)]
     for f in _check_encounter([x[0] if x else [] for x in opp_rots], opp_ranks, rules, "Tegenstander"):
@@ -1114,10 +854,8 @@ def _render_plan_screen(
     for f in _check_encounter([x[0] if x else [] for x in own_rots], official_ranks_strict, rules,
                               "Onze ploeg", max_per_player):
         st.markdown(f":red[{f}]")
-
     _save_snapshot(ploeg_id, (bundle or {}).get("team_name") or "", available_ids, own_names,
                    official_ranks_strict, own_ps, roster_uids, opp_names, opp_ranks, opp_ps, own_plan, opp_plan)
-
     if own_plan is None:
         st.info("Vul alle 8 vakjes van onze ploeg in (of kies een voorstel) om het eindresultaat te zien.")
         return
@@ -1126,7 +864,4 @@ def _render_plan_screen(
         return
     pp = ctx.outcome(own_plan, opp_dist, played_k)
     st.markdown("### Eindresultaat: " + _pct_md(pp))
-    ev = sum(ctx.match_wp(own_plan[1][m], 1, m, opp_dist) for m in range(MATCHES_PER_ROTATION))
-    ev += played_k if played_k is not None else sum(
-        ctx.match_wp(own_plan[0][m], 0, m, opp_dist) for m in range(MATCHES_PER_ROTATION))
-    st.markdown(f"Verwacht **{ev:.1f}** gewonnen matchen op 4 \u00b7 tegenstander: {opp_bron}.")
+    st.markdown(_dist_txt(ctx.win_count_dist(own_plan, opp_dist, played_k)) + f" \u00b7 tegenstander: {opp_bron}.")
