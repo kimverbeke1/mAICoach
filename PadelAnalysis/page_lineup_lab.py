@@ -1,6 +1,6 @@
 """
 page_lineup_lab.py - "Opstelling-analyse"-pagina (Volgende match,
-Opstelling-scenario's, Rotatieplanner, Opgeslagen analyses).
+Opstelling-scenario's, Rotatieplanner).
 PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27: dit bestand is de orchestratie-laag;
 de zware onderdelen staan in lineup_scout.py, lineup_rules.py,
 lineup_opponent_history.py, lineup_rotation.py en lineup_matchup_table.py.
@@ -263,6 +263,18 @@ anders de eerste 8 eigen profielen) toont. Een eerder gemaakte selectie
 voor speler A blijft intact als je later teruggaat naar speler A (ze
 staat in een apart sessie-slot) - enkel het ONBEDOELD overnemen van
 speler A's selectie bij speler B is weg.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_REMOVE_SAVED_ANALYSES_TAB_2026-10-05 (op verzoek van Kim:
+"tab met opgeslagen analyses mag je weglaten. Niet meer nodig nu analyses
+veel sneller gaan")
+--------------------------------------------------------------------------
+De sectie "Opgeslagen analyses" (SECTION_SAVED) is VERWIJDERD uit de
+sectiekiezer en de if/elif-keten. _render_saved_lineup_analyses() zelf en
+de "Deze analyse opslaan"-knop (lineup_matchup_table.py) blijven ONGEWIJZIGD
+bestaan - enkel de TOEGANG tot dit overzicht via deze pagina is weg, geen
+functionaliteit verwijderd of data gewist. Mocht dit overzicht later alsnog
+nodig blijken, volstaat het om SECTION_SAVED terug toe te voegen aan
+_SECTIONS en de if/elif-keten.
 """
 import streamlit as st
 from dashboard_common import (
@@ -332,9 +344,10 @@ except Exception as e:  # noqa: BLE001  pragma: no cover
 SECTION_ANALYSE = "Analyseren"
 SECTION_RANG = "Rangschikking"
 SECTION_POULE = "Andere ploegen"
-SECTION_SAVED = "Opgeslagen analyses"
 SECTION_RETRO = "Nabeschouwing"  # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03
-_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED, SECTION_RETRO]
+# PADEL_ANALYSIS_REMOVE_SAVED_ANALYSES_TAB_2026-10-05: SECTION_SAVED
+# ("Opgeslagen analyses") is uit deze lijst verwijderd - zie moduledocstring.
+_SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_RETRO]
 # PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04: zie moduledocstring.
 _SECTION_QUERY_KEY = "lineup_section"
 def _initial_section_index(radio_key: str) -> int:
@@ -624,6 +637,9 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             tournament_rules_dict=tournament_rules_dict, rules_label=rules_label,
         ) or []
 def _render_saved_lineup_analyses(name_lookup_global: dict):
+    """PADEL_ANALYSIS_REMOVE_SAVED_ANALYSES_TAB_2026-10-05: niet langer
+    aangeroepen vanuit page_lineup_lab() (zie moduledocstring) - blijft
+    bestaan, geen functionaliteit of data verwijderd."""
     st.markdown('<div class="section-header">Opgeslagen opstelling-analyses</div>', unsafe_allow_html=True)
     st.caption("Analyses die je eerder opsloeg.")
     analyses = fb.list_lineup_analyses()
@@ -887,9 +903,6 @@ def page_lineup_lab():
                 ptu.render_poule_teams_tab(str(sel_player_id), name_lookup_global, go_to_player_fn=_go_to_player)
             except Exception as exc:
                 st.warning(f"Kon deze sectie niet laden: {exc}")
-    elif section == SECTION_SAVED:
-        with perf.step("SECTIE Opgeslagen analyses"):
-            _render_saved_lineup_analyses(name_lookup_global)
     elif section == SECTION_RETRO:
         # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: hangt NIET af van de scout-
         # keten - werkt rechtstreeks op de al gescrapete eigen matchdata.
