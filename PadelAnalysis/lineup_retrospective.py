@@ -90,6 +90,52 @@ sleutel aanwezig), valt de code terug op 1 individuele, alsnog sequentiele
 poging voor exact DIE speler (defensief, nooit een ontbrekende waarde
 stilzwijgend negeren). Het pad via fb._fs_prefetch (als die ooit wel
 bestaat) blijft ongewijzigd als eerste, voorkeurs-poging.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MIRRORED_BOARD_FIX_2026-10-05 (op verzoek van Kim, bevestigd
+probleem: "Match 05/09. Je toont 5 matchen bij nabeschouwing. Het moeten er
+4 zijn." - en apart, bij andere ontmoetingen, te WEINIG borden, zie die
+root cause hieronder bij PADEL_ANALYSIS_STALE_PROFILE_BOARD_GAP)
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd met test_board_count_diagnosis.py, geen gok): voor de
+ontmoeting van 05/09 bleken 2 van de 6 gereconstrueerde "boards" exacte
+SPIEGELBEELDEN van 2 andere boards te zijn - dezelfde 4 spelers, dezelfde
+score, maar met "ons koppel" en "tegenstander" OMGEWISSELD. Oorzaak:
+_resolve_encounter_teammates() bepaalt exclude_ids UITSLUITEND uit
+sel_player_id's EIGEN 2 borden (_known_opponent_ids(eigen_boards)) - het
+houdt geen rekening met de tegenstanders van een TEAMGENOOT die zelf pas
+via deze functie wordt toegevoegd. Bij een ontmoeting met meer dan 2 eigen
+borden (bv. 4, over 2 rotaties) kan zo'n teamgenoot (bv. Van Eetvelde
+Michael, Carl Ide's tegenstander in een bord waarin sel_player_id zelf niet
+speelde) worden toegevoegd als "teamgenoot" - zijn eigen matchdocument
+bevat dan een board waarin hij/zij en zijn/haar partner als "ons koppel"
+staan en de ECHTE teamgenoten (Carl Ide/Nico Recour) als "tegenstander" -
+het spiegelbeeld van het board dat Carl Ide/Nico Recour's EIGEN document al
+correct opleverde.
+FIX: _own_side_component() bouwt, via de 'pair'-edges van ALLE
+samengevoegde boards (eigen + teamgenoten) van deze ontmoeting, de kleinste
+groep spelers die via partnerschappen verbonden is met sel_player_id - dat
+IS per definitie het echte, eigen team (een speler partnert nooit met een
+tegenstander). render_retrospective_tab() filtert de boards-lijst nu EERST
+op "pair ⊆ own_side" (dit vangt de spiegelbeeld-borden op, ongeacht hun
+exacte inhoud), VOOR de bestaande known-opponent-filter (die blijft
+ongewijzigd bestaan als tweede, onafhankelijke vangnet). own_side_ids (voor
+de klassement-/padelstat-ophaling) is nu simpelweg own_side zelf, i.p.v.
+een aparte, minder betrouwbare handmatige opbouw uit partner_user_id's.
+Een caption toont expliciet hoeveel spiegelbeeld-borden gedropt werden,
+zodat dit controleerbaar blijft i.p.v. stilzwijgend te gebeuren.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_STALE_PROFILE_BOARD_GAP_2026-10-05 (bevestigd, GEEN
+codewijziging - ter info/voor latere herkenning): bij andere ontmoetingen
+(19/09, 26/09) toonde "Per match" juist TE WEINIG borden (3 i.p.v. 4, 2
+i.p.v. 4). test_board_count_diagnosis.py bevestigde dat de ontbrekende
+boards NIET bestonden in het matchdocument van de betrokken teamgenoot
+(bv. Joris Verlee, Carl Ide) op het moment van testen - hun profiel was
+simpelweg nog niet (opnieuw) gescraped sinds die match gespeeld werd. Dit
+bleek een gevolg van een VERLOPEN GitHub fine-grained personal access
+token waardoor de nachtelijke scrape-workflow stil faalde voor ~74% van
+alle profielen sinds eind september. GEEN actie nodig in dit bestand -
+lost zichzelf op zodra het token vernieuwd is en de profielen opnieuw
+gescraped zijn.
 """
 import datetime as _dt
 import math
@@ -207,6 +253,40 @@ def _known_opponent_ids(boards: list) -> set:
             if uid:
                 out.add(str(uid))
     return out
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_MIRRORED_BOARD_FIX_2026-10-05
+# Zie de module-docstring voor de gemeten/bevestigde root cause (5 i.p.v.
+# 4 boards bij de ontmoeting van 05/09).
+# ─────────────────────────────────────────────
+def _own_side_component(sel_player_id: str, boards: list) -> set:
+    """Bouwt, via de 'pair'-edges van ALLE samengevoegde boards (eigen +
+    teamgenoten) van deze ontmoeting, de kleinste groep spelers die via
+    partnerschappen verbonden is met sel_player_id - dat IS per definitie
+    het echte, eigen team voor deze ontmoeting (een speler partnert nooit
+    met een tegenstander).
+    Boards waarvan 'pair' NIET in deze groep valt, zijn spiegelbeeld-boards
+    die ontstonden doordat een later toegevoegde 'teamgenoot' in
+    werkelijkheid een TEGENSTANDER van een andere, echte teamgenoot was -
+    _resolve_encounter_teammates() kon dat niet weten, want haar exclude_ids
+    komt enkel uit sel_player_id's EIGEN boards, niet uit de boards van de
+    teamgenoten die ze zelf toevoegt. Zulke boards zijn altijd het fysieke
+    spiegelbeeld van een board dat al correct, vanuit de eigen kant, in de
+    lijst staat - droppen verliest dus geen informatie, enkel de dubbele/
+    foutief-georiënteerde kant."""
+    adj: Dict[str, set] = defaultdict(set)
+    for b in boards:
+        p1, p2 = tuple(b["pair"])
+        adj[p1].add(p2)
+        adj[p2].add(p1)
+    seen = {str(sel_player_id)}
+    queue = [str(sel_player_id)]
+    while queue:
+        cur = queue.pop()
+        for nxt in adj.get(cur, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return seen
 def _resolve_encounter_teammates(
     sel_player_id: str, encounter_key: tuple, profiles: list,
     exclude_ids: Optional[set] = None, max_candidates: int = 200,
@@ -218,7 +298,10 @@ def _resolve_encounter_teammates(
     bekend zijn als TEGENSTANDER van sel_player_id in deze ontmoeting - zodat
     een tegenstander die toevallig ook een eigen profiel heeft (bv. omdat hij
     voor een andere ploeg speelde) niet ten onrechte als teamgenoot wordt
-    aanvaard.
+    aanvaard. LET OP (zie PADEL_ANALYSIS_MIRRORED_BOARD_FIX_2026-10-05): dit
+    sluit enkel tegenstanders van sel_player_id's EIGEN boards uit, niet van
+    boards van andere teamgenoten - render_retrospective_tab() corrigeert
+    dat resterende gat achteraf via _own_side_component().
     Resultaat wordt gecached in st.session_state per (sel_player_id,
     encounter_key) - wisselen tussen weergaven of andere herrenders van
     DEZELFDE ontmoeting doen deze scan dus maar 1x per sessie."""
@@ -1121,12 +1204,19 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         docs_encounter, allowed_player_ids=set(docs_encounter.keys()),
     )
     entries_encounter = index_encounter.get(gekozen_key, [])
-    boards = reconstruct_boards_with_rankings(entries_encounter)
+    # PADEL_ANALYSIS_MIRRORED_BOARD_FIX_2026-10-05 - zie moduledocstring voor
+    # de volledige, bevestigde root-cause-analyse (05/09: 5 i.p.v. 4 boards).
+    boards_all = reconstruct_boards_with_rankings(entries_encounter)
+    own_side = _own_side_component(sel_player_id, boards_all)
+    boards = [b for b in boards_all if set(b["pair"]) <= own_side]
+    n_mirrored_dropped = len(boards_all) - len(boards)
     boards = [b for b in boards if not (set(b["pair"]) & gekende_tegenstanders)]
-    own_side_ids = {sel_player_id} | set(teammate_docs.keys())
-    for _pid, m in entries_encounter:
-        if m.get("partner_user_id"):
-            own_side_ids.add(str(m["partner_user_id"]))
+    if n_mirrored_dropped:
+        st.caption(
+            f"{n_mirrored_dropped} bord(en) genegeerd: dit bleek dezelfde fysieke wedstrijd, maar dan "
+            "geregistreerd vanuit het perspectief van hun eigen teamgenoten (ons/tegenstander omgewisseld)."
+        )
+    own_side_ids = set(own_side)
     current_official_ranks = {}
     with perf.step(f"retro: officieel klassement terugval ophalen ({len(own_side_ids)} spelers)"):
         try:
