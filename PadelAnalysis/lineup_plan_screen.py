@@ -12,7 +12,7 @@ je direct de impact van je keuze." + Kim akkoord: "ok met het plan")
      - alle 8 vakjes ingevuld   -> exact die opstelling;
      - enkel rotatie 1 ingevuld -> hun rotatie 2 voorspeld door het model;
      - anders                   -> gewogen over de scenario's S1..Sn.
-2. ONZE PLOEG - knoppen "Beste plan" (meeste verwachte punten), "Gespreid"
+2. ONZE PLOEG - knoppen "Beste plan" (hoogste kans op winst), "Gespreid"
    (onze 2 zwakste spelers nooit samen), "Opofferen" (onze 2 zwakste samen in
    1 match), "Minstens 1 punt". Daarna speler per speler aanpasbaar.
 3. CONTROLES voor BEIDE ploegen: speler 2x in een rotatie, koppel 2x in de
@@ -81,15 +81,45 @@ binnen ±1 procentpunt, de regel "Onze 2 zwakste spelers ... samen" schrappen)
    de winst/gelijk/verlies-kolommen (zelfde onafhankelijke winkansen per
    match; na "Rotatie 1 is gespeeld" verschoven met de echte stand). Elke
    rij toont daaronder "Gewonnen matchen: 0 x% · 1 y% · ... · verwacht z".
-2. Liggen winst/gelijk/verlies van twee rijen telkens binnen 1 procentpunt,
+2. Liggen winst/gelijk/verlies van twee rijen telkens binnen ±1 procentpunt,
    dan krijgen ze het label "≈ gelijkwaardig met <ander voorstel>", met
    onder de tabel 1 korte uitleg: het verschil zit enkel in welke speler
    welke kans krijgt, niet in het verwachte ploegresultaat.
-4. Bij S1 wordt het label "Meest waarschijnlijk (model)" weggelaten als er
-   nog een ander label is - S1 is per definitie het waarschijnlijkste.
 3. De caption "Onze 2 zwakste spelers ..." is weg; enkel de bron van de
    tegenstander blijft (kort) staan. De zwakste-2-bepaling zelf blijft
    bestaan, want "Gespreid"/"Opofferen" hebben ze nodig.
+4. Bij S1 wordt het label "Meest waarschijnlijk (model)" weggelaten als er
+   nog een ander label is - S1 is per definitie het waarschijnlijkste.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_BEST_PLAN_MAXIMIZE_WIN_2026-10-05 (op verzoek van Kim, na een
+diepgaande, met rekenvoorbeelden doorgenomen discussie over 64%/44% vs.
+36%/71% bij een VASTE tegenstander-opstelling: "ja maar ja. de bedoeling is
+wel [...] dat je risico neemt om toch nog te proberen 2 matchen te winnen
+[...] in rotatieplanner wil ik ook gewoon de beste kans voor winst zien")
+--------------------------------------------------------------------------
+ROOT CAUSE van de verwarring: "Beste plan" optimaliseerde (voor de NIET-
+geforceerde situatie, dus wanneer winst nog mogelijk is) op _score() =
+(2*p2 + p1, p2) - een VERWACHTE-PUNTEN-score (2 punten voor winst, 1 voor
+gelijkspel). Die score maximaliseert het gemiddeld aantal competitiepunten
+over het SEIZOEN heen, maar is NIET hetzelfde als "de hoogste kans op winst
+van DEZE ene ontmoeting" - bij een vaste tegenstander-opstelling kon dit dus
+een plan kiezen met een iets hogere kans op gelijkspel/veiligheid, terwijl
+een ander plan een hogere p2 (winst) had. Kim's intuïtie (64%x44%=28,2% >
+36%x71%=25,6%, dus het eerste plan geeft een hogere kans om de ontmoeting
+te winnen) is bij een vaste tegenstander-opstelling wiskundig correct, en
+"Beste plan" moet die kans tonen/kiezen, niet de verwachte-punten-score.
+FIX: _score() voor kind != "safe" maximaliseert nu RECHTSTREEKS p2 (de kans
+dat de HELE ontmoeting gewonnen wordt), met p1 (gelijkspel) enkel als
+tiebreaker bij exact gelijke p2. Dit geldt ONGEWIJZIGD voor zowel de volle
+ontmoeting (rotatie 1+2 samen, als nog niets gespeeld is) als voor rotatie 2
+alleen (na "Rotatie 1 is gespeeld" - daar was dit via _points_with_offset()
+al langer wiskundig gelijk aan "kans dat beide resterende matchen gewonnen
+worden", dus deze fix verandert daar niets, maar maakt de REDENERING voor
+beide gevallen nu consistent: altijd gewoon maximale p2).
+"Minstens 1 punt" (kind="safe") blijft ONGEWIJZIGD p2+p1 maximaliseren (dat
+is precies het doel van die knop: liever veilig een punt pakken).
+De preset-omschrijving "meeste verwachte punten" is aangepast naar "hoogste
+kans op winst" om dit nu ook correct te documenteren in de tabel zelf.
 """
 import datetime as _dt
 import re
@@ -111,7 +141,7 @@ _GEEN = "- Kies -"
 _SNAPSHOT_COLLECTION = "lineup_snapshots"
 _EQUIV_TOL = 0.01  # PADEL_ANALYSIS_PLAN_TABLE_CLARITY_2026-10-05: ±1 procentpunt
 _PRESETS = [
-    ("best", "Beste plan", "meeste verwachte punten"),
+    ("best", "Beste plan", "hoogste kans op winst"),
     ("spread", "Gespreid", "onze 2 zwakste spelers nooit samen"),
     ("sacrifice", "Opofferen", "onze 2 zwakste spelers samen in 1 match"),
     ("safe", "Minstens 1 punt", "hoogste kans op winst of gelijk"),
@@ -180,9 +210,12 @@ def _forced_outcome_after_r1(played_k):
         ), False
     return None, True
 def _score(kind: str, pp: dict) -> tuple:
+    """PADEL_ANALYSIS_BEST_PLAN_MAXIMIZE_WIN_2026-10-05 - zie moduledocstring.
+    "best" maximaliseert nu RECHTSTREEKS p2 (kans op winst van de HELE
+    ontmoeting), met p1 enkel als tiebreaker. "safe" blijft p2+p1."""
     if kind == "safe":
         return (pp["p2"] + pp["p1"], pp["p2"])
-    return (2 * pp["p2"] + pp["p1"], pp["p2"])
+    return (pp["p2"], pp["p1"])
 class _Ctx:
     def __init__(self, player_ratings, official_ranks_strict, opponent_ratings, opp_ranks):
         self.pr = player_ratings or {}
