@@ -75,7 +75,7 @@ Oorzaak: de sub-tabs "Overzicht" / "Detail per speler" gebruikten nog
 st.tabs - en Streamlit voert de inhoud van ELKE tab uit, ook de verborgen.
 Hetzelfde patroon als PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28 hierboven.
 FIX: st.radio (horizontaal) i.p.v. st.tabs. Enkel de gekozen weergave
-draait nog; standaard "Overzicht". De inhoud van beide weergaven is
+draait; standaard "Overzicht". De inhoud van beide weergaven is
 ongewijzigd, en de AI-sectie eronder blijft altijd zichtbaar.
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_ENCOUNTER_FORMAT_2026-09-29 (op verzoek van Kim: "in de najaarsinterclub zijn het
@@ -235,7 +235,34 @@ FIX: de gekozen sectie wordt nu OOK bewaard in de URL via st.query_params
     meteen de URL, zodat een volgende F5 daar weer op uitkomt.
 Faalt st.query_params (oudere Streamlit-versie, of een andere fout), dan
 valt alles stil terug op het bestaande, sessie-only gedrag - nooit de hele
-pagina laten crashen voor dit comfort-detail.
+pagina laten crashen enkel om dit comfort-detail.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCENARIO_PLAYERS_PER_PLAYER_2026-10-04 (op verzoek van Kim,
+bevestigd probleem: "ik kies Anneleen Gallant maar bij mijn spelers zie ik
+niet de spelers van haar ploeg maar die van mijn ploeg")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door de code na te lezen, geen gok): de multiselect
+"Beschikbare eigen spelers" in _render_opstelling_scenario() gebruikte een
+VASTE, niet-genamespace widget-key: key="scenario_available_players" - in
+tegenstelling tot vrijwel elke andere widget-key in dezelfde functie (die
+wel sel_player_id of opp['ploeg_id'] verwerken). Streamlit bewaart een
+widget-waarde in st.session_state per key, en NEGEERT de `default`-
+parameter zodra die key al eens gezet is binnen de sessie. Zodra je dus
+voor 1 speler een selectie maakte (of de automatische default liet staan,
+wat ook een st.session_state-waarde vastlegt), bleef die EXACTE selectie
+"vastzitten" op deze key - ook na het wisselen van speler via "Toon
+analyse voor" bovenaan de pagina. De nieuwe `default_labels` (de
+teamgenoten van de NIEUW gekozen speler) werd wel degelijk herberekend,
+maar nooit getoond: de widget las gewoon de oude sessie-waarde terug.
+FIX: de key is genamespaced per sel_player_id:
+key=f"scenario_available_players_{sel_player_id}" - exact hetzelfde
+patroon als de andere widget-keys in deze functie. Wisselen van speler
+geeft nu een VERSE widget (eigen sessie-slot), die wel de juiste
+`default_labels` (de automatisch herkende opstelling van DIE speler, of
+anders de eerste 8 eigen profielen) toont. Een eerder gemaakte selectie
+voor speler A blijft intact als je later teruggaat naar speler A (ze
+staat in een apart sessie-slot) - enkel het ONBEDOELD overnemen van
+speler A's selectie bij speler B is weg.
 """
 import streamlit as st
 from dashboard_common import (
@@ -310,8 +337,6 @@ SECTION_RETRO = "Nabeschouwing"  # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03
 _SECTIONS = [SECTION_ANALYSE, SECTION_RANG, SECTION_POULE, SECTION_SAVED, SECTION_RETRO]
 # PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04: zie moduledocstring.
 _SECTION_QUERY_KEY = "lineup_section"
-
-
 def _initial_section_index(radio_key: str) -> int:
     """PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04 - zie moduledocstring. Geeft
     de start-index voor de sectie-radio terug op basis van de URL-query-
@@ -329,8 +354,6 @@ def _initial_section_index(radio_key: str) -> int:
     if qp_val in _SECTIONS:
         return _SECTIONS.index(qp_val)
     return 0
-
-
 def _sync_section_to_url(section: str) -> None:
     """PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04 - zie moduledocstring. Faalt
     altijd stil - de pagina mag nooit crashen enkel omdat de URL niet
@@ -340,8 +363,6 @@ def _sync_section_to_url(section: str) -> None:
             st.query_params[_SECTION_QUERY_KEY] = section
     except Exception:  # noqa: BLE001
         pass
-
-
 def _fixture_key(fx_bundle: dict):
     """PADEL_ANALYSIS_PLANNING_ALL_FIXTURES_2026-10-03: sleutel om dezelfde
     ontmoeting uit 2 bundels te herkennen."""
@@ -489,9 +510,13 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
                 "Onze vorige ontmoeting kon niet opgehaald worden (nog geen poule-schema "
                 "geladen, of nog geen gespeelde wedstrijd). Selecteer de spelers hieronder zelf."
             )
+    # PADEL_ANALYSIS_SCENARIO_PLAYERS_PER_PLAYER_2026-10-04: key is nu
+    # genamespaced per sel_player_id - zie moduledocstring voor de volledige,
+    # bevestigde root-cause-analyse ("bij mijn spelers zie ik niet de spelers
+    # van haar ploeg maar die van mijn ploeg").
     available_labels = st.multiselect(
         "Beschikbare eigen spelers", own_labels, default=default_labels,
-        key="scenario_available_players",
+        key=f"scenario_available_players_{sel_player_id}",
     )
     if len(available_labels) < 2:
         st.info("Selecteer minstens 2 spelers.")
