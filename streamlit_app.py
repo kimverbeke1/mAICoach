@@ -20,10 +20,18 @@ page_lineup_lab.py) worden daardoor automatisch no-ops - zie
 perf_timing.py. Het verschil tussen "pagina: ..." en de som van de stappen
 eronder is tijd die (nog) niet gemeten wordt - daar zoeken we in de
 volgende ronde verder.
-
 Uitschakelen: PERF_ENABLED = False bovenaan perf_timing.py.
-"""
 
+--------------------------------------------------------------------------
+USAGE_TRACKING_2026-10-07 (op verzoek van Kim: verborgen gebruiksstatistieken)
+--------------------------------------------------------------------------
+Na elke run (ook als de pagina via st.rerun() wisselt) registreert
+usage_tracker.track() welke app/pagina deze sessie bekijkt, in de verborgen
+Firestore-collecties _admin_sessions en _admin_usage_logs. Niets hiervan is
+zichtbaar in de UI. Voor Padel Analysis wordt de gekozen subpagina uit
+st.session_state["page"] gelezen (gezet door PadelAnalysis/dashboard.py).
+Uitschakelen: USAGE_TRACKING_ENABLED = False bovenaan usage_tracker.py.
+"""
 from pathlib import Path
 import sys
 
@@ -41,6 +49,12 @@ try:
     import perf_timing as perf
 except Exception:  # noqa: BLE001  pragma: no cover
     perf = None
+
+# USAGE_TRACKING_2026-10-07: faalt de import, dan draait de app gewoon verder.
+try:
+    import usage_tracker
+except Exception:  # noqa: BLE001  pragma: no cover
+    usage_tracker = None
 
 st.set_page_config(page_title="Kim | Apps", page_icon="🏠", layout="wide")
 
@@ -62,9 +76,30 @@ padel_page = st.Page(
 
 navigation = st.navigation({"Apps": [health_page, padel_page]})
 
-if perf is not None:
-    with perf.step(f"pagina: {navigation.title}"):
+
+def _track_usage() -> None:
+    """Log app + (voor Padel) subpagina. Mag de app nooit breken."""
+    if usage_tracker is None:
+        return
+    try:
+        app_title = navigation.title
+        if app_title == "Padel Analysis":
+            sub = str(st.session_state.get("page") or "start")
+        else:
+            sub = "start"  # mAICoach heeft 1 pagina; verfijn later indien gewenst
+        usage_tracker.track(app_title, sub)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+try:
+    if perf is not None:
+        with perf.step(f"pagina: {navigation.title}"):
+            navigation.run()
+        perf.end_run()
+    else:
         navigation.run()
-    perf.end_run()
-else:
-    navigation.run()
+finally:
+    # finally: ook bij st.rerun()/st.stop() (die de run onderbreken) wordt gelogd;
+    # usage_tracker ontdubbelt zelf via de sleutel app|pagina.
+    _track_usage()
