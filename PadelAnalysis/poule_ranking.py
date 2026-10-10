@@ -120,10 +120,39 @@ mag bovenaan staan van die 2.")
    en wordt ze gebruikt. Komt geen of beide overeen, dan wordt de onderlinge
    confrontatie NIET toegepast en staat er een duidelijke melding - nooit
    een gok die een ploeg ten onrechte boven een andere zet.
+3b. PADEL_ANALYSIS_RANKING_ORIENTATION_TOLERANT_2026-10-10 (Kim zag "de onderlinge
+   confrontatie kon niet betrouwbaar toegepast worden"): de zelf-controle eiste
+   dat ALLE ploegen exact overeenkwamen. Dat faalt zodra het opgeslagen schema
+   maar 1 ontmoeting achterloopt op de live rangschikking van TVL, of 1 score
+   onleesbaar is. Nu wint de richting met het kleinste totale puntenverschil
+   (max. 4 punten, strikt beter dan de andere richting); orientation_diagnosis()
+   geeft de details, test_poule_orientation.py toont ze voor de echte poule.
 4. GELIJKE STAND, 3 OF MEER PLOEGEN: ongewijzigd "onbepaald" - er is geen
    bevestigde regel. De volgorde blijft die van TVL en een melding zegt dat.
    Is de onderlinge ontmoeting nog niet gespeeld of was ze gelijk (2-2), dan
    blijft de TVL-volgorde ook staan, met een melding.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_SCORE_FORMAT_2026-10-10 + _TIEBREAK_CRITERIA_ (Kim zag
+"de onderlinge confrontatie kon niet betrouwbaar toegepast worden")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd met poule_orientation_rapport.txt): het scoreveld van
+het poule-schema heeft drie delen "matchen / sets / games", bv.
+"1-3 / 3-7 / 40-56". _parse_score() verwachtte enkel "3-1", dus ALLE 12
+scores waren onleesbaar en de richting kon nooit bepaald worden. Met enkel de
+eerste component is de richting "thuis-uit" exact bevestigd (verschil met de
+punten van TVL = 0; "uit-thuis" = 8).
+_parse_score_full() leest nu alle drie de delen (het oude formaat blijft
+werken). Daardoor zijn ook sets en games beschikbaar voor de gelijke-stand-
+regels die Kim aanreikte, bij gelijke punten, in volgorde:
+  1. gewonnen matchen over de hele poule, 2. setsaldo, 3. gamesaldo,
+  4. enkel bij exact 2 ploegen die dan nog gelijk staan: de onderlinge
+     ontmoeting. Drie of meer ploegen die op alles gelijk staan: onbeslist.
+TIEBREAK_H2H_FIRST_FOR_TWO = True laat bij exact 2 ploegen de onderlinge
+ontmoeting eerst tellen (Kim's eerdere regel). LET OP: de aangereikte regels
+zijn niet gecontroleerd tegen het officiele reglement; op Poule Q geven beide
+volgordes een ander resultaat voor Deinze D en Lobbeke B. De volgorde die TVL
+zelf toont is geen bewijs: binnen elke gelijke stand staan de ploegen op
+oplopend ploegnummer (8005, 8076 / 8073, 8159, 8218).
 """
 from __future__ import annotations
 import itertools
@@ -279,12 +308,10 @@ def _encounter_result(score_text: Optional[str]) -> Optional[str]:
     voor een specifieke, betwiste ontmoeting voor je hierop een fix baseert.
     PADEL_ANALYSIS_RANKING_TIEBREAK_2026-10-10: de rangschikking zelf
     gebruikt hiervoor nu _parse_score() + detect_score_orientation()."""
-    if not score_text:
+    parsed = _parse_score(score_text)  # PADEL_ANALYSIS_RANKING_SCORE_FORMAT_2026-10-10
+    if parsed is None:
         return None
-    m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)\s*$", str(score_text).strip())
-    if not m:
-        return None
-    home, away = int(m.group(1)), int(m.group(2))
+    home, away = parsed
     if home > away:
         return "win"
     if home < away:
@@ -323,14 +350,30 @@ def _head_to_head_winner(fixtures: list, ploeg_id_a: str, ploeg_id_b: str) -> Op
 # ---------------------------------------------------------------------------
 _ORIENT_HOME_FIRST = "thuis-uit"
 _ORIENT_AWAY_FIRST = "uit-thuis"
-def _parse_score(score_text) -> Optional[tuple]:
-    """"3-1" / "3/1" -> (3, 1); onleesbaar -> None (nooit een gok)."""
+_SEG_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+def _parse_score_full(score_text) -> Optional[dict]:
+    """Leest het scoreveld van het poule-schema. TVL levert "matchen / sets /
+    games", bv. "1-3 / 3-7 / 40-56" (thuis-uit, tenzij de richting omgekeerd
+    blijkt). Geeft {"matches": (a, b), "sets": (a, b) | None, "games": (a, b) |
+    None} terug, of None als zelfs de matchen onleesbaar zijn (nooit een gok).
+    Ook het oudere formaat "3-1" / "3/1" (enkel matchen) blijft werken.
+    PADEL_ANALYSIS_RANKING_SCORE_FORMAT_2026-10-10."""
     if not score_text:
         return None
-    m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)\s*$", str(score_text).strip())
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2))
+    text = str(score_text).strip()
+    segs = [x for x in text.split("/")]
+    if len(segs) >= 2 and all(_SEG_RE.match(x) for x in segs):
+        vals = [tuple(int(g) for g in _SEG_RE.match(x).groups()) for x in segs]
+        return {"matches": vals[0], "sets": vals[1] if len(vals) > 1 else None,
+                "games": vals[2] if len(vals) > 2 else None}
+    m = re.match(r"^\s*(\d+)\s*[-/]\s*(\d+)\s*$", text)
+    if m:
+        return {"matches": (int(m.group(1)), int(m.group(2))), "sets": None, "games": None}
+    return None
+def _parse_score(score_text) -> Optional[tuple]:
+    """Enkel de MATCHEN-component: "3-1" / "1-3 / 3-7 / 40-56" -> (3, 1) / (1, 3)."""
+    full = _parse_score_full(score_text)
+    return full["matches"] if full else None
 def _boards_home_away(fx: dict, orientation: str) -> Optional[tuple]:
     """(borden thuisploeg, borden uitploeg) volgens de gegeven richting."""
     parsed = _parse_score(fx.get("score"))
@@ -338,28 +381,27 @@ def _boards_home_away(fx: dict, orientation: str) -> Optional[tuple]:
         return None
     a, b = parsed
     return (a, b) if orientation == _ORIENT_HOME_FIRST else (b, a)
-def detect_score_orientation(standings: list, fixtures: list) -> Optional[str]:
-    """Bepaalt in welke richting het "score"-veld van de fixtures gelezen moet
-    worden, door de stand opnieuw uit de GESPEELDE fixtures te berekenen (in
-    beide richtingen) en te vergelijken met de Punten die TVL zelf toont.
-    Geeft "thuis-uit" of "uit-thuis" terug als PRECIES 1 richting op ALLE
-    ploegen overeenkomt, anders None (geen/onbetrouwbare data, of beide
-    richtingen passen) - dan wordt de onderlinge confrontatie niet gebruikt."""
+def orientation_diagnosis(standings: list, fixtures: list) -> dict:
+    """Rekent de stand opnieuw uit de GESPEELDE fixtures, in beide richtingen,
+    en vergelijkt met de Punten die TVL toont. Geeft per richting de berekende
+    punten, het verschil per ploeg en het totale verschil terug - de basis voor
+    detect_score_orientation() en voor test_poule_orientation.py.
+    PADEL_ANALYSIS_RANKING_ORIENTATION_TOLERANT_2026-10-10."""
     target = {}
+    namen = {}
     for s in standings or []:
         if s.get("ploeg_id") is None or s.get("punten") is None:
-            return None
+            continue
         target[str(s["ploeg_id"])] = int(s["punten"])
-    if not target:
-        return None
+        namen[str(s["ploeg_id"])] = s.get("ploeg_naam")
     played = [
         fx for fx in fixtures or []
         if fx.get("played")
         and str(fx.get("home_ploeg_id")) in target and str(fx.get("away_ploeg_id")) in target
     ]
-    if not played:
-        return None
-    passend = []
+    onleesbaar = [fx for fx in played if _parse_score(fx.get("score")) is None]
+    out = {"target": target, "namen": namen, "n_played": len(played),
+           "onleesbaar": onleesbaar, "per_orient": {}}
     for orient in (_ORIENT_HOME_FIRST, _ORIENT_AWAY_FIRST):
         pts = {pid: 0 for pid in target}
         for fx in played:
@@ -369,16 +411,40 @@ def detect_score_orientation(standings: list, fixtures: list) -> Optional[str]:
             h, a = str(fx["home_ploeg_id"]), str(fx["away_ploeg_id"])
             if bh[0] > bh[1]:
                 pts[h] += WIN_POINTS
-                pts[a] += LOSS_POINTS
             elif bh[0] < bh[1]:
                 pts[a] += WIN_POINTS
-                pts[h] += LOSS_POINTS
             else:
                 pts[h] += DRAW_POINTS
                 pts[a] += DRAW_POINTS
-        if pts == target:
-            passend.append(orient)
-    return passend[0] if len(passend) == 1 else None
+        diff = {pid: pts[pid] - target[pid] for pid in target}
+        out["per_orient"][orient] = {
+            "pts": pts, "diff": diff, "totaal_diff": sum(abs(v) for v in diff.values()),
+        }
+    return out
+# Maximaal totaal punten-verschil (over alle ploegen samen) waarbij een richting
+# nog als "bevestigd" geldt: 4 = ruimte voor 1 ontmoeting (2 punten per ploeg)
+# die TVL al verwerkte en ons opgeslagen schema nog niet.
+_MAX_ORIENT_DIFF = 4
+def detect_score_orientation(standings: list, fixtures: list) -> Optional[str]:
+    """Bepaalt in welke richting het "score"-veld van de fixtures gelezen moet
+    worden. Geeft "thuis-uit" of "uit-thuis" terug als die richting de punten van
+    TVL (vrijwel) volledig verklaart en duidelijk beter is dan de andere; anders
+    None - dan wordt de onderlinge confrontatie niet gebruikt.
+    PADEL_ANALYSIS_RANKING_ORIENTATION_TOLERANT_2026-10-10: voorheen moesten ALLE
+    ploegen exact overeenkomen. Dat faalde zodra het opgeslagen schema even
+    achterliep op de live rangschikking (een net gespeelde ontmoeting die TVL
+    al telt, het schema nog niet). Nu telt de richting met het kleinste totale
+    verschil, op voorwaarde dat dat verschil hoogstens _MAX_ORIENT_DIFF is en
+    strikt kleiner dan dat van de andere richting."""
+    diag = orientation_diagnosis(standings, fixtures)
+    if not diag["target"] or not diag["n_played"]:
+        return None
+    d_thuis = diag["per_orient"][_ORIENT_HOME_FIRST]["totaal_diff"]
+    d_uit = diag["per_orient"][_ORIENT_AWAY_FIRST]["totaal_diff"]
+    if d_thuis == d_uit:
+        return None
+    beste, d_beste = (_ORIENT_HOME_FIRST, d_thuis) if d_thuis < d_uit else (_ORIENT_AWAY_FIRST, d_uit)
+    return beste if d_beste <= _MAX_ORIENT_DIFF else None
 def _h2h_boards(fixtures: list, a: str, b: str, orientation: str) -> Optional[tuple]:
     """(borden a, borden b) van de gespeelde onderlinge ontmoeting, of None."""
     for fx in fixtures or []:
@@ -392,17 +458,83 @@ def _h2h_boards(fixtures: list, a: str, b: str, orientation: str) -> Optional[tu
             return None
         return (bh[0], bh[1]) if h == str(a) else (bh[1], bh[0])
     return None
+# PADEL_ANALYSIS_RANKING_TIEBREAK_CRITERIA_2026-10-10 (regels aangereikt door Kim):
+# bij een gelijke stand op punten, in deze volgorde:
+#   1. aantal gewonnen matchen (over alle ontmoetingen in de poule)
+#   2. setsaldo (sets voor min sets tegen)
+#   3. gamesaldo (games voor min games tegen)
+#   4. enkel als daarna EXACT 2 ploegen overblijven die nog steeds op alles gelijk
+#      staan: de onderlinge ontmoeting. 3 of meer: onbeslist.
+# Zet op True om bij EXACT 2 ploegen gelijk de onderlinge ontmoeting EERST te
+# laten tellen (Kim's eerste regel) - de criteria 1-3 gelden dan als terugval.
+TIEBREAK_H2H_FIRST_FOR_TWO = False
+_CRITERIA = (
+    ("matches_won", "gewonnen matchen", False),
+    ("sets_saldo", "setsaldo", True),
+    ("games_saldo", "gamesaldo", True),
+)
+def _team_stats(standings: list, fixtures: list, orientation: str) -> dict:
+    """Per ploeg: gewonnen matchen, setsaldo, gamesaldo uit de GESPEELDE
+    fixtures. Een criterium is None zodra het voor een ploeg niet uit alle
+    uitslagen af te leiden is (dan wordt het voor iedereen overgeslagen)."""
+    ids = {str(s["ploeg_id"]) for s in standings if s.get("ploeg_id") is not None}
+    stats = {pid: {"matches_won": 0, "sets_saldo": 0, "games_saldo": 0, "_sets_ok": True, "_games_ok": True}
+             for pid in ids}
+    for fx in fixtures or []:
+        if not fx.get("played"):
+            continue
+        h, a = str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id"))
+        if h not in ids or a not in ids:
+            continue
+        full = _parse_score_full(fx.get("score"))
+        if full is None:
+            continue
+        flip = orientation == _ORIENT_AWAY_FIRST
+        def _hm(pair):
+            return (pair[1], pair[0]) if flip else pair
+        mh, ma = _hm(full["matches"])
+        stats[h]["matches_won"] += mh
+        stats[a]["matches_won"] += ma
+        for key, ok_key, comp in (("sets_saldo", "_sets_ok", "sets"), ("games_saldo", "_games_ok", "games")):
+            if full[comp] is None:
+                stats[h][ok_key] = stats[a][ok_key] = False
+                continue
+            vh, va = _hm(full[comp])
+            stats[h][key] += vh - va
+            stats[a][key] += va - vh
+    for st_ in stats.values():
+        if not st_.pop("_sets_ok"):
+            st_["sets_saldo"] = None
+        if not st_.pop("_games_ok"):
+            st_["games_saldo"] = None
+    return stats
+def _fmt_signed(v) -> str:
+    return f"{v:+d}"
+def _explain(winner: dict, loser: dict, sw: dict, sl: dict, criteria: list) -> str:
+    """Zegt welk criterium de doorslag gaf tussen twee ploegen."""
+    gelijk = []
+    for key, label, signed in criteria:
+        vw, vl = sw.get(key), sl.get(key)
+        if vw is None or vl is None:
+            continue
+        if vw != vl:
+            tekst = f"{_fmt_signed(vw)} tegenover {_fmt_signed(vl)}" if signed else f"{vw} tegenover {vl}"
+            voorloop = f"gelijk op {' en '.join(gelijk)}, " if gelijk else ""
+            return f"{winner.get('ploeg_naam')} staat boven {loser.get('ploeg_naam')}: {voorloop}beslist door {label} ({tekst})."
+        gelijk.append(label)
+    return ""
 def order_standings_with_tiebreak(standings: list, fixtures: list) -> dict:
-    """Sorteert de stand op punten, en bij een gelijke stand tussen EXACT 2
-    ploegen op de onderlinge confrontatie. Geeft terug:
+    """Sorteert de stand op punten en lost een gelijke stand op met de criteria
+    bovenaan (zie TIEBREAK_H2H_FIRST_FOR_TWO / _CRITERIA). Geeft terug:
         {"rows": [standings-dicts + "rank"], "notes": [str],
          "orientation": str | None, "unresolved_boundary": bool}
-    `unresolved_boundary` = True als een onbeslist gelijke stand over de grens
-    van de doorgaande plaatsen (QUALIFYING_PLACES) heen loopt."""
+    `unresolved_boundary` = True als een onbeslist gelijke stand over de grens van
+    de doorgaande plaatsen (QUALIFYING_PLACES) heen loopt."""
     rows = [dict(s) for s in standings or []]
     rows.sort(key=lambda s: (-(s.get("punten") if s.get("punten") is not None else -1), s.get("plaats", 0)))
     notes: list = []
     orientation = detect_score_orientation(standings, fixtures)
+    stats = _team_stats(standings, fixtures, orientation) if orientation else {}
     uitkomst: list = []
     unresolved_boundary = False
     i = 0
@@ -412,54 +544,103 @@ def order_standings_with_tiebreak(standings: list, fixtures: list) -> dict:
             j += 1
         groep = rows[i:j + 1]
         eerste_rank, laatste_rank = i + 1, j + 1
-        if len(groep) == 2:
-            a, b = groep
-            naam_a, naam_b = a.get("ploeg_naam"), b.get("ploeg_naam")
+        onbeslist_groepen: list = []
+        if len(groep) >= 2:
+            namen = ", ".join(g.get("ploeg_naam") or "?" for g in groep)
             if orientation is None:
                 notes.append(
-                    f"Gelijke stand tussen {naam_a} en {naam_b}: de onderlinge confrontatie kon niet "
-                    "betrouwbaar toegepast worden (de uitslagen in het schema komen niet overeen met de punten) "
-                    "- volgorde zoals TVL ze toont."
+                    f"Gelijke stand tussen {namen}: de uitslagen in het opgeslagen schema komen niet overeen "
+                    "met de punten van TVL (schema niet up-to-date?) - volgorde zoals TVL ze toont."
                 )
-                beslist = False
+                onbeslist_groepen.append(list(groep))
             else:
-                bw = _h2h_boards(fixtures, a.get("ploeg_id"), b.get("ploeg_id"), orientation)
-                if bw is None:
-                    notes.append(
-                        f"Gelijke stand tussen {naam_a} en {naam_b}: de onderlinge ontmoeting is nog niet "
-                        "gespeeld - volgorde voorlopig zoals TVL ze toont."
-                    )
-                    beslist = False
-                elif bw[0] == bw[1]:
-                    notes.append(
-                        f"Gelijke stand tussen {naam_a} en {naam_b}: de onderlinge ontmoeting eindigde gelijk "
-                        f"({bw[0]}-{bw[1]}) - geen beslissing mogelijk, volgorde zoals TVL ze toont."
-                    )
-                    beslist = False
-                else:
-                    winnaar, verliezer = (a, b) if bw[0] > bw[1] else (b, a)
-                    groep = [winnaar, verliezer]
-                    notes.append(
-                        f"Gelijke stand tussen {naam_a} en {naam_b}: {winnaar.get('ploeg_naam')} staat hoger "
-                        f"door de onderlinge confrontatie ({max(bw)}-{min(bw)} gewonnen)."
-                    )
-                    beslist = True
-            if not beslist and eerste_rank <= QUALIFYING_PLACES < laatste_rank:
-                unresolved_boundary = True
-        elif len(groep) >= 3:
-            namen = ", ".join(g.get("ploeg_naam") or "?" for g in groep)
-            notes.append(
-                f"Gelijke stand tussen {len(groep)} ploegen ({namen}): daarvoor is geen onderlinge regel "
-                "bevestigd - volgorde zoals TVL ze toont, controleer handmatig."
-            )
-            if eerste_rank <= QUALIFYING_PLACES < laatste_rank:
-                unresolved_boundary = True
+                groep, beslist_notes, onbeslist_groepen = _resolve_tie_group(groep, stats, fixtures, orientation)
+                notes.extend(beslist_notes)
+        for og in onbeslist_groepen:
+            ids_og = {id(x) for x in og}
+            posities = [idx for idx, g_ in enumerate(groep) if id(g_) in ids_og]
+            if posities:
+                blok_eerste = eerste_rank + min(posities)
+                blok_laatste = eerste_rank + max(posities)
+                if blok_eerste <= QUALIFYING_PLACES < blok_laatste:
+                    unresolved_boundary = True
         uitkomst.extend(groep)
         i = j + 1
     for rank, s in enumerate(uitkomst, start=1):
         s["rank"] = rank
     return {"rows": uitkomst, "notes": notes, "orientation": orientation,
             "unresolved_boundary": unresolved_boundary}
+def _h2h_two(a: dict, b: dict, fixtures: list, orientation: str):
+    """Onderlinge ontmoeting tussen exact 2 ploegen: (winnaar, verliezer, tekst) of None."""
+    bw = _h2h_boards(fixtures, a.get("ploeg_id"), b.get("ploeg_id"), orientation)
+    if bw is None or bw[0] == bw[1]:
+        return None, bw
+    w, l = (a, b) if bw[0] > bw[1] else (b, a)
+    return (w, l, f"{max(bw)}-{min(bw)}"), bw
+def _resolve_tie_group(groep: list, stats: dict, fixtures: list, orientation: str):
+    """Geeft (geordende groep, notes, lijst onbeslist gebleven deelgroepen)."""
+    notes: list = []
+    onbeslist: list = []
+    criteria = [
+        c for c in _CRITERIA
+        if all(stats.get(str(g.get("ploeg_id")), {}).get(c[0]) is not None for g in groep)
+    ]
+    if len(criteria) < len(_CRITERIA):
+        ontbrekend = ", ".join(c[1] for c in _CRITERIA if c not in criteria)
+        notes.append(f"Voor deze gelijke stand ontbreekt {ontbrekend} in het schema - dat criterium is overgeslagen.")
+    if TIEBREAK_H2H_FIRST_FOR_TWO and len(groep) == 2:
+        uit, bw = _h2h_two(groep[0], groep[1], fixtures, orientation)
+        if uit:
+            w, l, tekst = uit
+            notes.append(f"{w.get('ploeg_naam')} staat boven {l.get('ploeg_naam')}: beslist door de onderlinge confrontatie ({tekst} gewonnen).")
+            return [w, l], notes, onbeslist
+    def sleutel(g):
+        st_ = stats.get(str(g.get("ploeg_id")), {})
+        return tuple(-(st_.get(c[0]) or 0) for c in criteria)
+    gesorteerd = sorted(groep, key=sleutel)
+    # Splits in blokken die op ALLE criteria gelijk staan
+    blokken: list = []
+    for g in gesorteerd:
+        if blokken and sleutel(blokken[-1][0]) == sleutel(g):
+            blokken[-1].append(g)
+        else:
+            blokken.append([g])
+    resultaat: list = []
+    for blok in blokken:
+        if len(blok) == 2:
+            uit, bw = _h2h_two(blok[0], blok[1], fixtures, orientation)
+            if uit:
+                w, l, tekst = uit
+                notes.append(
+                    f"{w.get('ploeg_naam')} staat boven {l.get('ploeg_naam')}: gelijk op "
+                    f"{', '.join(c[1] for c in criteria)}, beslist door de onderlinge confrontatie ({tekst} gewonnen)."
+                )
+                resultaat.extend([w, l])
+                continue
+            reden = "de onderlinge ontmoeting is nog niet gespeeld" if bw is None else \
+                f"de onderlinge ontmoeting eindigde gelijk ({bw[0]}-{bw[1]})"
+            notes.append(
+                f"Gelijke stand tussen {blok[0].get('ploeg_naam')} en {blok[1].get('ploeg_naam')} op alle criteria, en "
+                f"{reden} - volgorde zoals TVL ze toont."
+            )
+            onbeslist.append(blok)
+        elif len(blok) >= 3:
+            notes.append(
+                f"Gelijke stand tussen {', '.join(b.get('ploeg_naam') or '?' for b in blok)} op alle criteria "
+                "(gewonnen matchen, setsaldo en gamesaldo) - daarvoor is geen verdere regel bevestigd, "
+                "volgorde zoals TVL ze toont."
+            )
+            onbeslist.append(blok)
+        resultaat.extend(blok)
+    # Uitleg per beslissing tussen opeenvolgende ploegen die NIET gelijk stonden
+    for k in range(len(resultaat) - 1):
+        a_, b_ = resultaat[k], resultaat[k + 1]
+        sa, sb = stats.get(str(a_.get("ploeg_id")), {}), stats.get(str(b_.get("ploeg_id")), {})
+        if sleutel(a_) != sleutel(b_):
+            tekst = _explain(a_, b_, sa, sb, criteria)
+            if tekst:
+                notes.append(tekst)
+    return resultaat, notes, onbeslist
 def _describe_points_shed_requirement(n_free_remaining: int, points_to_shed: int) -> str:
     """PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27: vertaalt
     "moet X punten minder halen dan hun maximum" naar een EXACTE, voor élk
@@ -767,7 +948,7 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
     st.caption(
         f"Groen = plaats 1 t.e.m. {QUALIFYING_PLACES} (gaat door volgens de reglementaire regel "
         "'eerste 2 gaan door in de poulefase'). Blauw = onze eigen ploeg. Bij een gelijke stand staat "
-        "de ploeg die de onderlinge confrontatie won hoger."
+        "de ploeg met de meeste gewonnen matchen hoger, daarna het setsaldo, dan het gamesaldo, en pas daarna de onderlinge confrontatie."
     )
     for note in ordered["notes"]:
         st.caption(f"\u2139\ufe0f {note}")
