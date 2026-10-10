@@ -288,12 +288,42 @@ van je eigen ploeg (standaard de eerstvolgende) - zie opponent_scout_ui.py,
 PADEL_ANALYSIS_OPPONENT_PICK_IN_ANALYSE_2026-10-05. poule_teams_ui.py blijft
 bestaan maar wordt niet meer aangeroepen. Een oude URL met
 ?lineup_section=Andere ploegen valt vanzelf terug op "Analyseren".
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_SCHEDULE_2026-10-10 (op verzoek van Kim: "bij
+rangschikking: mag de link weg met 'Bekijk de officiele rangschikking op
+TVL'. bijkomend zou het ook wel goed zijn dat je kan zien tegen wie je nog
+moet spelen. Het speelschema dus eigenlijk.")
+--------------------------------------------------------------------------
+1. De knop/link "Bekijk de officiele rangschikking op TVL" is weg uit de
+   sectie Rangschikking (de aanroep van _render_rangschikking_link() is
+   verwijderd; de functie zelf blijft ongebruikt bestaan, net als
+   _build_rangschikking_url()).
+2. NIEUW: _render_speelschema() toont onder de stand het speelschema van de
+   EIGEN ploeg uit de reeds opgeslagen poule-schema's (zelfde bron als de
+   rest van de pagina: vm_fixtures_<speler> + vm_own_ploeg_id_<speler>, na
+   _ensure_known_ranking_context()): eerst "Nog te spelen" (datum, thuis/uit,
+   tegenstander), daaronder "Al gespeeld" met de uitslag zoals ze in het
+   schema staat. Die uitslag wordt bewust LETTERLIJK getoond als
+   "thuis - uit": de orientatie van dat veld is in poule_ranking.py nog
+   niet geverifieerd (zie PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED), dus
+   hier geen win/verlies-interpretatie. Een caption toont wanneer het
+   schema voor het laatst bijgewerkt werd: een ontmoeting die net gespeeld
+   is maar nog niet in het schema verwerkt werd, staat anders nog onder
+   "Nog te spelen".
+   Het speelschema staat ook los van de rangschikking: heeft de speler
+   (nog) geen poule-URL maar wel een schema, dan wordt het schema toch
+   getoond.
 """
+import re as _re
 import streamlit as st
 from dashboard_common import (
     fb, ll, ss, osu, oa, _display_name, _format_scraped_at, _go_to_player,
     _get_all_profiles,
 )
+try:
+    from dashboard_common import _get_saved_schedule
+except Exception:  # noqa: BLE001  pragma: no cover
+    _get_saved_schedule = None
 from lineup_scout import (
     _render_volgende_match_and_scout, _scout_team_all_fixtures,
     _recent_own_lineup_roster, _merge_full_opponent_roster,
@@ -712,7 +742,9 @@ def _build_rangschikking_url(reeks_url: str):
         return None
 def _render_rangschikking_link(reeks_url: str) -> None:
     """PADEL_ANALYSIS_RANGSCHIKKING_ALTIJD_ZICHTBAAR_2026-09-27: toont de
-    link zodra ze een geldige `reeks_url` krijgt."""
+    link zodra ze een geldige `reeks_url` krijgt.
+    PADEL_ANALYSIS_RANKING_SCHEDULE_2026-10-10: niet langer aangeroepen
+    (Kim: "mag de link weg") - blijft ongebruikt bestaan."""
     url = _build_rangschikking_url(reeks_url)
     if url:
         try:
@@ -750,6 +782,71 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
         poule_ranking.render_poule_ranking_tab(reeks_url_for_ranking, fixtures, own_ploeg_id)
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Kon de poule-rangschikking niet laden: {type(exc).__name__}: {exc}")
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_RANKING_SCHEDULE_2026-10-10 - zie moduledocstring.
+# ─────────────────────────────────────────────
+_FX_DATE_RE = _re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\D+(\d{1,2}):(\d{2}))?")
+def _fixture_sort_key(fx: dict) -> tuple:
+    """Sorteersleutel (jaar, maand, dag, uur, minuut) uit date_text
+    (bv. "11/10/2026 09:30"). Onleesbare datums komen achteraan."""
+    m = _FX_DATE_RE.search(str(fx.get("date_text") or ""))
+    if not m:
+        return (9999, 12, 31, 23, 59)
+    d, mo, y, hh, mi = m.groups()
+    return (int(y), int(mo), int(d), int(hh or 0), int(mi or 0))
+def _render_speelschema(sel_player_id) -> None:
+    """Speelschema van de EIGEN ploeg: eerst wat nog te spelen is, daaronder
+    wat al gespeeld is (uitslag letterlijk zoals in het schema: thuis - uit)."""
+    st.markdown("#### Speelschema")
+    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
+    own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
+    if not fixtures or not own_ploeg_id:
+        st.info(
+            "Het speelschema is nog niet gekend voor deze speler - dit wordt automatisch aangevuld "
+            "zodra het poule-schema bekend is (normaal via de dagelijkse update)."
+        )
+        return
+    own = str(own_ploeg_id)
+    mijn = [
+        fx for fx in fixtures
+        if own in (str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id")))
+    ]
+    if not mijn:
+        st.info("Geen ontmoetingen van onze ploeg gevonden in het poule-schema.")
+        return
+    mijn.sort(key=_fixture_sort_key)
+    def _rij(fx: dict, met_uitslag: bool) -> dict:
+        thuis = str(fx.get("home_ploeg_id")) == own
+        tegen = fx.get("away_name") if thuis else fx.get("home_name")
+        rij = {
+            "Datum": fx.get("date_text") or "?",
+            "Thuis/uit": "Thuis" if thuis else "Uit",
+            "Tegenstander": tegen or "?",
+        }
+        if met_uitslag:
+            rij["Uitslag (thuis - uit)"] = fx.get("score") or "-"
+        return rij
+    nog = [fx for fx in mijn if not fx.get("played")]
+    gespeeld = [fx for fx in mijn if fx.get("played")]
+    if nog:
+        st.markdown(f"**Nog te spelen ({len(nog)})**")
+        st.dataframe([_rij(fx, False) for fx in nog], use_container_width=True, hide_index=True)
+    else:
+        st.success("Alle ontmoetingen in deze poule zijn gespeeld.")
+    if gespeeld:
+        st.markdown(f"**Al gespeeld ({len(gespeeld)})**")
+        st.dataframe([_rij(fx, True) for fx in reversed(gespeeld)], use_container_width=True, hide_index=True)
+    sched_at = None
+    if _get_saved_schedule is not None:
+        try:
+            _fx_saved, sched_at = _get_saved_schedule(str(sel_player_id))
+        except Exception:  # noqa: BLE001
+            sched_at = None
+    if sched_at:
+        st.caption(
+            f"Schema laatst bijgewerkt op {_format_scraped_at(sched_at)}. Een ontmoeting die net gespeeld "
+            "is, staat tot de volgende update nog onder 'Nog te spelen'."
+        )
 def _ensure_known_ranking_context(sel_player_id, sel_label):
     """PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: vult reeks_url/fixtures/
     own_ploeg_id aan uit reeds OPGESLAGEN data, maar doet dat werk enkel
@@ -903,19 +1000,22 @@ def page_lineup_lab():
         # PADEL_ANALYSIS_RANKING_INDEPENDENT_OF_ANALYSIS_2026-09-27: deze
         # sectie hangt NOOIT af van of de gebruiker al "analyseren" deed -
         # ze werkt volledig op reeds opgeslagen data.
+        # PADEL_ANALYSIS_RANKING_SCHEDULE_2026-10-10: de TVL-link is weg; onder
+        # de stand staat nu het speelschema van de eigen ploeg.
         with perf.step("_ensure_known_ranking_context"):
             reeks_url_for_ranking = _ensure_known_ranking_context(sel_player_id, sel_label)
         if reeks_url_for_ranking:
-            _render_rangschikking_link(reeks_url_for_ranking)
-            st.divider()
             with perf.step("SECTIE Rangschikking (poule_ranking)"):
                 _render_poule_ranking_section(reeks_url_for_ranking, sel_player_id)
         else:
             st.info(
-                "Kon de rangschikkingslink nog niet bepalen voor deze speler - het poule-schema "
+                "Kon de rangschikking nog niet bepalen voor deze speler - het poule-schema "
                 "is nog niet gekend (dit wordt normaal automatisch aangevuld via de dagelijkse "
                 "update, of open de sectie 'Analyseren' en laad 'Volgende match')."
             )
+        st.divider()
+        with perf.step("SECTIE Speelschema"):
+            _render_speelschema(sel_player_id)
     elif section == SECTION_RETRO:
         # PADEL_ANALYSIS_RETROSPECTIVE_2026-10-03: hangt NIET af van de scout-
         # keten - werkt rechtstreeks op de al gescrapete eigen matchdata.
