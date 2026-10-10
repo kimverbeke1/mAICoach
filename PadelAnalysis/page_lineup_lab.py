@@ -310,6 +310,10 @@ moet spelen. Het speelschema dus eigenlijk.")
    schema voor het laatst bijgewerkt werd: een ontmoeting die net gespeeld
    is maar nog niet in het schema verwerkt werd, staat anders nog onder
    "Nog te spelen".
+   PADEL_ANALYSIS_SCHEDULE_ALL_TEAMS_2026-10-10 (Kim: "heb je ook al data van de
+   andere ploegen? Indien niet [...] gewoon een link"): het opgeslagen poule-
+   schema bevat ALLE ontmoetingen van de poule, dus een keuzelijst "Speelschema
+   van" toont nu ook elke andere ploeg - zonder extra scrape of link.
    Het speelschema staat ook los van de rangschikking: heeft de speler
    (nog) geen poule-URL maar wel een schema, dan wordt het schema toch
    getoond.
@@ -795,8 +799,9 @@ def _fixture_sort_key(fx: dict) -> tuple:
     d, mo, y, hh, mi = m.groups()
     return (int(y), int(mo), int(d), int(hh or 0), int(mi or 0))
 def _render_speelschema(sel_player_id) -> None:
-    """Speelschema van de EIGEN ploeg: eerst wat nog te spelen is, daaronder
-    wat al gespeeld is (uitslag letterlijk zoals in het schema: thuis - uit)."""
+    """Speelschema van onze ploeg (standaard) of een andere ploeg uit de poule:
+    eerst wat nog te spelen is, daaronder wat al gespeeld is (uitslag letterlijk
+    zoals in het schema: thuis - uit)."""
     st.markdown("#### Speelschema")
     fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
@@ -807,16 +812,32 @@ def _render_speelschema(sel_player_id) -> None:
         )
         return
     own = str(own_ploeg_id)
+    # PADEL_ANALYSIS_SCHEDULE_ALL_TEAMS_2026-10-10: het opgeslagen poule-schema
+    # bevat ALLE ontmoetingen van de poule - dus ook het speelschema van elke
+    # andere ploeg, zonder extra scrape. Standaard onze eigen ploeg.
+    teams: dict = {}
+    for fx in fixtures:
+        for kant in ("home", "away"):
+            tid, tnaam = fx.get(f"{kant}_ploeg_id"), fx.get(f"{kant}_name")
+            if tid and tnaam:
+                teams.setdefault(str(tid), tnaam)
+    keuzes = [own] + sorted((t for t in teams if t != own), key=lambda t: teams[t].lower())
+    labels = {t: (f"{teams.get(t, 'Onze ploeg')} (onze ploeg)" if t == own else teams[t]) for t in keuzes}
+    gekozen = st.selectbox(
+        "Speelschema van", keuzes, format_func=lambda t: labels.get(t, t),
+        key=f"speelschema_team_{sel_player_id}",
+    ) if len(keuzes) > 1 else own
+    team = str(gekozen)
     mijn = [
         fx for fx in fixtures
-        if own in (str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id")))
+        if team in (str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id")))
     ]
     if not mijn:
-        st.info("Geen ontmoetingen van onze ploeg gevonden in het poule-schema.")
+        st.info("Geen ontmoetingen van deze ploeg gevonden in het poule-schema.")
         return
     mijn.sort(key=_fixture_sort_key)
     def _rij(fx: dict, met_uitslag: bool) -> dict:
-        thuis = str(fx.get("home_ploeg_id")) == own
+        thuis = str(fx.get("home_ploeg_id")) == team
         tegen = fx.get("away_name") if thuis else fx.get("home_name")
         rij = {
             "Datum": fx.get("date_text") or "?",
