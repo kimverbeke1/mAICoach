@@ -298,27 +298,37 @@ moet spelen. Het speelschema dus eigenlijk.")
    sectie Rangschikking (de aanroep van _render_rangschikking_link() is
    verwijderd; de functie zelf blijft ongebruikt bestaan, net als
    _build_rangschikking_url()).
-2. NIEUW: _render_speelschema() toont onder de stand het speelschema van de
-   EIGEN ploeg uit de reeds opgeslagen poule-schema's (zelfde bron als de
-   rest van de pagina: vm_fixtures_<speler> + vm_own_ploeg_id_<speler>, na
-   _ensure_known_ranking_context()): eerst "Nog te spelen" (datum, thuis/uit,
-   tegenstander), daaronder "Al gespeeld" met de uitslag zoals ze in het
-   schema staat. Die uitslag wordt bewust LETTERLIJK getoond als
-   "thuis - uit": de orientatie van dat veld is in poule_ranking.py nog
-   niet geverifieerd (zie PADEL_ANALYSIS_H2H_SCORE_FIELD_UNVERIFIED), dus
-   hier geen win/verlies-interpretatie. Een caption toont wanneer het
+2. NIEUW: onder de stand staat het speelschema uit de reeds opgeslagen
+   poule-schema's (zelfde bron als de rest van de pagina: vm_fixtures_<speler>
+   + vm_own_ploeg_id_<speler>, na _ensure_known_ranking_context()): eerst
+   "Nog te spelen", daaronder "Al gespeeld". Een caption toont wanneer het
    schema voor het laatst bijgewerkt werd: een ontmoeting die net gespeeld
    is maar nog niet in het schema verwerkt werd, staat anders nog onder
    "Nog te spelen".
    PADEL_ANALYSIS_SCHEDULE_ALL_TEAMS_2026-10-10 (Kim: "heb je ook al data van de
    andere ploegen? Indien niet [...] gewoon een link"): het opgeslagen poule-
    schema bevat ALLE ontmoetingen van de poule, dus een keuzelijst "Speelschema
-   van" toont nu ook elke andere ploeg - zonder extra scrape of link.
+   van" toont ook elke andere ploeg - zonder extra scrape of link.
    Het speelschema staat ook los van de rangschikking: heeft de speler
    (nog) geen poule-URL maar wel een schema, dan wordt het schema toch
    getoond.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_SCHEDULE_DETAILS_LINK_2026-10-10 (op verzoek van Kim: "bij
+speelschema wil ik via een hyperlink naar de details van die match kunnen
+springen. Je ging ook duidelijk scores thuis uit geven. Dus duidelijk tonen
+wie er gewonnen is. Als de geselecteerde ploeg gewonnen is dan groen en anders
+rood.")
+--------------------------------------------------------------------------
+De weergave van het speelschema is verhuisd naar speelschema_view.py (los te
+testen; zie test_speelschema_en_koppels.py). _render_speelschema() hieronder
+is nu een dunne doorgever. Nieuw: kolommen Thuis | Matchen (thuis - uit) | Uit |
+Winnaar | Sets | Games | Details, de rij is groen als de gekozen ploeg won en
+rood als ze verloor (oranje bij gelijkspel), en 'Details' is een klikbare link
+naar het uitslagenblad op de TVL-site. Dit vervangt ook de tussenversie met
+"3-1 gewonnen" (SCHEDULE_READABLE_SCORE), die nooit in dit bestand is
+opgenomen. De oude _fixture_sort_key()/_FX_DATE_RE staan nu in
+speelschema_view.py.
 """
-import re as _re
 import streamlit as st
 from dashboard_common import (
     fb, ll, ss, osu, oa, _display_name, _format_scraped_at, _go_to_player,
@@ -359,6 +369,14 @@ try:
 except Exception as e:  # noqa: BLE001  pragma: no cover
     render_retrospective_tab = None
     _retro_import_error = f"{type(e).__name__}: {e}"
+# PADEL_ANALYSIS_SCHEDULE_DETAILS_LINK_2026-10-10: speelschema-weergave, defensief
+# geimporteerd (een ontbrekend bestand mag de pagina niet laten crashen).
+_speelschema_import_error = None
+try:
+    import speelschema_view as _sv
+except Exception as e:  # noqa: BLE001  pragma: no cover
+    _sv = None
+    _speelschema_import_error = f"{type(e).__name__}: {e}"
 # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
 # Faalt de import, dan draait de pagina gewoon door zonder metingen.
 try:
@@ -480,7 +498,7 @@ def _render_opstelling_scenario(bundle, opp, profiles, name_lookup_global, sel_p
             "kiezen (BEIDE volgordes worden dan getoond); bij een verschil is enkel de sterkste-eerst-"
             "volgorde toegelaten.\n"
             "- **Reglementair-badge**: OK = deze matchup-rij gebruikt overal de reglementair verplichte "
-            "(of, bij gelijkspel, een even geldige) bordvolgorde. NIET = een BEWUST omgedraaide "
+            "(of, bij gelijkspel, een even geldige) matchvolgorde. NIET = een BEWUST omgedraaide "
             "variant (enkel zichtbaar als je de bijhorende checkbox aanvinkt) - dit zou een overtreding "
             "van art. 6.6 zijn en dient enkel om het best-case/worst-case-bereik van een koppelkeuze in "
             "te schatten, NOOIT als effectieve wedstrijdopstelling. onzeker = minstens 1 speler heeft "
@@ -787,87 +805,21 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Kon de poule-rangschikking niet laden: {type(exc).__name__}: {exc}")
 # ─────────────────────────────────────────────
-# PADEL_ANALYSIS_RANKING_SCHEDULE_2026-10-10 - zie moduledocstring.
+# PADEL_ANALYSIS_SCHEDULE_DETAILS_LINK_2026-10-10 - zie moduledocstring.
 # ─────────────────────────────────────────────
-_FX_DATE_RE = _re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\D+(\d{1,2}):(\d{2}))?")
-def _fixture_sort_key(fx: dict) -> tuple:
-    """Sorteersleutel (jaar, maand, dag, uur, minuut) uit date_text
-    (bv. "11/10/2026 09:30"). Onleesbare datums komen achteraan."""
-    m = _FX_DATE_RE.search(str(fx.get("date_text") or ""))
-    if not m:
-        return (9999, 12, 31, 23, 59)
-    d, mo, y, hh, mi = m.groups()
-    return (int(y), int(mo), int(d), int(hh or 0), int(mi or 0))
 def _render_speelschema(sel_player_id) -> None:
-    """Speelschema van onze ploeg (standaard) of een andere ploeg uit de poule:
-    eerst wat nog te spelen is, daaronder wat al gespeeld is (uitslag letterlijk
-    zoals in het schema: thuis - uit)."""
-    st.markdown("#### Speelschema")
-    fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
-    own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
-    if not fixtures or not own_ploeg_id:
-        st.info(
-            "Het speelschema is nog niet gekend voor deze speler - dit wordt automatisch aangevuld "
-            "zodra het poule-schema bekend is (normaal via de dagelijkse update)."
+    """Dunne doorgever naar speelschema_view.render_speelschema() - de volledige
+    weergave (kleuren, winnaar, link naar het uitslagenblad) staat daar."""
+    if _sv is None:
+        detail = f" Details: `{_speelschema_import_error}`." if _speelschema_import_error else ""
+        st.warning(
+            "Kon de module 'speelschema_view' niet laden - controleer of speelschema_view.py "
+            f"in dezelfde map staat als de andere PadelAnalysis-bestanden.{detail}"
         )
         return
-    own = str(own_ploeg_id)
-    # PADEL_ANALYSIS_SCHEDULE_ALL_TEAMS_2026-10-10: het opgeslagen poule-schema
-    # bevat ALLE ontmoetingen van de poule - dus ook het speelschema van elke
-    # andere ploeg, zonder extra scrape. Standaard onze eigen ploeg.
-    teams: dict = {}
-    for fx in fixtures:
-        for kant in ("home", "away"):
-            tid, tnaam = fx.get(f"{kant}_ploeg_id"), fx.get(f"{kant}_name")
-            if tid and tnaam:
-                teams.setdefault(str(tid), tnaam)
-    keuzes = [own] + sorted((t for t in teams if t != own), key=lambda t: teams[t].lower())
-    labels = {t: (f"{teams.get(t, 'Onze ploeg')} (onze ploeg)" if t == own else teams[t]) for t in keuzes}
-    gekozen = st.selectbox(
-        "Speelschema van", keuzes, format_func=lambda t: labels.get(t, t),
-        key=f"speelschema_team_{sel_player_id}",
-    ) if len(keuzes) > 1 else own
-    team = str(gekozen)
-    mijn = [
-        fx for fx in fixtures
-        if team in (str(fx.get("home_ploeg_id")), str(fx.get("away_ploeg_id")))
-    ]
-    if not mijn:
-        st.info("Geen ontmoetingen van deze ploeg gevonden in het poule-schema.")
-        return
-    mijn.sort(key=_fixture_sort_key)
-    def _rij(fx: dict, met_uitslag: bool) -> dict:
-        thuis = str(fx.get("home_ploeg_id")) == team
-        tegen = fx.get("away_name") if thuis else fx.get("home_name")
-        rij = {
-            "Datum": fx.get("date_text") or "?",
-            "Thuis/uit": "Thuis" if thuis else "Uit",
-            "Tegenstander": tegen or "?",
-        }
-        if met_uitslag:
-            rij["Uitslag (thuis - uit)"] = fx.get("score") or "-"
-        return rij
-    nog = [fx for fx in mijn if not fx.get("played")]
-    gespeeld = [fx for fx in mijn if fx.get("played")]
-    if nog:
-        st.markdown(f"**Nog te spelen ({len(nog)})**")
-        st.dataframe([_rij(fx, False) for fx in nog], use_container_width=True, hide_index=True)
-    else:
-        st.success("Alle ontmoetingen in deze poule zijn gespeeld.")
-    if gespeeld:
-        st.markdown(f"**Al gespeeld ({len(gespeeld)})**")
-        st.dataframe([_rij(fx, True) for fx in reversed(gespeeld)], use_container_width=True, hide_index=True)
-    sched_at = None
-    if _get_saved_schedule is not None:
-        try:
-            _fx_saved, sched_at = _get_saved_schedule(str(sel_player_id))
-        except Exception:  # noqa: BLE001
-            sched_at = None
-    if sched_at:
-        st.caption(
-            f"Schema laatst bijgewerkt op {_format_scraped_at(sched_at)}. Een ontmoeting die net gespeeld "
-            "is, staat tot de volgende update nog onder 'Nog te spelen'."
-        )
+    _sv.render_speelschema(
+        sel_player_id, saved_schedule_fn=_get_saved_schedule, format_ts_fn=_format_scraped_at,
+    )
 def _ensure_known_ranking_context(sel_player_id, sel_label):
     """PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: vult reeks_url/fixtures/
     own_ploeg_id aan uit reeds OPGESLAGEN data, maar doet dat werk enkel

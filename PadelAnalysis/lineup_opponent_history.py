@@ -2,7 +2,6 @@
 lineup_opponent_history.py - Tegenstander-referentie: klassementsteksten,
 uitslagenblad-rijen, eindscoreberekening, eerdere-ontmoetingen-dropdown en
 match1/match2-frequentieanalyse.
-
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
 Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
 volledige historische toelichting bij elke fix in deze functies (o.a.
@@ -10,6 +9,25 @@ PADEL_ANALYSIS_WINNER_TEAMNAME_2026-09-26, PADEL_ANALYSIS_WINNER_COLUMN_
 AND_TEAM_SCORE_2026-09-25, PADEL_ANALYSIS_OPPONENT_RANKS_IN_MATCH_TABLE_
 2026-09-24, PADEL_ANALYSIS_FREQUENCY_ALL_FIXTURES_2026-09-22) - functioneel
 ONGEWIJZIGD t.o.v. de vorige versie.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PREVIOUS_FIXTURES_PAIR_COLUMNS_2026-10-10 (op verzoek van Kim:
+"bij analyse van een ploeg, eerdere ontmoetingen mag je ook meer details geven
+over tegen wie. Dus koppels van de geselecteerde ploeg in 1 kolom en
+tegenstander koppel in 1 kolom. Van allebei klassement info en dan score en
+winnaar etc.")
+--------------------------------------------------------------------------
+De tabel per eerdere ontmoeting had per rij vier kolommen (Speler 1,
+Klassement 1, Speler 2, Klassement 2) en toonde enkel het koppel van de
+GESCOUTE ploeg. Nu: Match | Koppel geselecteerde ploeg | Koppel tegenstander |
+Score | Winnaar. Elk koppel staat in 1 cel, met per speler het klassement
+("Naam (P200 · ps P180)"). Groen = de geselecteerde ploeg won deze match,
+rood = verloren (ongewijzigd). Erboven staat welke ploeg welke is.
+BEKENDE BEPERKING: het klassement van de TEGENSTANDER (other_pair) wordt enkel
+getoond als de uitslagenblad-data dat per speler bevat (veld "ranking" of
+"user_id"). Ontbreekt dat, dan staat enkel de naam en verschijnt onder de
+tabel een melding - er wordt nooit een klassement verzonnen. De score staat
+zoals ze op het uitslagenblad staat (niet omgedraaid).
+Zichtbare tekst gebruikt "match/matchen" i.p.v. "bord/borden".
 """
 import re
 import streamlit as st
@@ -33,14 +51,42 @@ def _rank_text_for_opponent(player: dict) -> str:
     return " / ".join(delen)
 
 
+def _player_text(player: dict) -> tuple:
+    """"Naam (P200 · ps P180)". Geeft (tekst, heeft_klassement_info). Zonder
+    "ranking" en zonder "user_id" is er niets op te zoeken: dan enkel de naam."""
+    naam = player.get("name", "?")
+    if not (player.get("ranking") or player.get("user_id")):
+        return naam, False
+    info = _rank_text_for_opponent(player).replace(" / ", " \u00b7 ")
+    return f"{naam} ({info})", True
+
+
+def _pair_text(pair: list) -> tuple:
+    """Koppel in 1 cel: "Speler A (P200) / Speler B (P100)". Geeft (tekst, alle_info)."""
+    if not pair:
+        return "onbekend", False
+    delen, alle_info = [], True
+    for p in pair:
+        tekst, heeft_info = _player_text(p)
+        delen.append(tekst)
+        alle_info = alle_info and heeft_info
+    return " / ".join(delen), alle_info
+
+
 def _fixture_rows(
     boards: list, home_team: str = None, away_team: str = None,
     is_opponent_home: bool = None,
 ) -> list:
-    """Zet de dubbels van 1 ontmoeting om naar tabelrijen, MET klassement."""
+    """Zet de dubbels van 1 ontmoeting om naar tabelrijen: het koppel van de
+    geselecteerde ploeg en het koppel van de tegenstander, elk in 1 cel, MET
+    klassement. PADEL_ANALYSIS_PREVIOUS_FIXTURES_PAIR_COLUMNS_2026-10-10."""
     heeft_teaminfo = (
         home_team is not None and away_team is not None and is_opponent_home is not None
     )
+    scouted_team = other_team = None
+    if heeft_teaminfo:
+        scouted_team = home_team if is_opponent_home else away_team
+        other_team = away_team if is_opponent_home else home_team
     rows = []
     for b in sorted(boards, key=lambda x: x.get("board_position") or 0):
         pair = b.get("opponent_pair") or []
@@ -62,25 +108,31 @@ def _fixture_rows(
                 winnaar_namen = away_team if is_opponent_home else home_team
             elif len(other_pair) == 2:
                 winnaar_namen = " / ".join(p.get("name", "?") for p in other_pair)
+        scout_txt, _scout_info = _pair_text(pair)
+        other_txt, other_info = _pair_text(other_pair if len(other_pair) == 2 else [])
         rows.append({
             "Match": f"Rotatie {rot} - Match {m_in_rot}" if pos else "Match ?",
-            "Speler 1": pair[0].get("name", "?"),
-            "Klassement 1": _rank_text_for_opponent(pair[0]),
-            "Speler 2": pair[1].get("name", "?"),
-            "Klassement 2": _rank_text_for_opponent(pair[1]),
+            "Koppel geselecteerde ploeg": scout_txt,
+            "Koppel tegenstander": other_txt,
             "Score": b.get("score") or "onbekend",
             "Winnaar": winnaar_namen,
             "_opponent_won": opponent_won,
+            "_scouted_team": scouted_team,
+            "_other_team": other_team,
+            "_other_info_missing": not other_info,
         })
     return rows
 
 
 def _render_fixture_rows_table(rows: list) -> None:
     """Toont _fixture_rows()-resultaat met een groene rij zodra de GESCOUTE
-    ploeg dat bord won, en een lichte rode tint wanneer zij het verloren."""
+    ploeg die match won, en een lichte rode tint wanneer zij hem verloor."""
     if not rows:
         st.info("Geen bruikbare dubbels in deze ontmoeting.")
         return
+    scouted, other = rows[0].get("_scouted_team"), rows[0].get("_other_team")
+    if scouted and other:
+        st.markdown(f"**{scouted}** (geselecteerde ploeg) tegen **{other}**")
     zichtbare_kolommen = [k for k in rows[0].keys() if not k.startswith("_")]
     try:
         import pandas as _pd
@@ -91,7 +143,6 @@ def _render_fixture_rows_table(rows: list) -> None:
             if row.get("_opponent_won") is False:
                 return ["background-color: #f8d7da"] * len(row)
             return [""] * len(row)
-
         df = _pd.DataFrame(rows)
         styled = df.style.apply(_kleur_resultaat, axis=1)
         st.dataframe(
@@ -99,9 +150,14 @@ def _render_fixture_rows_table(rows: list) -> None:
             column_order=zichtbare_kolommen,
         )
         st.caption(
-            "Groen = de GESCOUTE ploeg (onze eerstvolgende tegenstander) won dit bord - "
-            "een gevaarlijk koppel om rekening mee te houden. Rood = zij verloren dit bord."
+            "Groen = de geselecteerde ploeg won deze match - een gevaarlijk koppel om rekening mee te "
+            "houden. Rood = zij verloren deze match. De score staat zoals op het uitslagenblad."
         )
+        if any(r.get("_other_info_missing") for r in rows):
+            st.caption(
+                "Het klassement van (een deel van) de tegenstanders ontbreekt in de gegevens van het "
+                "uitslagenblad - daar staat enkel de naam."
+            )
     except Exception:
         st.dataframe(
             [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
@@ -110,7 +166,7 @@ def _render_fixture_rows_table(rows: list) -> None:
 
 
 def _parse_set_score(score_text: str):
-    """Ontleedt 1 bordscore tot (sets_links, sets_rechts). None bij
+    """Ontleedt 1 matchscore tot (sets_links, sets_rechts). None bij
     onleesbare tekst."""
     if not score_text:
         return None
@@ -254,7 +310,7 @@ def _render_previous_opponent_lineup(bundle: dict, opp: dict = None, full_bundle
                 st.success(f"Winnaar: **{score['winner']}**")
             st.caption(
                 "Rechtstreeks van de 'Samenvatting'-sectie van het uitslagenblad - niet afgeleid "
-                "uit de bordresultaten hieronder."
+                "uit de matchresultaten hieronder."
             )
         rows = _fixture_rows(
             bruikbaar[keuze].get("boards") or [],
