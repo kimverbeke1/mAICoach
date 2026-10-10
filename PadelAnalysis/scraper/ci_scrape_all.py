@@ -2,51 +2,41 @@
 ci_scrape_all.py — GitHub Actions entrypoint voor het (op aanvraag) verversen
 van PadelAnalysis-spelers via Firestore, zonder Streamlit en zonder lokaal
 firebase-key.json bestand.
-
 Locatie: PadelAnalysis/scraper/ci_scrape_all.py (naast scrape_player.py,
 zelfde path-setup patroon).
-
 Firebase-credentials komen uit de environment variable
 FIREBASE_SERVICE_ACCOUNT_JSON (GitHub Actions secret), ingelezen via
 firebase_service._load_env_credentials(). Lokaal blijft firebase-key.json
 gewoon werken (fallback), en op Streamlit Cloud blijft st.secrets werken.
-
 Welke spelers scrapen (env var PLAYER_IDS):
     - Leeg (standaard)       -> alle spelers uit player_profiles.
     - Komma-gescheiden lijst -> enkel die player_id's, bv. "214435,198221".
-
 Welke periodes/spelers effectief gescraped worden (env var MODE):
     - "missing" (standaard) -> ENKEL periodes die nog nooit gescraped zijn.
     - "new_users"           -> scrape ENKEL spelers die nog nooit eerder
       gescraped zijn (geen bestaand document in de 'players'-collectie).
     - "full"                -> forceer een volledige herscrape van alle
       periodes voor de opgegeven spelers (traag, normaal niet nodig).
-
 PADEL_ANALYSIS_AUTO_POULE_UPDATE_2026-09-14:
 NA de matchdata-scrape wordt voor diezelfde lijst spelers ook
 poule_playwright.update_player_poule() aangeroepen. Zie ENABLE_POULE_UPDATE
 / POULE_FORCE.
-
 PADEL_ANALYSIS_EINDRONDE_SUPPORT_2026-09-15:
 update_player_poule() slaat naast de voorronde-fixtures ook de
 EINDRONDE-bracket op, en scopet de voorronde op de eigen pouleId.
 Zie POULE_EINDRONDE.
-
 PADEL_ANALYSIS_AUTO_ENRICH_OPPONENTS_2026-09-15:
 Na de matchdata-scrape worden tegenstanders/partners zonder profiel
 ontdekt (discover_opponent_players), krijgen ze een profiel, en wordt hun
 padelstats.be playing strength opgehaald — automatisch, in dezelfde run.
-
 PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16:
 Idem, maar dan voor de TVL-klassementshistoriek (aparte, lagere limiet
 KLASSEMENT_MAX omdat elke speler een volledige Playwright-sessie kost).
-
 PADEL_ANALYSIS_INTERCLUB_ONLY_DISCOVERY_2026-09-16 ("worst case"):
 discover_opponent_players() beperkt zich standaard tot interclub-matches
 (ENABLE_ENRICH/interclub_only), en spelers MET bestaande matchdata krijgen
 voorrang op ghost-profielen wanneer een *_MAX-limiet spelers moet laten
 wachten.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -54,13 +44,11 @@ BUG (opgelost): "het padelstat getal zal voortdurend wijzigen. moet dus
 regelmatig geupdate worden. checken als dat werkt". Dat werkte NIET: een
 speler met eenmaal een gecachete padelstat-rating werd voor ALTIJD
 overgeslagen in elke volgende run, ongeacht hoe oud die waarde was.
-
 Fix (kern zit in enrich_opponents.py): run_padelstat_for_players() ververst
 nu automatisch ook ratings die ouder zijn dan PADELSTAT_STALE_DAYS, niet
 enkel volledig ontbrekende. Nieuwe env var:
     - PADELSTAT_STALE_DAYS (getal, standaard 14): na hoeveel dagen een
       bestaande padelstat-rating automatisch opnieuw wordt opgehaald.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van Kim)
 --------------------------------------------------------------------------
@@ -69,7 +57,6 @@ zie dat de scraper heel wat spelers aan het verversen is (en niet Stijn
 Mortier wegens beperking in aantal). [...] ik zie nu weer een heleboel
 nieuwe spelers in mijn spelerslijst. [...] bedoeling is dat enkel die
 speler ververst wordt (id speler meegeven)."
-
 ROOT CAUSE: de knop "Scrape deze speler nu" (cloud_helpers.py) triggert
 deze workflow met PLAYER_IDS=<1 speler>. main() riep tot nu toe ALTIJD
 run_enrichment(player_ids) aan (zodra ENABLE_ENRICH=true, standaard),
@@ -83,7 +70,6 @@ dingen voor een 1-speler-aanvraag:
      een (mogelijk foutieve/verouderde) klassement_history staan, dan werd
      die speler NOOIT opnieuw geprobeerd, terwijl de nieuw ontdekte ghost-
      profielen wél het gedeelde KLASSEMENT_MAX-budget opsouperen.
-
 FIX: wanneer PLAYER_IDS na filtering exact 1 speler bevat, wordt nu
 run_single_player_enrichment() aangeroepen i.p.v. run_enrichment(): dat
 ververst ENKEL en ALTIJD (cache genegeerd) padelstat + klassement voor
@@ -92,7 +78,6 @@ dagelijkse cron, of een bewuste bulk-refresh) gold voorheen het volledige
 discovery-gedrag (met nieuwe ghost-profielen) - zie de NIEUWSTE fix
 hieronder (PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20), die dit
 voor de REGULIERE/geplande bulk-run verder aanscherpt.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19 (Fase E, op verzoek van Kim,
 chat 2026-09-19: "check ci_scrape_all.py en de refresh_*_only.py-scripts
@@ -104,14 +89,12 @@ bestand had, IN TEGENSTELLING TOT bijna elke andere instelling hier
 (PADELSTAT_MAX, KLASSEMENT_MAX, PADELSTAT_STALE_DAYS, ...), twee HARDCODED
 wachttijd-constanten (DELAY_BETWEEN_PLAYERS, DELAY_BETWEEN_POULE_UPDATES,
 elk 3.0s) die NIET via een environment variable aan te passen waren.
-
 FIX: DELAY_BETWEEN_PLAYERS en DELAY_BETWEEN_POULE_UPDATES zijn nu
 overrideable via de nieuwe env vars DELAY_BETWEEN_PLAYERS_SECONDS /
 DELAY_BETWEEN_POULE_UPDATES_SECONDS (default ONGEWIJZIGD: 3.0s voor beide).
 Deze pauzes zijn een BEWUSTE beleefdheids-/rate-limiting-maatregel
 tegenover tennisenpadelvlaanderen.be — verlaag dit dus enkel bewust, bij
 voorkeur eerst getest met een kleine batch.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19 (op verzoek van Kim, chat
 2026-09-19: "weer veel profielen die aangemaakt worden :-( bekijk dat
@@ -124,13 +107,11 @@ te ontdekken — vandaar 141 nieuwe ghost-profielen na het verversen van
 slechts 4 spelers in Kim's log. Verwijderde ghost-profielen kwamen daardoor
 telkens terug zodra ook maar 1 speler die ooit tegen hen speelde opnieuw
 gescraped werd.
-
 FIX (destijds): enrich_opponents.discover_opponent_players() beperkt zich
 sindsdien tot de N meest recente periodes per speler (DISCOVERY_RECENT_
 PERIODS, standaard 2). Zie PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_
 2026-09-20 hieronder voor de vervolg-fix: dit bleek niet voldoende, omdat
 één period_label in de praktijk een heel interclubseizoen omvat.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20 (op verzoek van Kim,
 chat 2026-09-20: "bij de run padel scraper nog steeds probleem dat teveel
@@ -142,13 +123,11 @@ een period_label zoals "Resultaten van week 27/2026 tot en met week
 48/2026" omvat een VOLLEDIG interclubseizoen (22 weken) - de recency-limiet
 van 2026-09-19 beperkte discovery dus in de praktijk tot "vrijwel het
 volledige huidige+vorige seizoen", niet tot een paar recente wedstrijden.
-
 FIX (destijds, blijft bestaan als infrastructuur): run_match_scrapes()
 verzamelt, per speler, de matchrecords die scrape_player() teruggeeft als
 "new_matches_this_run" en geeft die als new_matches_by_player mee aan
 run_enrichment()/eo.enrich(). Discovery scant daarmee UITSLUITEND
 effectief nieuwe matches i.p.v. alles binnen een brede periode-naam.
-
 Zie PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 hieronder: deze
 fix alleen bleek in de praktijk NOG STEEDS te veel nieuwe profielen op te
 leveren bij een normale bulk-run (elke speler met ook maar 1 nieuwe match
@@ -157,7 +136,6 @@ profiel op — en bij tientallen eigen spelers samen kan dat nog steeds een
 lange lijst worden). De infrastructuur (new_matches_by_player) blijft
 bestaan en nuttig (bv. voor ENABLE_DISCOVERY=true-uitzonderingen), maar is
 niet langer de primaire ghost-profiel-mitigatie.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20 (op verzoek van Kim,
 chat 2026-09-20: "AUB: creeer enkel profielen van spelers die rechstreekste
@@ -182,7 +160,6 @@ correct gescoopte plekken in de APP zelf (niet in deze achtergrondtaak):
   2. Expliciet "speler toevoegen" (een bewuste, door Kim zelf getriggerde
      actie) - blijft eveneens volledig ongewijzigd, dit bestand komt daar
      niet aan.
-
 FIX (dit bestand): run_enrichment() roept eo.enrich() voortaan aan met
 do_discover=get_discovery_enabled() i.p.v. onvoorwaardelijk do_discover=
 True. get_discovery_enabled() leest de nieuwe env var ENABLE_DISCOVERY,
@@ -193,12 +170,10 @@ verversing voor AL BESTAANDE profielen (eigen team + reeds gekende
 tegenstanders) blijft volledig ongewijzigd werken - enkel het aanmaken van
 NIEUWE profielen (ensure_profiles(), enkel bereikbaar via do_discover=True)
 is uitgeschakeld in dit pad.
-
 Zet ENABLE_DISCOVERY=true expliciet op een bewust, incidenteel getriggerde
 workflow-run (bv. een eenmalige "herbouw de volledige tegenstander-
 database"-actie) als je toch, bewust, de brede discovery wil laten lopen -
 dat is een uitzondering, geen regulier gedrag.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_OFFICIAL_KLASSEMENT_VIA_PADELSTAT_2026-09-20 (op verzoek van
 Kim: "aangezien we toch al het padelstat klassement scrapen van padelstat.be
@@ -218,7 +193,6 @@ periodes-historiek-grafiek (die padelstat niet kan leveren) - zet
 ENABLE_KLASSEMENT=true expliciet in een incidentele/handmatige of 2x-per-
 jaar geplande workflow-run wanneer je die volledige historiek wil
 verversen.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21 (op verzoek van Kim,
 chat 2026-09-21: "bij het ophalen van gegevens ontbrekende speler blijf ik
@@ -241,7 +215,6 @@ instellingen) — maar GEEN "player_profiles"-document, want profielaanmaak
 loopt uitsluitend via do_discover (nu standaard uit). Dat is precies wat
 er gebeurde bij speler 1622012 tijdens de allereerste KTC ISIS-bulkrun
 ("Merge: 0 -> 12 matches (+12 nieuw)" - hun allereerste ooit scrape).
-
 BELANGRIJK ONDERSCHEID met de PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_
 2026-09-20-fix: DIE fix ging over het voorkomen van profielen voor
 ONBEKENDE, automatisch UIT MATCHCONTENT ONTDEKTE derden (tegenstanders/
@@ -251,7 +224,6 @@ player_id's (PLAYER_IDS) — een BEGRENSDE, bewuste lijst (exact zoveel
 profielen als er ID's in PLAYER_IDS staan), die Kim zelf al koos om te
 verversen. Een profiel-stub aanmaken voor zo'n EXPLICIET aangevraagde
 speler is dus GEEN heropening van het ghost-profielen-probleem.
-
 FIX, twee onderdelen:
   1. _find_display_name_via_cross_reference(player_id): zoekt de naam van
      een speler zonder eigen profiel op via KRUISVERWIJZING — scant de
@@ -274,11 +246,9 @@ FIX, twee onderdelen:
      partners), dan wordt dit EXPLICIET en duidelijk gelogd, met een
      concrete actie ("voeg toe via 'Speler toevoegen'"), in plaats van
      stilzwijgend te blijven falen zoals nu het geval was.
-
 Dit lost Kim's concrete melding op EN voorkomt dat dit voor een toekomstige,
 nieuw-gescrapete speler (via een expliciete PLAYER_IDS-aanvraag) opnieuw
 gebeurt.
-
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27 (op verzoek van Kim, na de
 prescan-poule.yml-timeout: "duurde te lang [...] bekijk of logica klopt.
@@ -295,12 +265,10 @@ in een enkele run tot 15 VOLLEDIG NIEUWE spelers tegelijk aanvraagt: elke
 nieuwe speler kost ~2.5 minuut (16 periodes x ~9s), dus 15 nieuwe spelers
 alleen al 35-40 minuten - ruim boven de 25-minuten-workflowlimiet, nog
 VOOR de daaropvolgende padelstat/klassement/poule-stappen.
-
 scrape_player() had hiervoor AL een parameter (`max_new_periods`,
-bestaand sinds v??r deze fix) die het aantal te scrapen periodes beperkt
+bestaand sinds voor deze fix) die het aantal te scrapen periodes beperkt
 - maar run_match_scrapes() in DIT bestand gaf die parameter nooit door aan
 scrape_player(), waardoor hij voor de bulk-workflow effectief dood was.
-
 FIX: nieuwe env var MAX_NEW_PLAYER_PERIODS (optioneel, standaard
 onbeperkt/None = ongewijzigd gedrag voor alle bestaande workflows die dit
 niet zetten). Is deze gezet, dan wordt ze als `max_new_periods` doorgegeven
@@ -312,15 +280,47 @@ meest recente periodes" - de oudere historiek (2017-2023 e.d.) wordt dan
 niet in de prescan opgehaald, maar kan later, bij een ECHTE, gerichte
 team-analyse via de bestaande UI-paden, alsnog volledig aangevuld worden
 (dat pad blijft ongewijzigd en gebruikt geen max_new_periods).
-
 Voor een REEDS BEKENDE speler in mode="missing" heeft deze cap doorgaans
 GEEN effect: _periods_to_scrape() geeft dan al een veel kleinere lijst
 terug (enkel de huidige periode + effectief ontbrekende periodes), dus
 een cap van bv. 3 is daar typisch een no-op.
-
 Zet MAX_NEW_PLAYER_PERIODS enkel in workflows die veel NIEUWE spelers
 tegelijk kunnen tegenkomen (prescan-poule.yml) - de reguliere scrape-
 padel.yml en andere workflows laten dit bewust ongezet, dus ongewijzigd.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_TEAMMATE_SYNC_2026-10-10 (op verzoek van Kim: "ik kan Stijn en
+Joris opnieuw scrapen maar als dat altijd manueel moet gebeuren dan klopt
+er iets niet. Dan moet dat toch ergens in 1 van de stappen automatisch
+toegevoegd worden bij bvb 'schema nu verversen'")
+--------------------------------------------------------------------------
+ROOT CAUSE (bevestigd door deze file en cloud_helpers.py na te lezen): de
+knop "Schema nu verversen" start deze workflow met PLAYER_IDS=<enkel de
+geselecteerde speler>. main() scrapete enkel die speler(s). Teamgenoten
+waarmee die speler een recente ontmoeting speelde, werden dus enkel
+bijgewerkt als de nachtelijke run hen toevallig meenam - met als gevolg
+dat de Nabeschouwing matchen miste (hun kant van de ontmoeting).
+FIX: na de matchdata-scrape roept main() run_teammate_sync() aan (zie
+teammate_sync.py voor de volledige toelichting). Die zoekt, voor de
+gescrapete spelers, partners wiens document een recente ontmoeting
+(laatste TEAMMATE_LOOKBACK_DAYS dagen) MIST die wel in het document van de
+speler staat, en scrapet die partners ook (mode "missing", dus enkel de
+ontbrekende/huidige periode). In rondes, want een teamgenoot wordt soms pas
+zichtbaar nadat een andere teamgenoot bijgewerkt is (Kim's voorbeeld:
+Stijn + Joris in ronde 1, Nico in ronde 2). Enkel spelers MET een bestaand
+profiel worden meegenomen - geen nieuwe ghost-profielen.
+Nieuwe env vars (allemaal optioneel):
+    - ENABLE_TEAMMATE_SYNC (standaard true): zet op false om dit uit te zetten.
+    - TEAMMATE_LOOKBACK_DAYS (standaard 21): hoe ver terug matchen meetellen.
+    - TEAMMATE_MAX_EXTRA (standaard 10): maximum extra spelers per run.
+    - TEAMMATE_MAX_ROUNDS (standaard 3): maximum aantal rondes.
+    - TEAMMATE_SYNC_MAX_INITIAL (standaard 25): bij MEER aangevraagde spelers
+      (bv. de nachtelijke bulk-run voor iedereen) wordt dit overgeslagen -
+      die run verwerkt al alle spelers zelf.
+De extra spelers krijgen enkel de matchdata-scrape (geen poule-update en
+geen padelstat-verversing): player_ids blijft ongewijzigd voor de
+vervolgstappen, zodat o.a. de 1-speler-verversing (run_single_player_
+enrichment) gewoon blijft werken. Extra spelers tellen niet mee voor de
+exit-code.
 """
 import logging
 import os
@@ -352,10 +352,8 @@ logger = logging.getLogger("ci_scrape_all")
 # versie die main() daadwerkelijk gebruikt.
 DELAY_BETWEEN_PLAYERS = 3.0
 DELAY_BETWEEN_POULE_UPDATES = 3.0
-
 VALID_MODES = ("missing", "new_users", "full")
 DEFAULT_MODE = "missing"
-
 # PADEL_ANALYSIS_DISCOVERY_RECENCY_LIMIT_2026-09-19: default hier BEWUST
 # gelijk gehouden aan enrich_opponents.DISCOVERY_RECENT_PERIODS_DEFAULT
 # (los gedefinieerd i.p.v. geïmporteerd, want deze module mag niet hard
@@ -476,13 +474,11 @@ def get_discovery_enabled() -> bool:
     Kim: "creeer enkel profielen van spelers die rechtstreekse tegenspeler
     zijn van de persoon die ik selecteer bij ploeganalyse of mensen die ik
     zelf expliciet toevoeg bij toevoegen speler"):
-
     Nieuwe default: False. De geplande/bulk-scrape (deze workflow, voor
     ALLE spelers) mag GEEN nieuwe spelersprofielen meer aanmaken - dat
     gebeurt voortaan UITSLUITEND via de al bestaande, correct gescoopte
     UI-paden (team-analyse voor 1 specifieke tegenstander-ploeg, en
     expliciet "speler toevoegen"), niet via deze achtergrondtaak.
-
     Zet ENABLE_DISCOVERY=true expliciet voor een bewuste, incidentele
     uitzondering (bv. eenmalig de volledige tegenstander-database
     herbouwen) - géén regulier gedrag."""
@@ -556,18 +552,39 @@ def get_discovery_recent_periods() -> int:
 def get_max_new_player_periods() -> Optional[int]:
     """PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27 (zie module-
     docstring voor de volledige root-cause-analyse van de prescan-timeout).
-
     Beperkt hoeveel periodes er gescraped worden voor een SPLINTERNIEUWE
     speler (existing_doc is None in scrape_player.py) - onbeperkt (None)
     tenzij expliciet gezet. Zonder deze cap scrapet scrape_player() voor
     zo'n speler ALLE beschikbare periodes (tot 16, terug tot 2017),
     ongeacht mode="missing" - wat bij meerdere nieuwe spelers tegelijk
     (zoals de nachtelijke poule-prescan) tot een workflow-timeout leidt.
-
     Heeft doorgaans GEEN effect op een reeds bekende speler: die krijgt via
     _periods_to_scrape() al een veel kleinere periodes-lijst (enkel de
     huidige + effectief ontbrekende periodes)."""
     return _get_optional_int_env("MAX_NEW_PLAYER_PERIODS")
+
+
+# ---------------------------------------------------------------------------
+# PADEL_ANALYSIS_TEAMMATE_SYNC_2026-10-10: zie module-docstring.
+# ---------------------------------------------------------------------------
+def get_teammate_sync_enabled() -> bool:
+    return _get_bool_env("ENABLE_TEAMMATE_SYNC", True)
+
+
+def get_teammate_lookback_days() -> int:
+    return _get_int_env("TEAMMATE_LOOKBACK_DAYS", 21)
+
+
+def get_teammate_max_extra() -> int:
+    return _get_int_env("TEAMMATE_MAX_EXTRA", 10)
+
+
+def get_teammate_max_rounds() -> int:
+    return _get_int_env("TEAMMATE_MAX_ROUNDS", 3)
+
+
+def get_teammate_sync_max_initial() -> int:
+    return _get_int_env("TEAMMATE_SYNC_MAX_INITIAL", 25)
 
 
 def filter_by_mode(player_ids: list, mode: str) -> list:
@@ -601,19 +618,16 @@ def run_match_scrapes(
 ) -> tuple[list, list, list, dict]:
     """Matchdata-scrape-stap. Returns (ok, failed, skipped_up_to_date,
     new_matches_by_player).
-
     PADEL_ANALYSIS_CONFIGURABLE_DELAYS_2026-09-19: delay_seconds is nu een
     parameter (default ONGEWIJZIGD) i.p.v. de module-constante rechtstreeks
     te gebruiken — main() geeft de env-overrideable waarde door (zie
     get_delay_between_players()).
-
     PADEL_ANALYSIS_NEW_MATCHES_ONLY_DISCOVERY_2026-09-20: verzamelt nog
     steeds, per speler, de matchrecords die scrape_player() teruggeeft als
     "new_matches_this_run" - deze infrastructuur blijft bestaan (nuttig
     voor een bewuste ENABLE_DISCOVERY=true-uitzondering), ook al is
     discovery sinds PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20
     standaard uitgeschakeld in de reguliere run.
-
     PADEL_ANALYSIS_MAX_NEW_PLAYER_PERIODS_2026-09-27: max_new_periods
     wordt nu, indien gezet, doorgegeven aan ELKE scrape_player()-aanroep -
     zie get_max_new_player_periods() voor de volledige toelichting. Dit
@@ -662,6 +676,45 @@ def run_match_scrapes(
     return ok, failed, skipped_up_to_date, new_matches_by_player
 
 
+def run_teammate_sync(
+    player_ids: list, delay_seconds: float, max_new_periods: Optional[int] = None,
+) -> dict:
+    """PADEL_ANALYSIS_TEAMMATE_SYNC_2026-10-10 - zie module-docstring en
+    teammate_sync.py. Scrapet teamgenoten die een recente ontmoeting van een
+    gescrapete speler missen, in rondes. Faalt nooit hard: een fout hier mag
+    de rest van de run (padelstat, poule-schema) niet blokkeren.
+    Returns {"extras": [...], "ok": [...], "failed": [...], "skipped": [...]}."""
+    resultaat = {"extras": [], "ok": [], "failed": [], "skipped": []}
+    try:
+        import teammate_sync as ts
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"teammate_sync niet beschikbaar ({e}) — teamgenoten-sync overgeslagen. "
+            "Plaats teammate_sync.py naast dit bestand in de scraper-map."
+        )
+        return resultaat
+
+    def _scrape(ids: list) -> None:
+        time.sleep(delay_seconds)
+        ok2, failed2, skipped2, _nieuw = run_match_scrapes(
+            ids, "missing", delay_seconds=delay_seconds, max_new_periods=max_new_periods,
+        )
+        resultaat["ok"].extend(ok2)
+        resultaat["failed"].extend(failed2)
+        resultaat["skipped"].extend(skipped2)
+
+    try:
+        resultaat["extras"] = ts.expand_teammates(
+            player_ids, _scrape,
+            max_rounds=get_teammate_max_rounds(),
+            max_extra=get_teammate_max_extra(),
+            lookback_days=get_teammate_lookback_days(),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"Teamgenoten-sync mislukt (genegeerd, run gaat verder): {e}")
+    return resultaat
+
+
 # ---------------------------------------------------------------------------
 # PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21: zie module-docstring
 # voor de volledige toelichting bij deze fix.
@@ -672,7 +725,6 @@ def _find_display_name_via_cross_reference(player_id: str) -> Optional[str]:
     nieuw, ONGEVRAAGD profiel voor een DERDE partij te ontdekken/aan te
     maken — dit wordt uitsluitend gebruikt om een naam te vinden voor een
     player_id dat de AANROEPER al expliciet kent/aanvraagt.
-
     Scant elke bekende speler se matches op een vermelding van dit
     player_id als tegenstander (opp1/opp2) of partner, en geeft de eerste
     gevonden naam terug. Geeft None terug als geen enkele kruisverwijzing
@@ -699,14 +751,12 @@ def _find_display_name_via_cross_reference(player_id: str) -> Optional[str]:
 def ensure_profile_stubs_for_requested_players(player_ids: list) -> dict:
     """PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21 (op verzoek van
     Kim, zie module-docstring voor de volledige toelichting/root-cause).
-
     ENKEL bedoeld om aangeroepen te worden wanneer PLAYER_IDS EXPLICIET
     gezet was voor deze run (zie was_player_ids_explicit()) — dit is een
     BEGRENSDE, door de gebruiker zelf gekozen lijst, GEEN heropening van
     het ghost-profielen-probleem (dat ging over ONBEGRENSDE, automatisch
     ONTDEKTE derden — zie PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_
     2026-09-20 hierboven, die ONGEWIJZIGD blijft).
-
     Voor elke speler in `player_ids` zonder geldig player_profiles-
     document (of een document dat het player_id-veld mist): probeert een
     minimaal profiel (player_id + display_name) aan te maken via
@@ -715,7 +765,6 @@ def ensure_profile_stubs_for_requested_players(player_ids: list) -> dict:
     stilzwijgend te blijven falen bij elke volgende padelstat/klassement-
     verversing voor deze speler (exact wat Kim meldde voor speler
     1622012/"De Rekeneire Kenneth").
-
     Returns {"aangemaakt": [(pid, naam), ...], "geen_naam_gevonden": [pid, ...]}."""
     aangemaakt = []
     geen_naam_gevonden = []
@@ -758,10 +807,8 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
     PADEL_ANALYSIS_AUTO_KLASSEMENT_2026-09-16 +
     PADEL_ANALYSIS_PADELSTAT_STALENESS_2026-09-16 +
     PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20.
-
     Ververst padelstat (incl. officieel klassement) + optioneel de
     volledige TVL-klassementshistoriek voor de opgegeven spelers.
-
     PADEL_ANALYSIS_DISCOVERY_SCOPED_TO_UI_ONLY_2026-09-20: do_discover
     (nieuwe profielen aanmaken voor tegenstanders/partners zonder profiel)
     staat nu STANDAARD UIT in deze functie (get_discovery_enabled(),
@@ -769,14 +816,12 @@ def run_enrichment(player_ids: list, new_matches_by_player: dict = None) -> dict
     Padelstat/klassement-verversing voor AL BESTAANDE profielen (eigen team
     + reeds gekende tegenstanders) is hierdoor NIET beïnvloed - enkel het
     aanmaken van NIEUWE profielen is uitgeschakeld in dit pad.
-
     LET OP: dit is de BULK-variant (2+ spelers, bv. de dagelijkse cron of
     een bewuste multi-speler-refresh). Voor een 1-speler-aanvraag wordt in
     main() in plaats hiervan run_single_player_enrichment() gebruikt (zie
     PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 hierboven) — GEEN
     discovery, gegarandeerde refresh van enkel die ene speler (dit was al
     zo, ongewijzigd).
-
     Draait NA de matchdata-scrape en VOOR de poule-stap.
     """
     leeg = {"nieuwe_profielen": [], "padelstat": {}, "klassement": {}}
@@ -933,7 +978,6 @@ def run_single_player_enrichment(player_id: str) -> dict:
     """PADEL_ANALYSIS_SINGLE_PLAYER_REFRESH_FIX_2026-09-19 (op verzoek van
     Kim: "bedoeling is dat enkel die speler ververst wordt (id speler
     meegeven)").
-
     Roept enrich_opponents.run_single_player_refresh() aan: GEEN discovery,
     GEEN nieuwe ghost-profielen, en een GEFORCEERDE refresh (cache/
     staleness genegeerd) van padelstat (incl. officieel klassement) +
@@ -1063,6 +1107,30 @@ def main() -> int:
         logger.error(f"  {pid}: {err}")
     totaal_nieuwe_matches = sum(len(v) for v in new_matches_by_player.values())
     logger.info(f"Netto nieuwe matches deze run (over alle spelers): {totaal_nieuwe_matches}")
+    # PADEL_ANALYSIS_TEAMMATE_SYNC_2026-10-10: verouderde teamgenoten
+    # automatisch mee verversen - zie module-docstring. Niet bij mode
+    # "new_users" (die doet bewust enkel nieuwe spelers) en niet bij een
+    # grote bulk-run (die verwerkt al iedereen zelf).
+    if mode != "new_users" and get_teammate_sync_enabled():
+        max_initial = get_teammate_sync_max_initial()
+        if len(player_ids) > max_initial:
+            logger.info(
+                f"Teamgenoten-sync overgeslagen: {len(player_ids)} spelers aangevraagd "
+                f"(> {max_initial}) - deze run verwerkt al alle spelers zelf."
+            )
+        else:
+            logger.info("=== Teamgenoten-sync (verouderde teamgenoten van recente ontmoetingen) ===")
+            sync = run_teammate_sync(player_ids, delay_players, max_new_periods=max_new_periods)
+            if sync["extras"]:
+                logger.info(
+                    f"Teamgenoten-sync: {len(sync['extras'])} extra speler(s) gescraped "
+                    f"({len(sync['ok'])} OK, {len(sync['failed'])} mislukt, "
+                    f"{len(sync['skipped'])} al up-to-date): {', '.join(sync['extras'])}"
+                )
+                for pid, err in sync["failed"]:
+                    logger.error(f"  teamgenoot {pid}: {err}")
+            else:
+                logger.info("Teamgenoten-sync: geen verouderde teamgenoten gevonden.")
     # PADEL_ANALYSIS_MISSING_PROFILE_STUB_FIX_2026-09-21: ENKEL bij een
     # EXPLICIETE PLAYER_IDS-aanvraag (nooit bij een volledige bulk-run
     # zonder PLAYER_IDS, waar "alle spelers" toch al uit player_profiles
