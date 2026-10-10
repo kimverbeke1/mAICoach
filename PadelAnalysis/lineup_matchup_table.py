@@ -40,7 +40,7 @@ PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29 (op verzoek van Kim: "niet toegelaten 
 nutteloos. verwijder deze optie.")
 --------------------------------------------------------------------------
 De checkbox "Toon ook bewust omgedraaide, NIET-reglementaire varianten" is
-weg. Enkel reglementaire bordvolgordes (art. 6.6) worden nog berekend; bij
+weg. Enkel reglementaire matchvolgordes (art. 6.6) worden nog berekend; bij
 een gelijk officieel klassement blijven beide (toegelaten) volgordes staan.
 De badge "onzeker" (onvolledig officieel klassement) blijft bestaan.
 --------------------------------------------------------------------------
@@ -167,7 +167,7 @@ HETZELFDE SYMPTOOM leidt: ontbrekende ratings (player_ratings/official_
 ranks/opponent_ratings) maken win_probability voor (bijna) elke match
 None, waardoor _match_outcome_point_probabilities() overal terugvalt op de
 neutrale 50%-aanname - dan is de 31.25%/37.5%/31.25%-verdeling voor N=4
-borden WISKUNDIG IDENTIEK voor elke groep, ongeacht de weging.
+matchen WISKUNDIG IDENTIEK voor elke groep, ongeacht de weging.
 FIX, VOLLEDIG ZICHTBAARHEID I.P.V. EEN GEDRAGSWIJZIGING VAN DE WEGING ZELF
 (die weegformule blijft bewust ONGEWIJZIGD - zie lineup_rotation.py,
 _opponent_lineup_weight() - een latere herziening van de weging zelf is
@@ -180,7 +180,7 @@ HISTORISCH vs THEORETISCH waren, plus - indien van toepassing - EEN van
 de 2 volgende, elkaar uitsluitende waarschuwingen:
   1. Als >= 50% van de individuele match-schattingen in deze groep een
      onbekende winkans had (n_missing_ratings t.o.v. g["n"] x aantal
-     borden): een duidelijke waarschuwing dat de percentages vooral op de
+     matchen): een duidelijke waarschuwing dat de percentages vooral op de
      neutrale 50%-aanname steunen (oorzaak 2 hierboven) - actie: ontbrekend
      klassement/rating aanvullen.
   2. Anders, als er 0 historische scenario's zijn EN >= 20 theoretische:
@@ -287,6 +287,36 @@ _render_all_valid_matchups() blijft bestaan als DUNNE combinator (roept
 gewoon beide bovenstaande functies na elkaar aan, zonder de Rotatieplanner
 ertussen) voor eventuele andere aanroepers - page_lineup_lab.py gebruikt
 voortaan de 2 losse functies.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10 (op verzoek van Kim: "bij alle
+matchups zou het wel handig zijn om te kunnen filteren op spelers. bvb in de
+details of platte tabel zou je bij ons duo of bij de tegenstander moeten
+kunnen filteren op koppel. De toelichting in die tabel is niets waard omdat je
+daar gewoon officieel klassement toont. Je zou dan beter gewoon padelstat van
+beide spelers tussen haakjes tonen in de tabel van de koppels en die
+toelichting weg laten")
+--------------------------------------------------------------------------
+1. FILTERS (op id's, niet op tekst): _render_filter_widgets() toont keuzelijsten
+   voor onze spelers, ons koppel, de tegenstander-spelers en het tegenstander-
+   koppel; _apply_filters() houdt enkel de matchups over waarin ALLE gekozen
+   spelers/koppels voorkomen (kies je 2 spelers, dan spelen ze allebei mee).
+   Waar ze staan:
+     - boven "Onze opstellingen": onze spelers en koppels (filtert de groepen);
+     - in "Details" van elke groep: tegenstander-spelers en -koppel (onze
+       koppels liggen binnen een groep vast); enkel bij 6 of meer rijen;
+     - in de platte tabel: alle vier.
+   De platte tabel filtert EERST en kapt DAARNA af op de beste N, zodat een
+   filter ook matchups toont die niet in de beste 15 stonden. Gefilterd wordt
+   op de BEWAARDE rijen (beste 25 per groep + slechtste + historische), net als
+   de tabel zelf. De AI-sectie blijft op de beste 5 ONGEFILTERDE matchups werken.
+   Een bewaarde keuze die niet meer in de opties zit (nieuwe berekening) wordt
+   stil gewist i.p.v. een fout te geven (_multiselect_safe).
+2. PADELSTAT IN HET KOPPEL: "Ons duo" en "Tegenstander" tonen nu per speler
+   "Naam (ps 180) + Naam (ps 240)" (padelstat-rating; "ps ?" als die niet
+   gekend is). De kolom "Toelichting" (de officiele puntensom per duo) is
+   verwijderd, samen met de uitleg in het bijschrift. Kolommen: # | Kans 2p/1p/0p
+   | Verwacht | per match Ons duo / Tegenstander / % | Vorige keer.
+3. Zichtbare tekst gebruikt "matchvolgorde" i.p.v. "bordvolgorde".
 """
 import heapq
 import streamlit as st
@@ -318,6 +348,8 @@ _MAX_TOTAL_MATCHUPS = _MAX_COMPUTED_MATCHUPS  # oude naam, voor compatibiliteit
 # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: drempels voor de 2 diagnose-captions hieronder.
 _DILUTION_MISSING_RATIO_THRESHOLD = 0.5   # >= 50% onbekende winkansen -> waarschuwing
 _DILUTION_THEORETICAL_MIN_COUNT = 20       # 0 historisch + >= 20 theoretisch -> notitie
+# PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: groepsdetails pas filterbaar vanaf dit aantal rijen.
+_GROUP_DETAIL_FILTER_MIN_ROWS = 6
 def _sort_val(m) -> float:
     ebw = m.get("expected_boards_won")
     return ebw if ebw is not None else m.get("total_score", 0.0)
@@ -525,8 +557,8 @@ def _build_all_valid_matchups(
                 own_ordered_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings,
             )
             # PADEL_ANALYSIS_TEAM_WIN_DISTRIBUTION_2026-09-29: kans op
-            # 2/1/0 ploegpunten, o.b.v. de per-board winkansen - zie
-            # moduledocstring. None wanneer niet alle boards een gekende
+            # 2/1/0 ploegpunten, o.b.v. de per-match winkansen - zie
+            # moduledocstring. None wanneer niet alle matchen een gekende
             # winkans hebben.
             m = {
                 "assignment": computed["assignment"],
@@ -606,7 +638,133 @@ def _format_point_probs(pp: dict) -> str:
         f"{pp.get('p1', 0.0) * 100:.0f}% · 1p  "
         f"{pp.get('p0', 0.0) * 100:.0f}% · 0p"
     )
-def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10 - zie moduledocstring.
+# ─────────────────────────────────────────────
+def _norm_name(n) -> str:
+    return " ".join(str(n or "").lower().split())
+def _opp_key(p: dict) -> str:
+    """Sleutel van 1 tegenstander-speler: het user_id, anders de genormaliseerde naam."""
+    uid = p.get("user_id")
+    return f"id:{uid}" if uid else f"n:{_norm_name(p.get('name'))}"
+def _pair_key(keys) -> str:
+    return "|".join(sorted(str(k) for k in keys))
+def _matchup_keys(m: dict) -> tuple:
+    """(onze spelers, onze koppels, tegenstander-spelers, tegenstander-koppels) van 1 matchup, als sets van sleutels."""
+    own_players, own_pairs, opp_players, opp_pairs = set(), set(), set(), set()
+    for a in (m or {}).get("assignment") or []:
+        ons = [str(x) for x in (a.get("our_pair") or ())]
+        own_players.update(ons)
+        if len(ons) == 2:
+            own_pairs.add(_pair_key(ons))
+        pair = (a.get("opponent_board") or {}).get("opponent_pair") or []
+        hun = [_opp_key(p) for p in pair]
+        opp_players.update(hun)
+        if len(hun) == 2:
+            opp_pairs.add(_pair_key(hun))
+    return own_players, own_pairs, opp_players, opp_pairs
+def _filter_options(matchups: list, name_lookup_global: dict) -> dict:
+    """Keuzes voor de filters, uit de opgegeven matchups: {"own_players": {sleutel: label}, "own_pairs": ...,
+    "opp_players": ..., "opp_pairs": ...}, elk gesorteerd op label."""
+    own_players: dict = {}
+    own_pairs: dict = {}
+    opp_players: dict = {}
+    opp_pairs: dict = {}
+    for m in matchups or []:
+        for a in m.get("assignment") or []:
+            raw = list(a.get("our_pair") or ())
+            labels = [str(name_lookup_global.get(x, x)) for x in raw]
+            keys = [str(x) for x in raw]
+            for k, lbl in zip(keys, labels):
+                own_players[k] = lbl
+            if len(keys) == 2:
+                own_pairs[_pair_key(keys)] = " + ".join(sorted(labels))
+            pair = (a.get("opponent_board") or {}).get("opponent_pair") or []
+            hkeys = [_opp_key(p) for p in pair]
+            hlabels = [str(p.get("name", "?")) for p in pair]
+            for k, lbl in zip(hkeys, hlabels):
+                opp_players[k] = lbl
+            if len(hkeys) == 2:
+                opp_pairs[_pair_key(hkeys)] = " + ".join(sorted(hlabels))
+    def _sorted(d: dict) -> dict:
+        return dict(sorted(d.items(), key=lambda kv: kv[1].lower()))
+    return {
+        "own_players": _sorted(own_players), "own_pairs": _sorted(own_pairs),
+        "opp_players": _sorted(opp_players), "opp_pairs": _sorted(opp_pairs),
+    }
+def _multiselect_safe(label: str, options: dict, key: str, placeholder: str):
+    """st.multiselect op een dict {sleutel: label}. Een bewaarde keuze die niet meer in de
+    opties zit (bv. na een nieuwe berekening) wordt eerst stil gewist."""
+    huidig = st.session_state.get(key)
+    if huidig is not None:
+        schoon = [k for k in huidig if k in options]
+        if schoon != list(huidig):
+            st.session_state[key] = schoon
+    return st.multiselect(
+        label, list(options.keys()), format_func=lambda k: options.get(k, k),
+        key=key, placeholder=placeholder,
+    )
+def _render_filter_widgets(
+    matchups: list, name_lookup_global: dict, key_prefix: str, own: bool = True, opp: bool = True,
+) -> dict:
+    """Toont de filterlijsten en geeft de keuze terug: {"own_players": [...], "own_pairs": [...],
+    "opp_players": [...], "opp_pairs": [...]} (sleutels, leeg = geen filter)."""
+    opts = _filter_options(matchups, name_lookup_global)
+    sel = {"own_players": [], "own_pairs": [], "opp_players": [], "opp_pairs": []}
+    if own and opp:
+        c1, c2 = st.columns(2)
+        with c1:
+            sel["own_players"] = _multiselect_safe("Onze speler(s)", opts["own_players"], f"{key_prefix}_f_op", "Alle")
+            sel["own_pairs"] = _multiselect_safe("Ons koppel", opts["own_pairs"], f"{key_prefix}_f_opr", "Alle")
+        with c2:
+            sel["opp_players"] = _multiselect_safe("Tegenstander-speler(s)", opts["opp_players"], f"{key_prefix}_f_tp", "Alle")
+            sel["opp_pairs"] = _multiselect_safe("Tegenstander-koppel", opts["opp_pairs"], f"{key_prefix}_f_tpr", "Alle")
+    elif own:
+        c1, c2 = st.columns(2)
+        with c1:
+            sel["own_players"] = _multiselect_safe("Onze speler(s)", opts["own_players"], f"{key_prefix}_f_op", "Alle")
+        with c2:
+            sel["own_pairs"] = _multiselect_safe("Ons koppel", opts["own_pairs"], f"{key_prefix}_f_opr", "Alle")
+    elif opp:
+        c1, c2 = st.columns(2)
+        with c1:
+            sel["opp_players"] = _multiselect_safe("Tegenstander-speler(s)", opts["opp_players"], f"{key_prefix}_f_tp", "Alle")
+        with c2:
+            sel["opp_pairs"] = _multiselect_safe("Tegenstander-koppel", opts["opp_pairs"], f"{key_prefix}_f_tpr", "Alle")
+    return sel
+def _has_filter(sel: dict) -> bool:
+    return any(sel.get(k) for k in ("own_players", "own_pairs", "opp_players", "opp_pairs"))
+def _apply_filters(items: list, sel: dict, get_matchup=lambda x: x) -> list:
+    """Houdt de items over waarvan de matchup ALLE gekozen spelers/koppels bevat."""
+    if not _has_filter(sel):
+        return list(items)
+    want = (
+        set(sel.get("own_players") or []), set(sel.get("own_pairs") or []),
+        set(sel.get("opp_players") or []), set(sel.get("opp_pairs") or []),
+    )
+    out = []
+    for it in items:
+        have = _matchup_keys(get_matchup(it))
+        if all(w <= h for w, h in zip(want, have)):
+            out.append(it)
+    return out
+def _filter_caption(n_na: int, n_voor: int, wat: str) -> None:
+    st.caption(
+        f"{n_na} van {n_voor} {wat} voldoen aan je filters. Alle gekozen filters moeten kloppen: kies je "
+        "2 spelers, dan zie je enkel resultaten waarin ze allebei meespelen."
+    )
+def _ps_text(pid, ps_map) -> str:
+    """" (ps 180)" met de padelstat van deze speler; " (ps ?)" als die niet gekend is;
+    "" als er helemaal geen padelstat-lijst is meegegeven (oude aanroepers)."""
+    if not ps_map:
+        return ""
+    v = ps_map.get(pid) if pid in ps_map else ps_map.get(str(pid))
+    return f" (ps {int(round(v))})" if v is not None else " (ps ?)"
+def _matchups_to_table_rows(
+    matchups: list, name_lookup_global: dict, own_ps: dict = None, opp_ps: dict = None,
+) -> tuple:
+    """PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: `own_ps`/`opp_ps` ({speler-id: padelstat}) zetten de
+    padelstat van elke speler tussen haakjes in 'Ons duo'/'Tegenstander'; de kolom 'Toelichting' is weg."""
     rows = []
     board_column_names: list = []
     for rank, m in enumerate(matchups, start=1):
@@ -635,16 +793,16 @@ def _matchups_to_table_rows(matchups: list, name_lookup_global: dict) -> tuple:
                 our_full_1 = name_lookup_global.get(p1, p1)
                 our_full_2 = name_lookup_global.get(p2, p2)
                 opp_pair = a["opponent_board"]["opponent_pair"]
-                their_full = [p.get("name", "?") for p in opp_pair]
+                their_full = []
+                for p in opp_pair:
+                    uid = p.get("user_id")
+                    their_full.append(f"{p.get('name', '?')}{_ps_text(str(uid) if uid else '', opp_ps)}")
                 wp = a.get("win_probability")
-                row[f"{col_base} - Ons duo"] = f"{our_full_1}+{our_full_2}"
-                row[f"{col_base} - Tegenstander"] = "+".join(their_full)
+                row[f"{col_base} - Ons duo"] = (
+                    f"{our_full_1}{_ps_text(p1, own_ps)} + {our_full_2}{_ps_text(p2, own_ps)}"
+                )
+                row[f"{col_base} - Tegenstander"] = " + ".join(their_full)
                 row[f"{col_base} %"] = round(wp * 100, 0) if wp is not None else None
-        swap_notes = [
-            rot.get("swap_label", "") for rot in (m.get("own_rotations") or [])
-            if rot.get("swap_label")
-        ]
-        row["Toelichting"] = " | ".join(swap_notes) if swap_notes else ""
         n_keer = m.get("historical_count", 0)
         if m["is_historical"]:
             freq = f"{n_keer}x" if n_keer > 1 else "1x"
@@ -666,20 +824,18 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         ons_col = f"{col_base} - Ons duo"
         tegen_col = f"{col_base} - Tegenstander"
         pct_col = f"{col_base} %"
+        # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: duo's zijn breder door de padelstat tussen haakjes.
         column_config[ons_col] = st.column_config.TextColumn(
-            ons_col, width=_estimate_column_width([row.get(ons_col) for row in table_rows]),
+            ons_col, width=_estimate_column_width([row.get(ons_col) for row in table_rows], max_width=340),
         )
         column_config[tegen_col] = st.column_config.TextColumn(
-            tegen_col, width=_estimate_column_width([row.get(tegen_col) for row in table_rows]),
+            tegen_col, width=_estimate_column_width([row.get(tegen_col) for row in table_rows], max_width=340),
         )
         column_config[pct_col] = st.column_config.NumberColumn(pct_col, format="%.0f%%", width="small")
-    column_config["Toelichting"] = st.column_config.TextColumn(
-        "Toelichting", width=_estimate_column_width([row.get("Toelichting") for row in table_rows], min_width=160, max_width=320),
-    )
     column_order = ["#", "Kans 2p %", "Kans 1p %", "Kans 0p %", "Verwacht"]
     for col_base in board_column_names:
         column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
-    column_order += ["Toelichting", "Vorige keer"]
+    column_order += ["Vorige keer"]
     return column_config, column_order
 def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> None:
     """PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01 - zie moduledocstring.
@@ -731,7 +887,10 @@ def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> Non
             "hierdoor klein lijken - verklein het tegenstander-roster hierboven tot de spelers "
             "die je effectief verwacht, voor een scherper onderscheid."
         )
-def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: dict, ploeg_key: str = "") -> None:
+def _render_own_lineup_groups_with_opponents(
+    groups: list, name_lookup_global: dict, ploeg_key: str = "",
+    own_ps: dict = None, opp_ps: dict = None,
+) -> None:
     """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: werkt op de groepssamenvattingen uit
     _build_all_valid_matchups(). Best/worst case in de titel gelden over
     ALLE doorgerekende tegenstander-opstellingen van die groep.
@@ -742,12 +901,15 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
     herordening.
     PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: toont nu ALTIJD (dus
     voor het openklikken) een korte, verklarende dilutie-diagnose naast de
-    3 metrics - zie _render_group_dilution_diagnosis()."""
+    3 metrics - zie _render_group_dilution_diagnosis().
+    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filter op onze spelers/koppels
+    boven de lijst, en op de tegenstander in de Details van elke groep;
+    `own_ps`/`opp_ps` = padelstat per speler voor de koppel-tabellen."""
     if not groups:
         return
     st.markdown('<div class="section-header">Onze opstellingen - klap open voor de tegenstander-opstellingen</div>', unsafe_allow_html=True)
     st.caption(
-        "Elke groep hieronder is 1 unieke combinatie van ONZE koppels (ongeacht bordvolgorde of tegen wie), "
+        "Elke groep hieronder is 1 unieke combinatie van ONZE koppels (ongeacht matchvolgorde of tegen wie), "
         "gerangschikt op de GEWOGEN kans op 2 competitiepunten (ploegwinst) over alle doorgerekende "
         "tegenstander-opstellingen. Een tegenstander-opstelling die dit seizoen al vaker effectief "
         "gespeeld werd, telt zwaarder mee dan een louter theoretische combinatie. Klap een groep open "
@@ -781,14 +943,27 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
                 f"**Verschil tussen onze beste en slechtste opstelling: {spread:.0f} procentpunt** "
                 f"kans op winst ({max(p2s) * 100:.0f}% vs {min(p2s) * 100:.0f}%)."
             )
+    # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filter op onze spelers/koppels.
+    st.markdown("**Filter onze opstellingen**")
+    groep_sel = _render_filter_widgets(
+        [g["best"] for g in groups if g.get("best")], name_lookup_global, f"groups_{ploeg_key}", own=True, opp=False,
+    )
+    geindexeerd = list(enumerate(groups))
+    geindexeerd = _apply_filters(geindexeerd, groep_sel, get_matchup=lambda t: t[1].get("best"))
+    if _has_filter(groep_sel):
+        _filter_caption(len(geindexeerd), len(groups), "eigen opstellingen")
+    if not geindexeerd:
+        st.info("Geen enkele eigen opstelling voldoet aan deze filters.")
+        st.divider()
+        return
     toon_alle = False
-    if len(groups) > _GROUPS_DISPLAY_DEFAULT:
+    if len(geindexeerd) > _GROUPS_DISPLAY_DEFAULT:
         toon_alle = st.checkbox(
-            f"Toon alle {len(groups)} eigen opstellingen (i.p.v. de beste {_GROUPS_DISPLAY_DEFAULT})",
+            f"Toon alle {len(geindexeerd)} eigen opstellingen (i.p.v. de beste {_GROUPS_DISPLAY_DEFAULT})",
             key=f"groups_show_all_{ploeg_key}",
         )
-    zichtbaar = groups if toon_alle else groups[:_GROUPS_DISPLAY_DEFAULT]
-    for g in zichtbaar:
+    zichtbaar = geindexeerd if toon_alle else geindexeerd[:_GROUPS_DISPLAY_DEFAULT]
+    for gi, g in zichtbaar:
         best, worst = g["best"], g["worst"]
         korte_delen, lange_regels = [], []
         for idx, a in enumerate(best["assignment"]):
@@ -851,14 +1026,30 @@ def _render_own_lineup_groups_with_opponents(groups: list, name_lookup_global: d
                     f"Getoond: de beste {_KEEP_PER_GROUP}, de slechtste en elke al gespeelde "
                     f"tegenstander-opstelling ({len(g['rows'])} van {g['n']})."
                 )
-            table_rows, board_column_names = _matchups_to_table_rows(g["rows"], name_lookup_global)
-            column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
-            st.dataframe(
-                table_rows, use_container_width=True, hide_index=True,
-                column_config=column_config, column_order=column_order,
-            )
-    if not toon_alle and len(groups) > _GROUPS_DISPLAY_DEFAULT:
-        st.caption(f"De beste {_GROUPS_DISPLAY_DEFAULT} van {len(groups)} eigen opstellingen getoond (gesorteerd op kans op 2 punten).")
+            rijen_groep = g["rows"]
+            if len(rijen_groep) >= _GROUP_DETAIL_FILTER_MIN_ROWS:
+                st.markdown("**Filter op de tegenstander**")
+                det_sel = _render_filter_widgets(
+                    rijen_groep, name_lookup_global, f"grpdet_{ploeg_key}_{gi}", own=False, opp=True,
+                )
+                gefilterd = _apply_filters(rijen_groep, det_sel)
+                if _has_filter(det_sel):
+                    _filter_caption(len(gefilterd), len(rijen_groep), "tegenstander-opstellingen")
+                rijen_groep = gefilterd
+            if not rijen_groep:
+                st.info("Geen enkele tegenstander-opstelling voldoet aan deze filters.")
+            else:
+                table_rows, board_column_names = _matchups_to_table_rows(
+                    rijen_groep, name_lookup_global, own_ps=own_ps, opp_ps=opp_ps,
+                )
+                column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
+                st.dataframe(
+                    table_rows, use_container_width=True, hide_index=True,
+                    column_config=column_config, column_order=column_order,
+                )
+                st.caption("Tussen haakjes staat de padelstat (ps) van elke speler.")
+    if not toon_alle and len(geindexeerd) > _GROUPS_DISPLAY_DEFAULT:
+        st.caption(f"De beste {_GROUPS_DISPLAY_DEFAULT} van {len(geindexeerd)} eigen opstellingen getoond (gesorteerd op kans op 2 punten).")
     st.divider()
 def _render_best_for_selected_player(
     groups: list, sel_player_id: str, name_lookup_global: dict,
@@ -1265,7 +1456,8 @@ def render_matchup_overview(
     helft van de vroegere _render_all_valid_matchups(): de knop "Bereken alle
     geldige matchups" + de groepenweergave, nu onder de kop "Alle matchups" en
     ZONDER de aanroep van _render_best_for_selected_player() (die vraag
-    beantwoordt nu de Rotatieplanner, zie lineup_plan_screen.py)."""
+    beantwoordt nu de Rotatieplanner, zie lineup_plan_screen.py).
+    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filters + padelstat in de koppel-tabellen."""
     unique_opponent_lineups = (setup or {}).get("unique_opponent_lineups") or {}
     model_weights = (setup or {}).get("model_weights")
     if not unique_opponent_lineups:
@@ -1374,33 +1566,49 @@ def render_matchup_overview(
         all_matchups, opp, available_ids, name_lookup_global, total_boards, max_per_player, sel_player_id,
     )
     st.divider()
-    _render_own_lineup_groups_with_opponents(groups, name_lookup_global, ploeg_key=str(opp['ploeg_id']))
+    _render_own_lineup_groups_with_opponents(
+        groups, name_lookup_global, ploeg_key=str(opp['ploeg_id']),
+        own_ps=player_ratings, opp_ps=opponent_ratings,
+    )
     # PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: _render_best_for_selected_player()
     # wordt hier NIET MEER aangeroepen - zie moduledocstring.
     with st.expander("Platte tabel (alle matchups los naast elkaar, sorteerbaar per kolom)", expanded=False):
-        show_all_key = f"all_matchups_showall_{opp['ploeg_id']}"
-        show_all = st.checkbox(
-            f"Toon alle {len(all_matchups)} matchups (i.p.v. de beste {_MATCHUP_DISPLAY_DEFAULT_N})",
-            key=show_all_key,
-        ) if len(all_matchups) > _MATCHUP_DISPLAY_DEFAULT_N else False
-        display_matchups = all_matchups if show_all else all_matchups[:_MATCHUP_DISPLAY_DEFAULT_N]
-        table_rows, board_column_names = _matchups_to_table_rows(display_matchups, name_lookup_global)
-        column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
-        st.dataframe(
-            table_rows, use_container_width=True, hide_index=True,
-            column_config=column_config, column_order=column_order,
-        )
-        st.caption(
-            "Elk speler-duo staat in zijn eigen kolom ('Ons duo' / 'Tegenstander'), naast een aparte "
-            "winkans-kolom per match. 'Kans 2p/1p/0p' toont de exacte kans op dat aantal competitiepunten "
-            "voor DEZE ene tegenstander-opstelling (dus ongewogen - de weging over alle scenario's zit "
-            "enkel in de groepstitel hierboven). 'Rotatie1 M1' = Match 1 van rotatie 1 (sterkste duo volgens "
-            "officieel klassement, art. 6.6), 'Rotatie1 M2' = Match 2, enz. De kolom 'Toelichting' toont de "
-            "exacte officiele puntensom per duo die deze volgorde bepaalt (nooit de padelstat-score)."
-        )
-        if not show_all and len(all_matchups) > len(display_matchups):
-            st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} matchups getoond - vink hierboven aan om alles te zien.")
+        # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: eerst filteren, daarna afkappen op de beste N.
+        plat_prefix = f"flat_{opp['ploeg_id']}"
+        plat_sel = _render_filter_widgets(all_matchups, name_lookup_global, plat_prefix, own=True, opp=True)
+        gefilterd = _apply_filters(all_matchups, plat_sel)
+        if _has_filter(plat_sel):
+            _filter_caption(len(gefilterd), len(all_matchups), "matchups")
+        if not gefilterd:
+            st.info("Geen enkele matchup voldoet aan deze filters.")
+        else:
+            show_all_key = f"all_matchups_showall_{opp['ploeg_id']}"
+            show_all = st.checkbox(
+                f"Toon alle {len(gefilterd)} matchups (i.p.v. de beste {_MATCHUP_DISPLAY_DEFAULT_N})",
+                key=show_all_key,
+            ) if len(gefilterd) > _MATCHUP_DISPLAY_DEFAULT_N else False
+            display_matchups = gefilterd if show_all else gefilterd[:_MATCHUP_DISPLAY_DEFAULT_N]
+            table_rows, board_column_names = _matchups_to_table_rows(
+                display_matchups, name_lookup_global, own_ps=player_ratings, opp_ps=opponent_ratings,
+            )
+            column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
+            st.dataframe(
+                table_rows, use_container_width=True, hide_index=True,
+                column_config=column_config, column_order=column_order,
+            )
+            st.caption(
+                "Elk speler-duo staat in zijn eigen kolom ('Ons duo' / 'Tegenstander'), met tussen haakjes de "
+                "padelstat (ps) van elke speler, naast een aparte winkans-kolom per match. 'Kans 2p/1p/0p' toont "
+                "de exacte kans op dat aantal competitiepunten voor DEZE ene tegenstander-opstelling (dus "
+                "ongewogen - de weging over alle scenario's zit enkel in de groepstitel hierboven). 'Rotatie1 M1' "
+                "= Match 1 van rotatie 1 (sterkste duo volgens officieel klassement, art. 6.6), 'Rotatie1 M2' = "
+                "Match 2, enz."
+            )
+            if not show_all and len(gefilterd) > len(display_matchups):
+                st.caption(f"Beste {len(display_matchups)} van {len(gefilterd)} matchups getoond - vink hierboven aan om alles te zien.")
     st.divider()
+    # De AI-sectie werkt, zoals voorheen, op de beste 5 matchups van de volledige (ongefilterde) lijst.
+    ai_matchups = list(all_matchups)[:5]
     ai_history_key = f"all_matchups_chat_history_v2_{opp['ploeg_id']}"
     if ai_history_key not in st.session_state:
         st.session_state[ai_history_key] = []
@@ -1412,7 +1620,7 @@ def render_matchup_overview(
             if st.button(ai_start_label, key=f"all_matchups_ai_{opp['ploeg_id']}"):
                 with st.spinner("AI analyseert..."):
                     try:
-                        antwoord = taa.analyze_lineup_options(report, display_matchups[:5], name_lookup_global)
+                        antwoord = taa.analyze_lineup_options(report, ai_matchups, name_lookup_global)
                     except Exception as exc:
                         antwoord = f"Mislukt: {exc}"
                 st.session_state[ai_history_key] = [{"role": "assistant", "content": antwoord}]
@@ -1439,7 +1647,7 @@ def render_matchup_overview(
                     with st.spinner("AI denkt na..."):
                         try:
                             vervolg = taa.analyze_lineup_options(
-                                report, display_matchups[:5], name_lookup_global, history=ai_history,
+                                report, ai_matchups, name_lookup_global, history=ai_history,
                             )
                         except Exception as exc:
                             vervolg = f"Mislukt: {exc}"
