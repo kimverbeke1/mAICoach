@@ -328,6 +328,19 @@ naar het uitslagenblad op de TVL-site. Dit vervangt ook de tussenversie met
 "3-1 gewonnen" (SCHEDULE_READABLE_SCORE), die nooit in dit bestand is
 opgenomen. De oude _fixture_sort_key()/_FX_DATE_RE staan nu in
 speelschema_view.py.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11 (op verzoek van Kim: "ik ben toch
+voorstander om bij de rangschikking een refresh knop te hebben waarbij je dan
+minstens refreshed wie tegen wie gespeeld heeft en dan natuurlijk ook bijhoren
+hoeveel punten elke ploeg heeft. Ik heb nu bvb een rangschikking waar 2 ploegen
+hun score niet geupdate is")
+--------------------------------------------------------------------------
+_render_poule_ranking_section() toont nu BOVEN de stand de verversknop uit
+ranking_refresh.py (met diagnose: loopt ons schema achter, of TVL zelf?). Die
+module wist de stand-cache, de gedeelde leescache en de in de sessie vastgehouden
+kopie van het schema (vm_fixtures_<speler>, werd nooit vernieuwd), leest het schema
+opnieuw in en start zo nodig een schema-update. Faalt de import of de weergave, dan
+toont de sectie gewoon de stand zoals voorheen.
 """
 import streamlit as st
 from dashboard_common import (
@@ -377,6 +390,13 @@ try:
 except Exception as e:  # noqa: BLE001  pragma: no cover
     _sv = None
     _speelschema_import_error = f"{type(e).__name__}: {e}"
+# PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: verversknop + diagnose, defensief geimporteerd.
+_rank_refresh_import_error = None
+try:
+    import ranking_refresh as _rank_refresh
+except Exception as e:  # noqa: BLE001  pragma: no cover
+    _rank_refresh = None
+    _rank_refresh_import_error = f"{type(e).__name__}: {e}"
 # PADEL_ANALYSIS_PERF_TIMING_2026-09-28: meet per render waar de tijd zit.
 # Faalt de import, dan draait de pagina gewoon door zonder metingen.
 try:
@@ -783,7 +803,10 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
     """PADEL_ANALYSIS_POULE_RANKING_INTEGRATION_2026-09-27: sluit
     poule_ranking.py effectief aan.
     PADEL_ANALYSIS_POULE_RANKING_IMPORT_ERROR_VISIBLE_2026-09-27: toont ook
-    de ECHTE, onderliggende importfout (indien gekend)."""
+    de ECHTE, onderliggende importfout (indien gekend).
+    PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: de verversknop + diagnose
+    (ranking_refresh.py) staan BOVEN de stand; de fixtures worden pas daarna uit
+    de sessie gelezen, zodat een zonet vernieuwd schema meteen gebruikt wordt."""
     if poule_ranking is None:
         detail = f" Details: `{_poule_ranking_import_error}`." if _poule_ranking_import_error else ""
         st.warning(
@@ -791,6 +814,18 @@ def _render_poule_ranking_section(reeks_url_for_ranking: str, sel_player_id) -> 
             f"in dezelfde map staat als de andere PadelAnalysis-bestanden.{detail}"
         )
         return
+    if _rank_refresh is not None:
+        try:
+            _rank_refresh.render_refresh_block(str(sel_player_id), reeks_url_for_ranking)
+        except Exception as exc:  # noqa: BLE001 - de stand zelf mag hier nooit door breken
+            if type(exc).__name__ in ("RerunException", "StopException"):
+                raise
+            st.caption(f"De verversknop kon niet getoond worden: {type(exc).__name__}: {exc}")
+    elif _rank_refresh_import_error:
+        st.caption(
+            "De verversknop voor de rangschikking kon niet geladen worden (controleer of ranking_refresh.py in "
+            f"dezelfde map staat). Details: `{_rank_refresh_import_error}`."
+        )
     fixtures = st.session_state.get(f"vm_fixtures_{sel_player_id}") or []
     own_ploeg_id = st.session_state.get(f"vm_own_ploeg_id_{sel_player_id}")
     if not own_ploeg_id:

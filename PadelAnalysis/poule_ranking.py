@@ -153,11 +153,27 @@ zijn niet gecontroleerd tegen het officiele reglement; op Poule Q geven beide
 volgordes een ander resultaat voor Deinze D en Lobbeke B. De volgorde die TVL
 zelf toont is geen bewijs: binnen elke gelijke stand staan de ploegen op
 oplopend ploegnummer (8005, 8076 / 8073, 8159, 8218).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11 (op verzoek van Kim: "bij de
+rangschikking een refresh knop waarbij je dan minstens refreshed wie tegen wie
+gespeeld heeft en dan natuurlijk ook hoeveel punten elke ploeg heeft. Ik heb
+nu bvb een rangschikking waar 2 ploegen hun score niet geupdate is, tenzij je
+daar bepaalde oorzaken voor ziet die je op een automatische manier kan
+oplossen")
+--------------------------------------------------------------------------
+De stand (punten + ontmoetingen) wordt LIVE bij TVL opgehaald en gecachet. Dat
+gebeurde onzichtbaar en 30 minuten lang: een net door TVL bijgewerkte stand
+kwam dus tot een half uur te laat binnen, zonder dat je kon zien hoe oud hij was.
+Nu: de cache duurt _RANKING_CACHE_TTL (10 minuten), onder de stand staat het
+ophaalmoment, en clear_ranking_cache() laat de verversknop (ranking_refresh.py)
+de stand meteen opnieuw ophalen. De diagnose "welke ploeg loopt achter, ons
+schema of TVL zelf" en de verversknop zelf staan in ranking_refresh.py.
 """
 from __future__ import annotations
 import itertools
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 import requests
 import streamlit as st
@@ -181,6 +197,8 @@ QUALIFYING_PLACES = 2
 # _head_to_head_winner(), ...) blijft ONGEWIJZIGD staan, klaar om later
 # gewoon terug aan te zetten door deze vlag terug op True te zetten.
 SHOW_QUALIFICATION_SCENARIOS = False
+# PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: zie moduledocstring.
+_RANKING_CACHE_TTL = 600
 def fetch_poule_ranking_html(
     url: str,
     session: Optional[requests.Session] = None,
@@ -643,7 +661,7 @@ def _resolve_tie_group(groep: list, stats: dict, fixtures: list, orientation: st
     return resultaat, notes, onbeslist
 def _describe_points_shed_requirement(n_free_remaining: int, points_to_shed: int) -> str:
     """PADEL_ANALYSIS_THREAT_EXPLANATION_GENERALIZE_2026-09-27: vertaalt
-    "moet X punten minder halen dan hun maximum" naar een EXACTE, voor élk
+    "moet X punten minder halen dan hun maximum" naar een EXACTE, voor elk
     aantal resterende wedstrijden correcte puntengrens - i.p.v. de vorige
     tekst ("bv. minstens 1 resterende wedstrijd niet winnen") die enkel
     bij PRECIES 1 resterende wedstrijd klopte en bij 2+ misleidend/
@@ -865,14 +883,47 @@ def _build_ranking_url_from_reeks_url(reeks_url: str) -> Optional[str]:
 # UI: te integreren in page_lineup_lab.py, tab "Rangschikking"
 # ---------------------------------------------------------------------------
 _RESULT_LABEL = {"win": "Winst", "draw": "Gelijkspel", "loss": "Verlies"}
-@st.cache_data(ttl=1800, show_spinner="Rangschikking ophalen...")
+@st.cache_data(ttl=_RANKING_CACHE_TTL, show_spinner="Rangschikking ophalen...")
 def _load_poule_ranking_cached(url: str) -> dict:
-    """PADEL_ANALYSIS_RANKING_CACHE_2026-09-29: gedeelde cache van 30 min.
-    Overleeft F5 en nieuwe sessies binnen hetzelfde Streamlit-proces.
-    De interactieve fetch gebruikt geen kunstmatige vertraging; bij de oude
-    code kostte delay=1.0 op elke nieuwe sessie exact 1 seconde wachttijd."""
+    """PADEL_ANALYSIS_RANKING_CACHE_2026-09-29: gedeelde cache. Overleeft F5 en
+    nieuwe sessies binnen hetzelfde Streamlit-proces. De interactieve fetch
+    gebruikt geen kunstmatige vertraging; bij de oude code kostte delay=1.0 op
+    elke nieuwe sessie exact 1 seconde wachttijd.
+    PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: de cache duurt nu _RANKING_CACHE_TTL
+    (10 minuten, was 30) en het resultaat bevat "fetched_at" (ISO, UTC): het
+    moment waarop TVL werd bevraagd."""
     html = fetch_poule_ranking_html(url, delay=0.0)
-    return parse_poule_ranking(html)
+    data = parse_poule_ranking(html)
+    data["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    return data
+def clear_ranking_cache() -> None:
+    """PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: de eerstvolgende
+    _load_poule_ranking_cached() haalt de stand opnieuw bij TVL op."""
+    try:
+        _load_poule_ranking_cached.clear()
+    except Exception:  # noqa: BLE001
+        pass
+def format_local_time(value, with_date: bool = False) -> str:
+    """"2026-10-11T10:03:41+00:00" (of een datetime) -> "12:03:41" in Belgische tijd;
+    met with_date=True "11/10/2026 12:03". Onleesbaar -> de ruwe tekst, leeg -> "onbekend".
+    Valt terug op de systeemtijd als de tijdzone-database ontbreekt (bv. Windows zonder tzdata)."""
+    if not value:
+        return "onbekend"
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo("Europe/Brussels"))
+        except Exception:  # noqa: BLE001
+            dt = dt.astimezone()
+        return dt.strftime("%d/%m/%Y %H:%M" if with_date else "%H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return str(value)
 def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) -> None:
     """Toont de volledige rangschikkingstabel + kwalificatiescenario's voor
     de eigen ploeg. Bedoeld om aangeroepen te worden in het tabblad
@@ -908,6 +959,12 @@ def render_poule_ranking_tab(reeks_url: str, fixtures: list, own_ploeg_id: str) 
         meta_parts.append(f"afdeling {data['afdeling']}")
     if meta_parts:
         st.caption(" \u00b7 ".join(meta_parts))
+    if data.get("fetched_at"):
+        # PADEL_ANALYSIS_RANKING_REFRESH_2026-10-11: hoe oud is deze stand?
+        st.caption(
+            f"Stand opgehaald bij TVL om {format_local_time(data['fetched_at'])} (hoogstens "
+            f"{_RANKING_CACHE_TTL // 60} minuten bewaard - gebruik 'Ververs rangschikking' voor de allerlaatste stand)."
+        )
     try:
         ordered = order_standings_with_tiebreak(standings, fixtures)
     except Exception:  # noqa: BLE001 - de stand tonen mag nooit door de tie-break breken
