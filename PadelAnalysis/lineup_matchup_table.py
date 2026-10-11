@@ -3,322 +3,52 @@ lineup_matchup_table.py - Opbouw en weergave van de volledige
 "Opstelling-scenario's"-tabel: alle geldige matchups (eigen koppelverdeling
 x tegenstander-opstelling), gegroepeerd, gesorteerd en met AI-doorvraag.
 Opgesplitst uit page_lineup_lab.py (PADEL_ANALYSIS_MODULE_SPLIT_2026-09-27).
-Zie de oorspronkelijke, monolithische versie van page_lineup_lab.py voor de
-volledige historische toelichting bij elke fix - functioneel ONGEWIJZIGD,
-behalve de fixes hieronder.
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27 (op verzoek van Kim:
-"die knop analyse opslaan staat nergens of is althans niet zichtbaar")
+HISTORIEK (korte samenvatting - de volledige toelichting per marker staat in de git-historiek van dit
+bestand): SAVE_BUTTON_VISIBILITY_FIX_2026-09-27 (opslaan-knop vroeg in de resultaten), NO_NONCOMPLIANT_2026-09-29
+(enkel reglementaire matchvolgordes), MATCHUPS_ALL_OWN_LINEUPS_2026-09-29 (elke eigen opstelling doorgerekend, per
+groep een samenvatting + de beste _KEEP_PER_GROUP rijen), POINT_PROBABILITY_2026-09-30 (kans op 2/1/0 punten, gewogen
+over de tegenstander-scenario's), DILUTED_GROUP_PROBS_2026-10-01 (diagnose bij identieke percentages),
+OPPONENT_LINEUP_MODEL_2026-10-02 (gewichten uit opponent_lineup_model.py), SCENARIO_MATRIX_2026-10-03,
+ROSTER_AND_GROUPS_2026-10-03 (roster-keuze, grote koppen), PAGE_RESTRUCTURE_2026-10-04 (opgesplitst in
+render_opponent_scenario_setup() en render_matchup_overview()).
 --------------------------------------------------------------------------
-ROOT CAUSE (bevestigd - de knop was niet AFWEZIG, maar extreem diep
-begraven): "Deze analyse opslaan" stond helemaal aan het EINDE van
-_render_all_valid_matchups(), pas bereikbaar nadat ALLE volgende stappen na
-elkaar geslaagd waren: 1) tegenstander-scout gelukt, 2) minstens 2 eigen
-spelers geselecteerd, 3) tegenstander-roster zó geselecteerd/ingesteld dat
-de som van max-per-speler EXACT gelijk is aan 2x het aantal wedstrijden
-(anders wordt er stilzwijgend NIETS berekend - geen foutmelding, gewoon 0
-theoretische opstellingen), 4) expliciet op "Bereken alle geldige
-matchups" geklikt, 5) en dan nog voorbij de volledige matchup-tabel,
-gegroepeerde opstellingen, "Beste opstelling voor..."-tabel, platte tabel
-EN de AI-sectie scrollen. Voor een eerste analyse van een nieuwe
-tegenstander (zonder historische ontmoetingen) is stap 3 foutgevoelig en
-onopvallend - een kleine afronding/wijziging in de multiselect kan de som
-laten mismatchen, waardoor de hele verdere pijplijn (en dus de knop) nooit
-bereikt wordt, zonder duidelijke melding waarom.
-FIX: de "Analyse opslaan"-knop (en de bijhorende payload-opbouw) is
-VERPLAATST naar direct na de regel "X geldige matchup(s) gevonden" -
-dus zodra all_matchups niet leeg is, VOOR de zware rendering van
-gegroepeerde opstellingen/tabellen/AI-sectie. Functioneel volledig
-ongewijzigd (zelfde payload, zelfde fb.save_lineup_analysis()-aanroep,
-zelfde key) - enkel de POSITIE in de pagina is aangepast, zodat opslaan
-niet langer vereist dat je eerst door de volledige resultatensectie
-scrolt. Stap 3 hierboven (de som-mismatch) blijft een aandachtspunt maar
-is nu tenminste geen extra drempel meer BOVENOP een compleet verscholen
-knop.
+PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10 (op verzoek van Kim: "bij alle matchups zou het wel handig zijn om te
+kunnen filteren op spelers [...] op koppel. De toelichting in die tabel is niets waard [...] beter gewoon padelstat
+van beide spelers tussen haakjes tonen")
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29 (op verzoek van Kim: "niet toegelaten opstellingen zijn
-nutteloos. verwijder deze optie.")
+1. Filters op onze spelers, ons koppel, tegenstander-spelers en tegenstander-koppel (op id's). Alle gekozen
+   filters moeten kloppen: kies je 2 spelers, dan spelen ze allebei mee.
+2. "Ons duo"/"Tegenstander" tonen per speler "Naam (ps 180)"; de kolom "Toelichting" is weg.
 --------------------------------------------------------------------------
-De checkbox "Toon ook bewust omgedraaide, NIET-reglementaire varianten" is
-weg. Enkel reglementaire matchvolgordes (art. 6.6) worden nog berekend; bij
-een gelijk officieel klassement blijven beide (toegelaten) volgordes staan.
-De badge "onzeker" (onvolledig officieel klassement) blijft bestaan.
+PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11 (op verzoek van Kim: "Ik zie nu net dat je bij de matchup niet alle
+combinaties gemaakt hebt [...] Bvb Klaudia en Evy hebben in de 2de rotatie tegen Isis gespeeld tegen Gallach en
+Serruys. bekijk dat grondig want dat moet opgelost worden")
 --------------------------------------------------------------------------
-PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29 (op verzoek van Kim: "Er zijn meer dan 800 geldige
-matchups gevonden - enkel de eerste 800 zijn meegenomen [...] dit is ook
-vreemd")
---------------------------------------------------------------------------
-BUG: de lus stopte na 800 matchups, in de volgorde van de EIGEN
-opstellingen - niet de beste. Met bv. 6 eigen spelers (~100 eigen
-opstellingen) x 300 theoretische tegenstander-opstellingen (~30.000
-combinaties) werden zo enkel de eerste ~3 eigen opstellingen volledig
-doorgerekend; alle andere ontbraken stil in de tabel, de groepen en
-"Beste opstelling voor...". De melding "verklein de spelersselectie" was
-dus misleidend: het probleem was de afkapping, niet de selectie.
-FIX: ELKE eigen opstelling wordt tegen ELKE tegenstander-opstelling
-doorgerekend (veiligheidsgrens _MAX_COMPUTED_MATCHUPS). Om geheugen en
-weergave beheersbaar te houden, wordt per eigen opstelling een SAMENVATTING
-bijgehouden (aantal, beste, slechtste, gemiddelde, en per speler de
-gemiddelde/slechtste/beste persoonlijke winkans) plus enkel de beste
-_KEEP_PER_GROUP rijen, de slechtste rij en alle historische rijen.
-Best/worst case en "Beste opstelling voor..." rekenen op de VOLLEDIGE
-set, niet op de bewaarde rijen. De groepenlijst toont standaard de beste
-_GROUPS_DISPLAY_DEFAULT eigen opstellingen (rest via een vinkje).
-Opslaan bewaart de beste _SAVE_MAX_MATCHUPS matchups, zodat het
-Firestore-document onder de limiet van 1 MB blijft.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30 (op verzoek van Kim,
-na het testen van de vorige versie: "Puntenkans apart tonen, niet in de
-lange titel-string" - "30% · 2p 40% · 1p 30% · 0p · OK - R1M1 ... is
-inderdaad te veel in een regel")
---------------------------------------------------------------------------
-De expander-titel combineerde de puntenkans-tekst, de reglement-badge EN
-de volledige koppellijst in EEN lange string - moeilijk te scannen over
-meerdere groepen heen, en Streamlit-expander-labels ondersteunen geen
-opmaak (geen kleur, geen vetgedrukt, geen losse elementen).
-FIX: de puntenkans (2p/1p/0p) staat nu als 3 aparte st.metric()-elementen
-BOVEN elke expander, in een rij van 3 kolommen - dus zichtbaar zonder te
-hoeven openklikken, en visueel losstaand van de koppel-tekst. De expander-
-titel zelf bevat nu enkel nog de reglement-badge + de korte koppellijst
-(bv. "OK - R1M1 Kim/Nico · R1M2 Joris/Carl"), niet langer de puntenkans.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30 (op verzoek
-van Kim: "Puntenkans ook bij 'Beste opstelling voor mezelf' - nu toont die
-tabel enkel persoonlijke winkans. Ik voeg de kans op 2/1/0 punten voor de
-HELE ploeg toe bij diezelfde opstelling, zodat je meteen ziet: 'goed voor
-mij persoonlijk, en dit is wat het voor het team betekent.'")
---------------------------------------------------------------------------
-_render_best_for_selected_player() toonde tot nu toe enkel de persoonlijke
-winkans/EBW van de geselecteerde speler, zonder te tonen wat diezelfde
-ploegopstelling betekent voor de PLOEGKANS (2/1/0 punten). FIX: 3 nieuwe
-kolommen "Team Kans 2p/1p/0p %" - dezelfde gewogen puntenkans (g["point_
-probs"]) die ook in de groepen hierboven getoond wordt, nu ook hier naast
-de persoonlijke cijfers. Blijft ONGEWIJZIGD gesorteerd op de persoonlijke
-gemiddelde winkans (een persoonlijke, geen ploegmaatstaf) - de puntenkans
-is hier enkel INFORMATIEF, geen nieuwe sorteervolgorde.
-PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03 hieronder VERWIJDERT de AANROEP
-van deze functie weer uit de overzichtssectie (niet de functie zelf) - zie
-die toelichting.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30 (op verzoek van Kim, na
-brainstorm over de matchup-analyse: "dat leert me niets wat de beste
-opstelling is voor de ploeg [...] uiteindelijk gemiddeld gezien door alle
-combinaties natuurlijk weer op zelfde uitkomt")
---------------------------------------------------------------------------
-ROOT CAUSE (bevestigd door Kim's eigen voorbeeld: 3 groepen met Best 2.05 /
-2.05 / 2.03): de groepstitel toonde enkel best/worst EXPECTED BOARDS WON
-(EBW) - een getal dat noch (a) rekening houdt met hoe WAARSCHIJNLIJK elk
-tegenstander-scenario is (alles werd gelijk geteld), noch (b) zegt wat het
-ECHT uitmaakt: hoeveel COMPETITIEPUNTEN de ploeg haalt (0/1/2 - Kim,
-bevestigd 2026-09-30: 2 bij winst, 1 bij gelijke stand/2-2, 0 bij verlies).
-FIX, twee delen (rekenkern in lineup_rotation.py, dit bestand toont enkel):
-  1. _compute_matchup() (lineup_rotation.py) berekent nu ook, per matchup,
-     een EXACTE kansverdeling op 2/1/0 punten (point_probs) - zie
-     lineup_rotation._match_outcome_point_probabilities(). Dit gebeurt
-     ALTIJD, dus elke matchup in `all_matchups`/de groepen heeft dit veld
-     al klaarstaan; hier hoeft niets herberekend te worden.
-  2. Elk tegenstander-scenario ("unique_opponent_lineups"-item) krijgt een
-     GEWICHT op basis van hoe vaak de tegenstander die exacte opstelling,
-     IN DEZELFDE ROTATIE-POSITIE, dit seizoen al effectief speelde -
-     lineup_rotation._opponent_lineup_weight(). Een scenario met 3
-     observaties telt dus 4x zo zwaar mee in het gewogen gemiddelde als een
-     zuiver theoretisch scenario. Dit gewicht wordt per (own_ordered_pairs,
-     opponent-lineup-key)-matchup vastgelegd in _build_all_valid_matchups()
-     en aan lineup_rotation._aggregate_group_point_probabilities()
-     meegegeven om het gewogen gemiddelde puntenkans per groep te bouwen.
-WEERGAVE: het NIEUWE hoofdgetal per groep (in
-_render_own_lineup_groups_with_opponents()) is nu "68% kans op 2 punten ·
-24% op 1 · 8% op 0" (gewogen gemiddelde over ALLE doorgerekende
-tegenstander-scenario's van die groep - niet enkel de bewaarde rijen). De
-BESTAANDE best/worst-EBW blijft ernaast staan als secundair getal (nuttig
-als tiebreak bij een gelijke puntenkans). De groepenlijst wordt nu ook
-GESORTEERD op deze gewogen 2-punten-kans (was: best-case EBW).
-"Beste opstelling voor..." blijft ONGEWIJZIGD werken op EBW/winkans per
-speler - dat is een persoonlijke, geen ploegmaatstaf, en verandert dus niet
-mee met deze fix.
-BEPERKING (bewust, zie lineup_rotation.py-moduledocstring): de weging
-gebruikt uitsluitend DIT SEIZOEN (bundle.previous_fixtures) - de app heeft
-op dit moment geen betrouwbare rotatiepositie-informatie over vorige
-seizoenen. Kim akkoord (2026-09-30, "optie 1"): nu bouwen met wat er is,
-architectuur zo dat vorige seizoenen er later bij kunnen zonder dit bestand
-te moeten aanpassen (enkel lineup_rotation._opponent_lineup_weight()).
---------------------------------------------------------------------------
-PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01 (op verzoek van Kim: "bij de
-matchups zie ik 3 keer dezelfde percentages: 30-40-30. nutteloos.")
---------------------------------------------------------------------------
-ROOT CAUSE, bevestigd door de weging na te rekenen: _opponent_lineup_
-weight() geeft een historisch scenario slechts +1.0 BOVENOP de vaste basis
-1.0 PER OBSERVATIE (dus een 1x gespeeld scenario weegt 2.0, een 3x
-gespeeld scenario weegt 4.0) - tegenover tot wel
-_THEORETICAL_MAX_VARIANTS=300 zuiver THEORETISCHE scenario's die ELK ook
-basisgewicht 1.0 krijgen. Met bv. 1 historisch scenario (gewicht 2.0) naast
-287 theoretische (gewicht 287), weegt het ENIGE grounded datapunt dus voor
-amper ~0.7% van het gewogen gemiddelde mee - de group-kans is dan in de
-praktijk vrijwel UITSLUITEND het gemiddelde over alle theoretische
-tegenstander-opstellingen. Omdat dat gemiddelde per definitie over VEEL
-verschillende tegenstander-koppels gaat, convergeert het voor VERSCHILLENDE
-eigen opstellingen naar bijna hetzelfde getal (de wet van de grote
-aantallen middelt het verschil tussen onze eigen opstellingen grotendeels
-weg) - exact Kim's eerdere constatering ("dat leert me niets... uiteindelijk
-gemiddeld gezien door alle combinaties weer op zelfde uitkomt"), nu
-teruggekeerd omdat de weging te zwak is om dat tegen te houden zodra het
-theoretische roster groot is. Een 2e, onafhankelijke oorzaak die TOT
-HETZELFDE SYMPTOOM leidt: ontbrekende ratings (player_ratings/official_
-ranks/opponent_ratings) maken win_probability voor (bijna) elke match
-None, waardoor _match_outcome_point_probabilities() overal terugvalt op de
-neutrale 50%-aanname - dan is de 31.25%/37.5%/31.25%-verdeling voor N=4
-matchen WISKUNDIG IDENTIEK voor elke groep, ongeacht de weging.
-FIX, VOLLEDIG ZICHTBAARHEID I.P.V. EEN GEDRAGSWIJZIGING VAN DE WEGING ZELF
-(die weegformule blijft bewust ONGEWIJZIGD - zie lineup_rotation.py,
-_opponent_lineup_weight() - een latere herziening van de weging zelf is
-een aparte, grotere beslissing): _finalize_group() geeft nu ook
-"n_historical_scenarios" (= len(g["historical"]), al bijgehouden maar tot
-nu toe niet doorgegeven) terug. _render_own_lineup_groups_with_opponents()
-toont daarmee, ALTIJD zichtbaar naast de 3 metrics (niet verstopt in de
-expander), hoeveel van de g["n"] doorgerekende scenario's effectief
-HISTORISCH vs THEORETISCH waren, plus - indien van toepassing - EEN van
-de 2 volgende, elkaar uitsluitende waarschuwingen:
-  1. Als >= 50% van de individuele match-schattingen in deze groep een
-     onbekende winkans had (n_missing_ratings t.o.v. g["n"] x aantal
-     matchen): een duidelijke waarschuwing dat de percentages vooral op de
-     neutrale 50%-aanname steunen (oorzaak 2 hierboven) - actie: ontbrekend
-     klassement/rating aanvullen.
-  2. Anders, als er 0 historische scenario's zijn EN >= 20 theoretische:
-     een duidelijke notitie dat het cijfer vrijwel uitsluitend op
-     theoretische scenario's steunt (oorzaak 1 hierboven) - actie: verklein
-     het tegenstander-roster hierboven tot de spelers die je ECHT verwacht,
-     zodat er minder, meer relevante theoretische scenario's overblijven
-     en het gewicht van eventuele historische scenario's meer gewicht
-     krijgt in verhouding.
-Dit maakt de 2 mogelijke, fundamenteel verschillende oorzaken van
-"identieke percentages" voor het eerst van elkaar te ONDERSCHEIDEN, met
-een concrete, bruikbare vervolgstap per geval - i.p.v. enkel een cijfer
-te tonen zonder te verklaren waarom het niet onderscheidend aanvoelt.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02 (op verzoek van Kim: "hou
-wel ook wat rekening met statistische gegevens zoals: persoon x speelt
-bijna altijd met die persoon y. of persoon x speelt bijna altijd 1ste
-match. combineer ook die data.")
---------------------------------------------------------------------------
-1. WEGING: elk tegenstander-scenario krijgt nu als gewicht de VOORSPELDE
-   KANS uit opponent_lineup_model.py (deelname + vaste koppels + Match 1/2-
-   voorkeur, softmax over alle scenario's) i.p.v. de vroegere "1 + aantal
-   keer gespeeld". Daardoor tellen honderden theoretische, onwaarschijnlijke
-   opstellingen (bv. met een speler die nooit meespeelt, of 2 spelers die
-   nooit samen spelen) bijna niet meer mee - precies de oorzaak van de
-   uitgevlakte "30-40-30"-percentages (PADEL_ANALYSIS_DILUTED_GROUP_PROBS).
-   _opponent_lineup_weight() in lineup_rotation.py blijft bestaan als
-   terugval wanneer het model niet beschikbaar is.
-2. BUGFIX in dezelfde lijn: _finalize_group() berekende de gewogen
-   puntenkans enkel over de BEWAARDE rijen (beste 25 op EBW + slechtste +
-   historische). Met modelgewichten kunnen de waarschijnlijkste scenario's
-   net buiten die top-25 vallen. De gewogen som wordt nu INCREMENTEEL in
-   _add_to_group() over ALLE doorgerekende matchups bijgehouden - exact,
-   niet langer een benadering, en zonder extra geheugen.
-3. Nieuw expander-blok "Voorspelde tegenstander-opstellingen" toont de top
-   5 met kans en de redenen, zodat de weging controleerbaar is.
-Cache-sleutels naar v4 (de gewichten zijn veranderd).
---------------------------------------------------------------------------
-PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 (op verzoek van Kim: "gewoon
-overal hetzelfde gemiddelde zien is ook niet zinvol. Dus specifieke cases
-zijn wel interessant")
---------------------------------------------------------------------------
-Meteen na de voorspelde tegenstander-opstellingen (en VOOR de knop
-"Bereken alle geldige matchups") staat nu de scenario-matrix uit
-lineup_scenario_matrix.py: benoemde tegenstander-scenario's als kolommen,
-eigen strategieen (aanvallend / veilig / robuust / counter) als rijen, met
-de exacte kans per cel. Ze rekent zelf (licht: enkel de eigen opstellingen
-x max. 8 scenario's) en heeft de knop dus niet nodig. Faalt de module, dan
-werkt de rest van deze sectie ongewijzigd verder.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03 (feedback Kim: "Als ik bvb een speler
-wegklik [...] dan moet je die opstelling niet tonen want is niet mogelijk",
-"handig om bij de spelers en het aantal matchen te zien welke padelstat
-score en officiele ranking ze hebben [...] het aantal matchen die ze
-waarschijnlijk gaan spelen al voorstellen. Moet dus geupdate worden als je
-spelers toevoegt of wegklikt", "minstens 1 punt [...] zou bij matchup ook
-logischer zijn", grotere koppen per opstelling)
---------------------------------------------------------------------------
-1. Tegenstander-opstellingen (ook EFFECTIEF GESPEELDE) met een speler die
-   niet in "Beschikbare tegenstander-spelers" staat, worden weggelaten -
-   voor de matrix, het model en de matchup-tabel. Herkenning op id OF naam.
-2. Het veld per tegenstander-speler toont "Naam (P-klassement · ps
-   padelstat)" en staat standaard op het VERWACHTE aantal matchen: het
-   gemiddelde aantal matchen per ontmoeting dat die speler speelde
-   (statistisch model), herschaald naar het totaal en begrensd op 1 match
-   per rotatie. Zonder historiek: gelijk verdeeld (zoals voorheen). Wijzig
-   je de selectie, dan wordt het voorstel herberekend.
-3. "Onze opstellingen": grote kop per opstelling met de namen per rotatie,
-   daaronder 4 grote cijfers (winst / gelijk / verlies / minstens 1 punt),
-   de uitklapknop heet "Details".
-4. Het model (stats) wordt mee doorgegeven aan de scenario-matrix voor de
-   duiding van de kansen.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 (op verzoek van Kim: "er zijn een
-aantal zaken die een beetje overlappen bij de analyse [...] Ik vind voor
-mezelf de rotatieplanner de core. Dus ik zou die na de scenario analyse
-tonen [...] Het stuk van alle matchups, zou je in een apart stuk mogen
-doen, waarbij je over alle matchen gemiddeldes dan toont zoals vandaag. De
-beste opstelling voor mezelf, zal daar wegmogen, aangezien we dat gaan
-toevoegen bij de voorstellen van de rotatieplanner")
---------------------------------------------------------------------------
-_render_all_valid_matchups() deed TOT NU TOE alles achter elkaar: roster-
-keuze + scenario-matrix + de knop "Bereken alle geldige matchups" + de
-groepenweergave. Dat liet de Rotatieplanner pas NA de hele matchup-tabel
-verschijnen, terwijl Kim die net als het belangrijkste onderdeel ziet.
-FIX: de functie is opgesplitst in TWEE losse functies, zodat
-page_lineup_lab.py de Rotatieplanner ertussen kan tonen:
-  1. render_opponent_scenario_setup(...) - roster-multiselect, verwacht
-     aantal matchen per tegenstander-speler, het statistisch model en de
-     scenario-matrix (lineup_scenario_matrix.py). Geeft een dict terug met
-     "unique_opponent_lineups"/"model_weights"/"model_stats", die
-     page_lineup_lab.py ONGEWIJZIGD doorgeeft aan de Rotatieplanner EN aan
-     render_matchup_overview() hieronder - zodat beide met DEZELFDE
-     tegenstander-opstellingen/gewichten werken.
-  2. render_matchup_overview(...) - de knop "Bereken alle geldige matchups"
-     + de groepenweergave ("Onze opstellingen", nu onder de kop "Alle
-     matchups"), de platte tabel en de AI-sectie. De aanroep van
-     _render_best_for_selected_player() is hier WEG (niet de functie zelf -
-     die blijft gewoon bestaan): die vraag ("beste opstelling voor mezelf")
-     wordt nu beantwoord door de nieuwe "Beste voor <naam>"-rij in de
-     Rotatieplanner (lineup_plan_screen.py), in de context van het
-     tegenstander-scenario dat je daar aan het plannen bent.
-_render_all_valid_matchups() blijft bestaan als DUNNE combinator (roept
-gewoon beide bovenstaande functies na elkaar aan, zonder de Rotatieplanner
-ertussen) voor eventuele andere aanroepers - page_lineup_lab.py gebruikt
-voortaan de 2 losse functies.
---------------------------------------------------------------------------
-PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10 (op verzoek van Kim: "bij alle
-matchups zou het wel handig zijn om te kunnen filteren op spelers. bvb in de
-details of platte tabel zou je bij ons duo of bij de tegenstander moeten
-kunnen filteren op koppel. De toelichting in die tabel is niets waard omdat je
-daar gewoon officieel klassement toont. Je zou dan beter gewoon padelstat van
-beide spelers tussen haakjes tonen in de tabel van de koppels en die
-toelichting weg laten")
---------------------------------------------------------------------------
-1. FILTERS (op id's, niet op tekst): _render_filter_widgets() toont keuzelijsten
-   voor onze spelers, ons koppel, de tegenstander-spelers en het tegenstander-
-   koppel; _apply_filters() houdt enkel de matchups over waarin ALLE gekozen
-   spelers/koppels voorkomen (kies je 2 spelers, dan spelen ze allebei mee).
-   Waar ze staan:
-     - boven "Onze opstellingen": onze spelers en koppels (filtert de groepen);
-     - in "Details" van elke groep: tegenstander-spelers en -koppel (onze
-       koppels liggen binnen een groep vast); enkel bij 6 of meer rijen;
-     - in de platte tabel: alle vier.
-   De platte tabel filtert EERST en kapt DAARNA af op de beste N, zodat een
-   filter ook matchups toont die niet in de beste 15 stonden. Gefilterd wordt
-   op de BEWAARDE rijen (beste 25 per groep + slechtste + historische), net als
-   de tabel zelf. De AI-sectie blijft op de beste 5 ONGEFILTERDE matchups werken.
-   Een bewaarde keuze die niet meer in de opties zit (nieuwe berekening) wordt
-   stil gewist i.p.v. een fout te geven (_multiselect_safe).
-2. PADELSTAT IN HET KOPPEL: "Ons duo" en "Tegenstander" tonen nu per speler
-   "Naam (ps 180) + Naam (ps 240)" (padelstat-rating; "ps ?" als die niet
-   gekend is). De kolom "Toelichting" (de officiele puntensom per duo) is
-   verwijderd, samen met de uitleg in het bijschrift. Kolommen: # | Kans 2p/1p/0p
-   | Verwacht | per match Ons duo / Tegenstander / % | Vorige keer.
-3. Zichtbare tekst gebruikt "matchvolgorde" i.p.v. "bordvolgorde".
+Drie bevestigde oorzaken (zie matchup_universe.py voor de meting):
+  A. de theoretische tegenstander-opstellingen werden afgekapt op de EERSTE 300 (op volgorde van speler-id's);
+  B. ze werden opgebouwd met een vast aantal matchen per tegenstander-speler (afgeleid uit hun historiek, afgerond):
+     wie op 0 uitkwam speelde in geen enkele opstelling mee, wie op 1 kwam kon nooit 2 matchen spelen;
+  C. per eigen opstelling bleven enkel de beste 25 + de slechtste + de historische rijen over; filters en de tabel
+     toonden dus enkel die.
+Oplossing:
+  1. render_opponent_scenario_setup() bepaalt ALLE rotatie-veilige tegenstander-opstellingen (matchup_universe.py),
+     zonder vast aantal per speler. Het model (opponent_lineup_model.py) geeft elke opstelling een gewicht: onwaar-
+     schijnlijke tellen nauwelijks mee. Voor de samenvattende groepen worden de meest waarschijnlijke doorgerekend
+     (aantal afhankelijk van hoeveel eigen opstellingen er zijn), aangevuld zodat ELK mogelijk koppel in ELKE
+     rotatie minstens 1x voorkomt. Een melding toont hoeveel er zijn, hoeveel er doorgerekend werden en welk
+     aandeel van het gewicht dat dekt. Een effectief gespeelde opstelling wordt nooit weggelaten.
+  2. Filters rekenen EXACT: zodra je een speler/koppel kiest, wordt elke eigen opstelling die aan je filter voldoet
+     gekruist met elke tegenstander-opstelling die aan je filter voldoet (matchup_universe.search_exact), niet enkel
+     over de bewaarde rijen. Is het product te groot, dan worden de meest waarschijnlijke tegenstander-opstellingen
+     gehouden en staat dat er duidelijk bij. De keuzelijsten bevatten ALLE spelers en koppels (niet enkel wie in de
+     bewaarde rijen zit).
+  3. In "Details" van een groep filtert de tegenstander eveneens exact, voor precies die eigen opstelling.
+  4. Elke matchup toont "Kans opstelling %": hoe waarschijnlijk het model de tegenstander-opstelling vindt.
+  5. Zware tussenresultaten (universum, gewichten, voorstel, zoekopdrachten) zijn gecachet in st.session_state.
 """
 import heapq
+import itertools
 import streamlit as st
 from dashboard_common import fb, taa
 from lineup_scout import _opponent_official_ranks, _opponent_padelstat_ratings
@@ -333,12 +63,12 @@ except Exception:  # noqa: BLE001  pragma: no cover
 from lineup_rotation import (
     _enumerate_rotation_aware_pairings, _enumerate_own_variant_combinations,
     _compute_matchup, _default_opponent_max_per_player,
-    _generate_theoretical_opponent_boards_with_repeats,
     _historical_opponent_boards_list, _collect_unique_opponent_lineups,
     _opponent_lineup_weight, _aggregate_group_point_probabilities,  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30
+    _build_opponent_boards_and_points, _rank_pairs_with_padelstat_tiebreak, MATCHES_PER_ROTATION,
 )
+import matchup_universe as mu  # PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11
 _MATCHUP_DISPLAY_DEFAULT_N = 15
-_THEORETICAL_MAX_VARIANTS = 300
 # PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29
 _MAX_COMPUTED_MATCHUPS = 100_000   # veiligheidsgrens op de rekenlus
 _KEEP_PER_GROUP = 25               # bewaarde beste rijen per eigen opstelling
@@ -350,6 +80,16 @@ _DILUTION_MISSING_RATIO_THRESHOLD = 0.5   # >= 50% onbekende winkansen -> waarsc
 _DILUTION_THEORETICAL_MIN_COUNT = 20       # 0 historisch + >= 20 theoretisch -> notitie
 # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: groepsdetails pas filterbaar vanaf dit aantal rijen.
 _GROUP_DETAIL_FILTER_MIN_ROWS = 6
+# PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11
+_TARGET_MATCHUPS = 40_000          # streefgetal voor eigen opstellingen x doorgerekende tegenstander-opstellingen
+_OPP_SUBSET_MIN = 300
+_OPP_SUBSET_MAX = 2_500
+_UNIVERSE_MAX_LINEUPS = 60_000     # meer opstellingen dan dit: gespreide steekproef (9+ tegenstander-spelers)
+_SEARCH_MAX_COMPUTED = 25_000      # maximum aantal combinaties per exacte zoekopdracht
+_SEARCH_TIME_BUDGET = 30.0         # seconden per exacte zoekopdracht
+_SCORE_TIME_BUDGET = 8.0           # seconden voor het model-gewicht van het hele universum
+_SEARCH_SHOW_DEFAULT_N = 25
+_SEARCH_SHOW_MAX = 2_000
 def _sort_val(m) -> float:
     ebw = m.get("expected_boards_won")
     return ebw if ebw is not None else m.get("total_score", 0.0)
@@ -370,9 +110,8 @@ def _new_group_summary(assignment: list) -> dict:
 def _add_to_group(g: dict, m: dict, counter: int, opponent_weight: float = 1.0) -> None:
     """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: `opponent_weight` is het
     gewicht van het tegenstander-scenario waartegen deze matchup berekend
-    is (lineup_rotation._opponent_lineup_weight()) - bewaard per matchup-id
-    in g["weights"], zodat de gewogen puntenkans-aggregatie later over de
-    VOLLEDIGE set (niet enkel de bewaarde top-rijen) kan rekenen."""
+    is - bewaard per matchup-id in g["weights"], zodat de gewogen
+    puntenkans-aggregatie later over de VOLLEDIGE set kan rekenen."""
     val = _sort_val(m)
     g["n"] += 1
     g["weights"][id(m)] = opponent_weight
@@ -441,25 +180,10 @@ def _finalize_group(key, g: dict) -> dict:
         if m is not None:
             rows_by_id[id(m)] = m
     rows = sorted(rows_by_id.values(), key=_sort_val, reverse=True)
-    # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: gewogen puntenkans over
-    # de VOLLEDIGE set van deze groep - g["weights"] bevat een entry voor
-    # ELKE doorgerekende matchup van deze groep (niet enkel de bewaarde
-    # rijen), gevuld in _add_to_group() bij elke aanroep.
     all_group_matches = [m for _, _, m in g["top"]]
     for m in [g["worst"]] + g["historical"]:
         if m is not None and m not in all_group_matches:
             all_group_matches.append(m)
-    # De heap ("top") bewaart enkel de beste _KEEP_PER_GROUP - voor een
-    # correct gewogen gemiddelde over ALLE scenario's van deze groep zou
-    # strikt genomen elke matchup nodig zijn, niet enkel de bewaarde top.
-    # Om dat zonder een 2e volledige matchup-lijst per groep te bewaren
-    # (geheugen!) op te lossen, gebruiken we hier een PONDERATED SCHATTING:
-    # de gewogen p2/p1/p0 over de bewaarde rijen (top + worst + historical)
-    # is de beste beschikbare benadering, en convergeert naar het exacte
-    # gewogen gemiddelde naarmate _KEEP_PER_GROUP een groter deel van de
-    # scenario's dekt. Bij minder dan _KEEP_PER_GROUP totale scenario's
-    # (het gebruikelijke geval bij een realistische tegenstander-roster)
-    # is dit exact, geen schatting.
     point_probs = _aggregate_group_point_probabilities(all_group_matches, g["weights"])
     # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: exacte waarde over ALLE
     # matchups (incrementeel bijgehouden) vervangt de benadering hierboven.
@@ -473,11 +197,6 @@ def _finalize_group(key, g: dict) -> dict:
         "best": g["best"], "worst": g["worst"],
         "mean_ebw": (g["ebw_sum"] / g["ebw_n"]) if g["ebw_n"] else None,
         "point_probs": point_probs,  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30
-        # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: hoeveel van g["n"]
-        # scenario's effectief HISTORISCH waren (g["historical"] bevat ALLE
-        # historische matchups van deze groep, niet enkel de bewaarde top -
-        # zie _add_to_group()) - gebruikt om de dilutie-captions hieronder
-        # te kunnen tonen zonder opnieuw te moeten tellen.
         "n_historical_scenarios": len(g["historical"]),
         # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02
         "vs_likely": g.get("top_w_m"), "vs_likely_weight": g.get("top_w", 0.0),
@@ -485,23 +204,16 @@ def _finalize_group(key, g: dict) -> dict:
         "players": g["players"], "positions": g["positions"],
         "first_assignment": g["first_assignment"],
     }
-def _build_all_valid_matchups(
-    unique_opponent_lineups: dict,
-    available_ids: list, max_per_player: dict,
-    synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
-    tournament_rules_dict, include_non_compliant_variants: bool = False,
-    opponent_weight_override: dict = None,  # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02
+def _own_lineup_group_key(assignment: list) -> frozenset:
+    return frozenset(frozenset(a["our_pair"]) for a in assignment)
+def _collect_valid_own_options(
+    available_ids: list, max_per_player: dict, official_ranks_strict: dict, player_ratings: dict,
+    tournament_rules_dict,
 ) -> tuple:
-    """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: rekent ELKE reglementaire eigen opstelling door
-    tegen ELKE tegenstander-opstelling - zie moduledocstring.
-    Geeft (all_matchups, truncated, total_seen, diagnostics, groups) terug.
-    include_non_compliant_variants wordt genegeerd (PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29).
-    PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: elk tegenstander-scenario
-    (their_key/info) krijgt hier zijn gewicht via
-    lineup_rotation._opponent_lineup_weight(info) - EEN keer per unieke
-    tegenstander-opstelling (niet per matchup), en dat gewicht wordt
-    meegegeven aan _add_to_group() voor elke matchup die tegen dat scenario
-    berekend wordt."""
+    """PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: ALLE reglementair geldige eigen opstellingen (uit
+    _build_all_valid_matchups() gehaald, zodat ook de filters en de exacte zoekopdracht ze kunnen gebruiken).
+    Geeft (opties, diag, afgekapt) terug; een optie = (ordered_pairs, rotations_info, fully_compliant,
+    rank_data_incomplete)."""
     own_structures, own_truncated = _enumerate_rotation_aware_pairings(available_ids, max_per_player)
     valid_own_options = []
     own_excluded_by_rules = 0
@@ -523,14 +235,49 @@ def _build_all_valid_matchups(
                 combo["ordered_pairs"], combo["rotations"], combo["fully_compliant"],
                 combo.get("rank_data_incomplete", False),
             ))
+    diag = {
+        "own_structures_total": len(own_structures), "own_variants_generated": own_variants_generated,
+        "own_excluded_by_rules": own_excluded_by_rules, "own_valid": len(valid_own_options),
+    }
+    return valid_own_options, diag, own_truncated
+def _make_matchup(opt, computed: dict, hinfo, prob=None) -> dict:
+    """Eenzelfde matchup-dict voor de hoofdberekening en de exacte zoekopdracht."""
+    own_ordered_pairs, own_rotations_info, fully_compliant, rank_data_incomplete = opt
+    hinfo = hinfo or {}
+    return {
+        "assignment": computed["assignment"],
+        "expected_boards_won": computed["expected_boards_won"],
+        "total_score": computed["total_score"],
+        "point_probs": computed.get("point_probs"),  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30
+        "n_missing_win_probs": computed.get("n_missing_win_probs", 0),
+        "rank_data_incomplete": rank_data_incomplete,
+        "own_rotations": own_rotations_info,
+        "fully_compliant": True,
+        "is_historical": bool(hinfo.get("is_historical")),
+        "historical_labels": list(hinfo.get("historical_labels") or []),
+        "historical_count": hinfo.get("historical_count", 0),
+        "opp_probability": prob,  # PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11
+    }
+def _build_all_valid_matchups(
+    unique_opponent_lineups: dict,
+    available_ids: list, max_per_player: dict,
+    synergy_fn, player_ratings: dict, official_ranks_strict: dict, opponent_ratings: dict,
+    tournament_rules_dict, include_non_compliant_variants: bool = False,
+    opponent_weight_override: dict = None,  # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02
+    opponent_probability: dict = None,      # PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11
+) -> tuple:
+    """Rekent ELKE reglementaire eigen opstelling door tegen ELKE meegegeven tegenstander-opstelling.
+    Geeft (all_matchups, truncated, total_seen, diagnostics, groups) terug.
+    include_non_compliant_variants wordt genegeerd (PADEL_ANALYSIS_NO_NONCOMPLIANT_2026-09-29)."""
+    valid_own_options, own_diag, own_truncated = _collect_valid_own_options(
+        available_ids, max_per_player, official_ranks_strict, player_ratings, tournament_rules_dict,
+    )
     seen_matchup_keys = set()
     groups: dict = {}
     total_seen = 0
     computed_n = 0
     truncated = own_truncated
     counter = 0
-    # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: gewicht per tegenstander-
-    # scenario, EEN keer berekend, niet per matchup.
     opponent_weight_by_key = {
         their_key: _opponent_lineup_weight(info)
         for their_key, info in unique_opponent_lineups.items()
@@ -539,7 +286,9 @@ def _build_all_valid_matchups(
         opponent_weight_by_key = {
             k: opponent_weight_override.get(k, 0.0) for k in unique_opponent_lineups
         }
-    for own_ordered_pairs, own_rotations_info, fully_compliant, rank_data_incomplete in valid_own_options:
+    probs = opponent_probability or {}
+    for opt in valid_own_options:
+        own_ordered_pairs = opt[0]
         if computed_n >= _MAX_COMPUTED_MATCHUPS:
             truncated = True
             break
@@ -556,23 +305,7 @@ def _build_all_valid_matchups(
             computed = _compute_matchup(
                 own_ordered_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings,
             )
-            # PADEL_ANALYSIS_TEAM_WIN_DISTRIBUTION_2026-09-29: kans op
-            # 2/1/0 ploegpunten, o.b.v. de per-match winkansen - zie
-            # moduledocstring. None wanneer niet alle matchen een gekende
-            # winkans hebben.
-            m = {
-                "assignment": computed["assignment"],
-                "expected_boards_won": computed["expected_boards_won"],
-                "total_score": computed["total_score"],
-                "point_probs": computed.get("point_probs"),  # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30
-                "n_missing_win_probs": computed.get("n_missing_win_probs", 0),
-                "rank_data_incomplete": rank_data_incomplete,
-                "own_rotations": own_rotations_info,
-                "fully_compliant": True,
-                "is_historical": info["is_historical"],
-                "historical_labels": list(info["historical_labels"]),
-                "historical_count": info.get("historical_count", 0),
-            }
+            m = _make_matchup(opt, computed, info, probs.get(their_key))
             gkey = _own_lineup_group_key(m["assignment"])
             if gkey not in groups:
                 groups[gkey] = _new_group_summary(m["assignment"])
@@ -583,24 +316,14 @@ def _build_all_valid_matchups(
                 truncated = True
                 break
     group_list = [_finalize_group(k, g) for k, g in groups.items()]
-    # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: sorteer op de gewogen
-    # kans op 2 punten (was: best-case EBW) - dat is nu de vraag die Kim
-    # wil beantwoord zien: welke opstelling maximaliseert de kans op een
-    # ploegoverwinning, niet louter het beste best-case scenario.
     group_list.sort(key=lambda g: (
         round(g["point_probs"]["p2"], 3),
         ((g.get("vs_likely") or {}).get("point_probs") or {}).get("p2", 0.0),
     ), reverse=True)
     all_matchups = [m for g in group_list for m in g["rows"]]
     all_matchups.sort(key=_sort_val, reverse=True)
-    diagnostics = {
-        "own_structures_total": len(own_structures),
-        "own_variants_generated": own_variants_generated,
-        "own_excluded_by_rules": own_excluded_by_rules,
-        "own_valid": len(valid_own_options),
-        "matchups_computed": computed_n,
-        "own_groups": len(group_list),
-    }
+    diagnostics = dict(own_diag)
+    diagnostics.update({"matchups_computed": computed_n, "own_groups": len(group_list)})
     return all_matchups, truncated, total_seen, diagnostics, group_list
 def _format_opponent_lineup_label(boards: list) -> str:
     return " | ".join(" + ".join(p.get("name", "?") for p in b.get("opponent_pair", [])) for b in boards)
@@ -620,17 +343,9 @@ def _compliance_badge(fully_compliant: bool, rank_data_incomplete: bool = False)
     if rank_data_incomplete:
         return "onzeker"
     return "OK"
-def _own_lineup_group_key(assignment: list) -> frozenset:
-    return frozenset(frozenset(a["our_pair"]) for a in assignment)
 def _format_point_probs(pp: dict) -> str:
-    """PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: leesbare, korte
-    weergave van een puntenkans-dict, bv. '68% · 2p 24% · 1p 8% · 0p'.
-    PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30: niet langer
-    gebruikt in de groepstitel (die toont de 3 kansen nu als aparte
-    st.metric()-elementen, zie _render_own_lineup_groups_with_opponents()).
-    Blijft hier staan als herbruikbare tekst-opmaak voor eventueel ander
-    gebruik (bv. lineup_rotation.py heeft een eigen, lokale kopie
-    _format_point_probs_short() om een cirkelvormige import te vermijden)."""
+    """Leesbare, korte weergave van een puntenkans-dict, bv. '68% · 2p 24% · 1p 8% · 0p'.
+    Niet meer gebruikt in de groepstitel; blijft bestaan als herbruikbare tekst-opmaak."""
     if not pp:
         return "onbekend"
     return (
@@ -663,29 +378,32 @@ def _matchup_keys(m: dict) -> tuple:
         if len(hun) == 2:
             opp_pairs.add(_pair_key(hun))
     return own_players, own_pairs, opp_players, opp_pairs
-def _filter_options(matchups: list, name_lookup_global: dict) -> dict:
-    """Keuzes voor de filters, uit de opgegeven matchups: {"own_players": {sleutel: label}, "own_pairs": ...,
-    "opp_players": ..., "opp_pairs": ...}, elk gesorteerd op label."""
+def _filter_option_lists(own_options: list, name_lookup_global: dict, opp_ctx) -> dict:
+    """PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: keuzes voor de filters uit de VOLLEDIGE set eigen opstellingen
+    en het VOLLEDIGE tegenstander-roster (niet meer uit de bewaarde rijen): {"own_players", "own_pairs",
+    "opp_players", "opp_pairs"} = {sleutel: label}, gesorteerd op label."""
     own_players: dict = {}
     own_pairs: dict = {}
-    opp_players: dict = {}
-    opp_pairs: dict = {}
-    for m in matchups or []:
-        for a in m.get("assignment") or []:
-            raw = list(a.get("our_pair") or ())
-            labels = [str(name_lookup_global.get(x, x)) for x in raw]
+    for opt in own_options or []:
+        for pair in opt[0]:
+            raw = list(pair)
             keys = [str(x) for x in raw]
+            labels = [str(name_lookup_global.get(x, x)) for x in raw]
             for k, lbl in zip(keys, labels):
                 own_players[k] = lbl
             if len(keys) == 2:
                 own_pairs[_pair_key(keys)] = " + ".join(sorted(labels))
-            pair = (a.get("opponent_board") or {}).get("opponent_pair") or []
-            hkeys = [_opp_key(p) for p in pair]
-            hlabels = [str(p.get("name", "?")) for p in pair]
-            for k, lbl in zip(hkeys, hlabels):
-                opp_players[k] = lbl
-            if len(hkeys) == 2:
-                opp_pairs[_pair_key(hkeys)] = " + ".join(sorted(hlabels))
+    opp_players: dict = {}
+    opp_pairs: dict = {}
+    if opp_ctx:
+        names = opp_ctx.get("names") or {}
+        ids = list(opp_ctx.get("ids") or [])
+        for uid in ids:
+            opp_players[f"id:{uid}"] = str(names.get(uid, uid))
+        for a, b in itertools.combinations(ids, 2):
+            opp_pairs[_pair_key([f"id:{a}", f"id:{b}"])] = " + ".join(
+                sorted([str(names.get(a, a)), str(names.get(b, b))])
+            )
     def _sorted(d: dict) -> dict:
         return dict(sorted(d.items(), key=lambda kv: kv[1].lower()))
     return {
@@ -704,13 +422,10 @@ def _multiselect_safe(label: str, options: dict, key: str, placeholder: str):
         label, list(options.keys()), format_func=lambda k: options.get(k, k),
         key=key, placeholder=placeholder,
     )
-def _render_filter_widgets(
-    matchups: list, name_lookup_global: dict, key_prefix: str, own: bool = True, opp: bool = True,
-) -> dict:
+def _render_filter_widgets(opts: dict, key_prefix: str, own: bool = True, opp: bool = True) -> dict:
     """Toont de filterlijsten en geeft de keuze terug: {"own_players": [...], "own_pairs": [...],
     "opp_players": [...], "opp_pairs": [...]} (sleutels, leeg = geen filter)."""
-    opts = _filter_options(matchups, name_lookup_global)
-    sel = {"own_players": [], "own_pairs": [], "opp_players": [], "opp_pairs": []}
+    sel = {"own_players": [], "own_pairs": [], "opp_players": [], "opp_pairs": [], "vs": False}
     if own and opp:
         c1, c2 = st.columns(2)
         with c1:
@@ -719,6 +434,13 @@ def _render_filter_widgets(
         with c2:
             sel["opp_players"] = _multiselect_safe("Tegenstander-speler(s)", opts["opp_players"], f"{key_prefix}_f_tp", "Alle")
             sel["opp_pairs"] = _multiselect_safe("Tegenstander-koppel", opts["opp_pairs"], f"{key_prefix}_f_tpr", "Alle")
+        if sel["own_pairs"] and sel["opp_pairs"]:
+            sel["vs"] = st.checkbox(
+                "Ons koppel speelt TEGEN dit tegenstander-koppel (in dezelfde match)", value=True,
+                key=f"{key_prefix}_f_vs",
+                help="Aan: je ziet enkel opstellingen waarin deze koppels tegen elkaar spelen. Uit: elk koppel moet "
+                     "ergens in de opstelling voorkomen, ook als ze niet tegen elkaar spelen.",
+            )
     elif own:
         c1, c2 = st.columns(2)
         with c1:
@@ -763,8 +485,9 @@ def _ps_text(pid, ps_map) -> str:
 def _matchups_to_table_rows(
     matchups: list, name_lookup_global: dict, own_ps: dict = None, opp_ps: dict = None,
 ) -> tuple:
-    """PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: `own_ps`/`opp_ps` ({speler-id: padelstat}) zetten de
-    padelstat van elke speler tussen haakjes in 'Ons duo'/'Tegenstander'; de kolom 'Toelichting' is weg."""
+    """`own_ps`/`opp_ps` ({speler-id: padelstat}) zetten de padelstat van elke speler tussen haakjes in
+    'Ons duo'/'Tegenstander'; de kolom 'Toelichting' is weg. Een matchup met `opp_probability` krijgt de kolom
+    'Kans opstelling %' (PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11)."""
     rows = []
     board_column_names: list = []
     for rank, m in enumerate(matchups, start=1):
@@ -780,6 +503,8 @@ def _matchups_to_table_rows(
             "Kans 1p %": round(pp.get("p1", 0.0) * 100, 0) if pp else None,
             "Kans 0p %": round(pp.get("p0", 0.0) * 100, 0) if pp else None,
         }
+        if m.get("opp_probability") is not None:
+            row["Kans opstelling %"] = round(m["opp_probability"] * 100, 2)
         for r in range(n_rotations):
             for board_in_rotation in range(2):
                 board_idx = r * 2 + board_in_rotation
@@ -819,12 +544,15 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
         "Kans 2p %": st.column_config.NumberColumn("Kans 2p", format="%.0f%%", width="small"),
         "Kans 1p %": st.column_config.NumberColumn("Kans 1p", format="%.0f%%", width="small"),
         "Kans 0p %": st.column_config.NumberColumn("Kans 0p", format="%.0f%%", width="small"),
+        "Kans opstelling %": st.column_config.NumberColumn(
+            "Kans opstelling", format="%.2f%%", width="small",
+            help="Hoe waarschijnlijk het model deze tegenstander-opstelling vindt (over alle mogelijke opstellingen).",
+        ),
     }
     for col_base in board_column_names:
         ons_col = f"{col_base} - Ons duo"
         tegen_col = f"{col_base} - Tegenstander"
         pct_col = f"{col_base} %"
-        # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: duo's zijn breder door de padelstat tussen haakjes.
         column_config[ons_col] = st.column_config.TextColumn(
             ons_col, width=_estimate_column_width([row.get(ons_col) for row in table_rows], max_width=340),
         )
@@ -832,23 +560,21 @@ def _matchup_table_column_config(table_rows: list, board_column_names: list) -> 
             tegen_col, width=_estimate_column_width([row.get(tegen_col) for row in table_rows], max_width=340),
         )
         column_config[pct_col] = st.column_config.NumberColumn(pct_col, format="%.0f%%", width="small")
+    heeft_prob = any("Kans opstelling %" in r for r in table_rows)
     column_order = ["#", "Kans 2p %", "Kans 1p %", "Kans 0p %", "Verwacht"]
+    if heeft_prob:
+        column_order.append("Kans opstelling %")
     for col_base in board_column_names:
         column_order += [f"{col_base} - Ons duo", f"{col_base} - Tegenstander", f"{col_base} %"]
     column_order += ["Vorige keer"]
     return column_config, column_order
 def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> None:
-    """PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01 - zie moduledocstring.
-    Toont, ALTIJD zichtbaar (dus buiten de expander), hoeveel van de
-    doorgerekende scenario's van deze groep effectief HISTORISCH vs
-    THEORETISCH waren, en - indien van toepassing - EEN van 2 elkaar
-    uitsluitende waarschuwingen over waarom de getoonde percentages
-    mogelijk niet (sterk) onderscheidend zijn tussen groepen."""
+    """PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01. Toont, ALTIJD zichtbaar, hoeveel van de doorgerekende
+    scenario's van deze groep effectief HISTORISCH vs THEORETISCH waren, en - indien van toepassing - EEN van 2
+    elkaar uitsluitende waarschuwingen over waarom de percentages mogelijk niet onderscheidend zijn."""
     n_total = g.get("n", 0)
     n_hist = g.get("n_historical_scenarios", 0)
     n_theo = max(0, n_total - n_hist)
-    # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02: duidelijker (geen grijze caption) +
-    # resultaat tegen de MEEST waarschijnlijke tegenstander-opstelling en het bereik.
     vs = g.get("vs_likely")
     regels = []
     if vs is not None:
@@ -887,32 +613,68 @@ def _render_group_dilution_diagnosis(g: dict, best: dict, n_missing: int) -> Non
             "hierdoor klein lijken - verklein het tegenstander-roster hierboven tot de spelers "
             "die je effectief verwacht, voor een scherper onderscheid."
         )
+def _render_search_results(results: list, info: dict, name_lookup_global: dict, own_ps, opp_ps, key: str) -> None:
+    """PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: toont het resultaat van een exacte zoekopdracht."""
+    if not results:
+        st.info(
+            "Geen enkele combinatie voldoet aan deze filters. Controleer of de gekozen spelers/koppels samen in een "
+            "reglementair geldige opstelling kunnen staan (puntengrens, speelbudget per speler)."
+        )
+        return
+    st.caption(
+        f"**Exacte zoekopdracht over de volledige set:** {info['n_own']} eigen opstelling(en) x "
+        f"{info['n_opp_used']:,} tegenstander-opstelling(en) = **{info['n_computed']:,}** combinaties "
+        f"({info['n_hist']} daarvan effectief gespeeld)."
+        + (" Enkel opstellingen waarin je gekozen koppels tegen elkaar spelen." if info.get("vs") else "")
+        + f" (berekend in {info.get('seconds', 0.0):.1f}s)"
+    )
+    if info.get("truncated"):
+        reden = (
+            f"de rekentijd van {_SEARCH_TIME_BUDGET:.0f} seconden is bereikt" if info.get("timed_out")
+            else "dat te veel combinaties geeft"
+        )
+        st.warning(
+            f"Er zijn {info['n_opp_matching']:,} tegenstander-opstellingen die aan je filter voldoen; omdat {reden}, "
+            f"zijn de {info['n_opp_used']:,} meest waarschijnlijke doorgerekend. "
+            "Kies een tegenstander-speler of -koppel erbij voor een volledige dekking."
+        )
+    if info.get("enum_truncated"):
+        st.warning("Het aantal mogelijke tegenstander-opstellingen is zo groot dat de opsomming is afgebroken - "
+                   "kies een tegenstander-koppel erbij.")
+    n = len(results)
+    toon_alle = False
+    if n > _SEARCH_SHOW_DEFAULT_N:
+        toon_alle = st.checkbox(
+            f"Toon alle {min(n, _SEARCH_SHOW_MAX):,} gevonden combinaties (i.p.v. de beste {_SEARCH_SHOW_DEFAULT_N})",
+            key=f"{key}_showall",
+        )
+    shown = results[:_SEARCH_SHOW_MAX] if toon_alle else results[:_SEARCH_SHOW_DEFAULT_N]
+    table_rows, board_column_names = _matchups_to_table_rows(shown, name_lookup_global, own_ps=own_ps, opp_ps=opp_ps)
+    column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
+    st.dataframe(
+        table_rows, use_container_width=True, hide_index=True,
+        column_config=column_config, column_order=column_order,
+    )
+    if n > len(shown):
+        st.caption(f"Beste {len(shown)} van {n:,} gevonden combinaties getoond, gesorteerd op verwacht aantal gewonnen matchen.")
 def _render_own_lineup_groups_with_opponents(
     groups: list, name_lookup_global: dict, ploeg_key: str = "",
-    own_ps: dict = None, opp_ps: dict = None,
+    own_ps: dict = None, opp_ps: dict = None, filter_ctx: dict = None,
 ) -> None:
-    """PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: werkt op de groepssamenvattingen uit
-    _build_all_valid_matchups(). Best/worst case in de titel gelden over
-    ALLE doorgerekende tegenstander-opstellingen van die groep.
-    PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: het HOOFDGETAL in de
-    groepstitel is nu de gewogen puntenkans (2/1/0), niet langer enkel
-    best/worst EBW. De groepenlijst is al gesorteerd op kans-op-2-punten
-    (zie _build_all_valid_matchups()) - hier enkel weergave, geen
-    herordening.
-    PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: toont nu ALTIJD (dus
-    voor het openklikken) een korte, verklarende dilutie-diagnose naast de
-    3 metrics - zie _render_group_dilution_diagnosis().
-    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filter op onze spelers/koppels
-    boven de lijst, en op de tegenstander in de Details van elke groep;
-    `own_ps`/`opp_ps` = padelstat per speler voor de koppel-tabellen."""
+    """Werkt op de groepssamenvattingen uit _build_all_valid_matchups(). Het HOOFDGETAL is de gewogen puntenkans
+    (2/1/0); de lijst is gesorteerd op kans-op-2-punten.
+    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filter op onze spelers/koppels boven de lijst.
+    PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: `filter_ctx` = {"opts", "search"}: de keuzelijsten komen uit de
+    volledige set, en de tegenstander-filter in 'Details' rekent exact (search(sel, own_fixed_key))."""
     if not groups:
         return
+    filter_ctx = filter_ctx or {}
     st.markdown('<div class="section-header">Onze opstellingen - klap open voor de tegenstander-opstellingen</div>', unsafe_allow_html=True)
     st.caption(
         "Elke groep hieronder is 1 unieke combinatie van ONZE koppels (ongeacht matchvolgorde of tegen wie), "
-        "gerangschikt op de GEWOGEN kans op 2 competitiepunten (ploegwinst) over alle doorgerekende "
-        "tegenstander-opstellingen. Een tegenstander-opstelling die dit seizoen al vaker effectief "
-        "gespeeld werd, telt zwaarder mee dan een louter theoretische combinatie. Klap een groep open "
+        "gerangschikt op de GEWOGEN kans op 2 competitiepunten (ploegwinst) over de doorgerekende "
+        "tegenstander-opstellingen. Een tegenstander-opstelling die het model waarschijnlijker vindt, "
+        "telt zwaarder mee dan een onwaarschijnlijke. Klap een groep open "
         "voor de beste tegenstander-opstellingen, de slechtste, en elke opstelling die de tegenstander "
         "effectief al speelde."
     )
@@ -925,8 +687,6 @@ def _render_own_lineup_groups_with_opponents(
         "Reglementair: OK = geverifieerd conform art. 6.6. onzeker = minstens 1 speler heeft nog geen bekend "
         "officieel klassement - de volgorde kon NIET betrouwbaar geverifieerd worden."
     )
-    # PADEL_ANALYSIS_MATCHUP_CONTRAST_2026-10-02: hoe groot is het verschil
-    # tussen onze beste en slechtste eigen opstelling eigenlijk?
     p2s = [g["point_probs"]["p2"] for g in groups]
     if len(p2s) > 1:
         spread = (max(p2s) - min(p2s)) * 100
@@ -943,11 +703,15 @@ def _render_own_lineup_groups_with_opponents(
                 f"**Verschil tussen onze beste en slechtste opstelling: {spread:.0f} procentpunt** "
                 f"kans op winst ({max(p2s) * 100:.0f}% vs {min(p2s) * 100:.0f}%)."
             )
-    # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filter op onze spelers/koppels.
     st.markdown("**Filter onze opstellingen**")
-    groep_sel = _render_filter_widgets(
-        [g["best"] for g in groups if g.get("best")], name_lookup_global, f"groups_{ploeg_key}", own=True, opp=False,
-    )
+    opts_groups = filter_ctx.get("opts")
+    if opts_groups is None:
+        # Terugval (oude aanroepers zonder filter_ctx): keuzelijsten uit de beste matchup van elke groep.
+        opts_groups = _filter_option_lists(
+            [([a["our_pair"] for a in g["best"]["assignment"]], None, True, False) for g in groups if g.get("best")],
+            name_lookup_global, None,
+        )
+    groep_sel = _render_filter_widgets(opts_groups, f"groups_{ploeg_key}", own=True, opp=False)
     geindexeerd = list(enumerate(groups))
     geindexeerd = _apply_filters(geindexeerd, groep_sel, get_matchup=lambda t: t[1].get("best"))
     if _has_filter(groep_sel):
@@ -976,13 +740,7 @@ def _render_own_lineup_groups_with_opponents(
         best_txt = f"{best_ebw:.2f}" if best_ebw is not None else f"score {best.get('total_score', 0):.3f}"
         worst_txt = f"{worst_ebw:.2f}" if worst_ebw is not None else f"score {worst.get('total_score', 0):.3f}"
         badge = _compliance_badge(True, best.get("rank_data_incomplete", False))
-        # PADEL_ANALYSIS_POINT_PROBABILITY_DISPLAY_2026-09-30: de puntenkans
-        # staat nu als 3 aparte metrics BOVEN de expander - zie
-        # moduledocstring. De expander-titel zelf bevat enkel nog de
-        # reglement-badge + de korte koppellijst (geen opmaak mogelijk in
-        # een st.expander-label, vandaar de metrics ernaast i.p.v. erin).
         pp_metrics = g.get("point_probs") or {}
-        # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: grote kop met de namen per rotatie.
         per_rot = {}
         for idx, a in enumerate(best["assignment"]):
             p1_, p2_ = a["our_pair"]
@@ -1002,9 +760,6 @@ def _render_own_lineup_groups_with_opponents(
             st.metric("Verlies (0p)", f"{pp_metrics.get('p0', 0.0) * 100:.0f}%")
         with col_ge1:
             st.metric("Minstens 1 punt", f"{(pp_metrics.get('p2', 0.0) + pp_metrics.get('p1', 0.0)) * 100:.0f}%")
-        # PADEL_ANALYSIS_DILUTED_GROUP_PROBS_2026-10-01: ALTIJD zichtbaar,
-        # VOOR de expander - zie moduledocstring voor waarom dit niet
-        # verstopt mag zitten achter een klik.
         n_missing = pp_metrics.get("n_missing_ratings", 0)
         _render_group_dilution_diagnosis(g, best, n_missing)
         with st.expander("Details", expanded=False):
@@ -1024,23 +779,24 @@ def _render_own_lineup_groups_with_opponents(
             if len(g["rows"]) < g["n"]:
                 st.caption(
                     f"Getoond: de beste {_KEEP_PER_GROUP}, de slechtste en elke al gespeelde "
-                    f"tegenstander-opstelling ({len(g['rows'])} van {g['n']})."
+                    f"tegenstander-opstelling ({len(g['rows'])} van {g['n']}). Wil je een specifieke "
+                    "tegenstander-combinatie zien, filter dan hieronder: dat rekent exact."
                 )
-            rijen_groep = g["rows"]
-            if len(rijen_groep) >= _GROUP_DETAIL_FILTER_MIN_ROWS:
+            search = filter_ctx.get("search")
+            opts_opp = filter_ctx.get("opts")
+            gefilterd_exact = False
+            if search is not None and opts_opp is not None and opts_opp.get("opp_pairs"):
                 st.markdown("**Filter op de tegenstander**")
-                det_sel = _render_filter_widgets(
-                    rijen_groep, name_lookup_global, f"grpdet_{ploeg_key}_{gi}", own=False, opp=True,
-                )
-                gefilterd = _apply_filters(rijen_groep, det_sel)
+                det_sel = _render_filter_widgets(opts_opp, f"grpdet_{ploeg_key}_{gi}", own=False, opp=True)
                 if _has_filter(det_sel):
-                    _filter_caption(len(gefilterd), len(rijen_groep), "tegenstander-opstellingen")
-                rijen_groep = gefilterd
-            if not rijen_groep:
-                st.info("Geen enkele tegenstander-opstelling voldoet aan deze filters.")
-            else:
+                    gefilterd_exact = True
+                    results, sinfo = search(det_sel, g["key"])
+                    _render_search_results(
+                        results, sinfo, name_lookup_global, own_ps, opp_ps, f"grpdet_{ploeg_key}_{gi}_res",
+                    )
+            if not gefilterd_exact:
                 table_rows, board_column_names = _matchups_to_table_rows(
-                    rijen_groep, name_lookup_global, own_ps=own_ps, opp_ps=opp_ps,
+                    g["rows"], name_lookup_global, own_ps=own_ps, opp_ps=opp_ps,
                 )
                 column_config, column_order = _matchup_table_column_config(table_rows, board_column_names)
                 st.dataframe(
@@ -1054,18 +810,9 @@ def _render_own_lineup_groups_with_opponents(
 def _render_best_for_selected_player(
     groups: list, sel_player_id: str, name_lookup_global: dict,
 ) -> None:
-    """Welke ploegopstelling is het beste VOOR EEN SPECIFIEKE speler?
-    PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: rekent op de volledige groepsstatistieken (alle
-    tegenstander-opstellingen), niet op de bewaarde rijen.
-    De SORTERING blijft ONGEWIJZIGD op de persoonlijke gemiddelde winkans
-    (een persoonlijke, geen ploegmaatstaf).
-    PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30: toont nu
-    ERNAAST ook de PLOEG-puntenkans (2/1/0) van diezelfde opstelling (uit
-    g["point_probs"], dezelfde gewogen berekening als de groepen hierboven)
-    - puur INFORMATIEF, verandert de sortering niet.
-    PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: deze functie wordt niet meer
-    AANGEROEPEN vanuit render_matchup_overview() - zie moduledocstring. De
-    functie zelf blijft bestaan (geen functionaliteit verwijderd)."""
+    """Welke ploegopstelling is het beste VOOR EEN SPECIFIEKE speler? (Wordt niet meer aangeroepen vanuit
+    render_matchup_overview() - PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 - maar blijft bestaan.)
+    Sortering op de persoonlijke gemiddelde winkans; ernaast de PLOEG-puntenkans (2/1/0) van dezelfde opstelling."""
     if not groups or not sel_player_id:
         return
     sel_id = str(sel_player_id)
@@ -1089,8 +836,6 @@ def _render_best_for_selected_player(
             for idx, a in enumerate(g["first_assignment"])
         )
         team_gemiddeld = (team_som / team_n) if team_n else None
-        # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30:
-        # dezelfde gewogen ploeg-puntenkans als in de groepen hierboven.
         pp = g.get("point_probs") or {}
         rijen.append({
             "Gemiddelde winkans": round(gemiddeld * 100, 1),
@@ -1115,73 +860,20 @@ def _render_best_for_selected_player(
         f'<div class="section-header">Beste opstelling voor {sel_naam}</div>',
         unsafe_allow_html=True,
     )
-    st.caption(
-        f"Alle doorgerekende ploegopstellingen waarin **{sel_naam}** meespeelt, gerangschikt op "
-        "de GEMIDDELDE persoonlijke winkans over ALLE tegenstander-opstellingen - dus robuust "
-        "tegen een verrassing van de tegenstander. 'Slechtste geval' toont hoe diep die kans kan "
-        "zakken als de tegenstander de voor ons ongunstigste opstelling kiest."
-    )
-    st.caption(
-        "'Team gemiddeld' is het verwacht aantal gewonnen matchen voor de HELE ploeg (niet enkel "
-        f"{sel_naam}) bij dezelfde opstelling; 'Team Kans 2p/1p/0p' is de bijhorende gewogen kans op "
-        "2/1/0 competitiepunten voor de HELE ploeg - zo zie je meteen of een opstelling die goed is "
-        f"voor {sel_naam} persoonlijk, ook goed is voor het team, of net een compromis vereist."
-    )
-    try:
-        import pandas as _pd
-        df = _pd.DataFrame(rijen)
-        styled = df.style.background_gradient(
-            subset=["Gemiddelde winkans"], cmap="RdYlGn", vmin=0, vmax=100,
-        ).format({
-            "Gemiddelde winkans": "{:.1f}%",
-            "Slechtste geval": "{:.1f}%",
-            "Beste geval": "{:.1f}%",
-            "Team gemiddeld": lambda v: f"{v:.2f}" if v is not None else "-",
-            "Team Kans 2p %": lambda v: f"{v:.0f}%" if v is not None else "-",
-            "Team Kans 1p %": lambda v: f"{v:.0f}%" if v is not None else "-",
-            "Team Kans 0p %": lambda v: f"{v:.0f}%" if v is not None else "-",
-        })
-        st.dataframe(
-            styled, use_container_width=True, hide_index=True,
-            column_config={
-                "Gemiddelde winkans": st.column_config.NumberColumn("Gem. winkans", width="small"),
-                "Slechtste geval": st.column_config.NumberColumn("Worst", width="small"),
-                "Beste geval": st.column_config.NumberColumn("Best", width="small"),
-                "Team gemiddeld": st.column_config.NumberColumn("Team gem.", width="small"),
-                # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30
-                "Team Kans 2p %": st.column_config.NumberColumn("Team 2p", format="%.0f%%", width="small"),
-                "Team Kans 1p %": st.column_config.NumberColumn("Team 1p", format="%.0f%%", width="small"),
-                "Team Kans 0p %": st.column_config.NumberColumn("Team 0p", format="%.0f%%", width="small"),
-                "Tegenstander-scenario's": st.column_config.NumberColumn("Scen.", width="small"),
-                "Volledige ploegopstelling": st.column_config.TextColumn(
-                    "Volledige ploegopstelling", width="large",
-                ),
-            },
-        )
-    except Exception:
-        st.dataframe(rijen, use_container_width=True, hide_index=True)
+    st.dataframe(rijen, use_container_width=True, hide_index=True)
     beste = rijen[0]
-    team_val = beste.get("Team gemiddeld")
-    team_txt = f", team gemiddeld **{team_val:.2f}**" if team_val is not None else ""
-    # PADEL_ANALYSIS_POINT_PROBABILITY_BEST_FOR_PLAYER_2026-09-30
-    team_p2 = beste.get("Team Kans 2p %")
-    team_pp_txt = f", team kans op 2 punten **{team_p2:.0f}%**" if team_p2 is not None else ""
     st.success(
         f"Beste voor {sel_naam}: **{beste['Volledige ploegopstelling']}** "
-        f"- gemiddeld **{beste['Gemiddelde winkans']:.1f}%** winkans "
-        f"(slechtste geval {beste['Slechtste geval']:.1f}%){team_txt}{team_pp_txt}."
+        f"- gemiddeld **{beste['Gemiddelde winkans']:.1f}%** winkans (slechtste geval {beste['Slechtste geval']:.1f}%)."
     )
     st.divider()
 def _render_save_analysis_button(
     all_matchups: list, opp: dict, available_ids: list, name_lookup_global: dict,
     total_boards, max_per_player: dict, sel_player_id,
 ) -> None:
-    """PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27: uitgelicht in
-    een eigen functie zodat de knop VROEG in de resultatensectie kan
-    verschijnen (direct na "X geldige matchup(s) gevonden"), i.p.v. pas na
-    de volledige tabel/groepen/AI-sectie - zie de uitgebreide toelichting
-    bovenaan dit bestand. Payload/opslag-logica zelf: ONGEWIJZIGD."""
-    # PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: enkel de beste _SAVE_MAX_MATCHUPS (Firestore < 1 MB).
+    """PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27: eigen functie zodat de knop VROEG in de
+    resultatensectie kan verschijnen. Payload/opslag-logica: ONGEWIJZIGD."""
+    # Enkel de beste _SAVE_MAX_MATCHUPS (Firestore < 1 MB).
     all_matchups = list(all_matchups)[:_SAVE_MAX_MATCHUPS]
     if st.button(f"Deze analyse opslaan (beste {len(all_matchups)} matchups)", key=f"save_all_matchups_{opp['ploeg_id']}"):
         payload = {
@@ -1213,8 +905,8 @@ def _render_save_analysis_button(
         doc_id = fb.save_lineup_analysis(sel_player_id, payload)
         st.success(f"Analyse opgeslagen ({len(all_matchups)} matchups).")
 def _model_weights_for_lineups(bundle: dict, unique_opponent_lineups: dict) -> tuple:
-    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per
-    tegenstander-scenario. Geeft (weights {key: kans}, stats) of (None, None)."""
+    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per tegenstander-scenario.
+    Geeft (weights {key: kans}, stats) of (None, None)."""
     if olm is None or not unique_opponent_lineups:
         return None, None
     try:
@@ -1232,8 +924,7 @@ def _model_weights_for_lineups(bundle: dict, unique_opponent_lineups: dict) -> t
     except Exception:  # noqa: BLE001
         return None, None
 def _render_predicted_opponent_lineups(unique_opponent_lineups: dict, weights: dict, stats: dict) -> None:
-    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: top 5 voorspelde
-    tegenstander-opstellingen met kans + redenen (controleerbare weging)."""
+    """PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: top 5 voorspelde tegenstander-opstellingen met kans + redenen."""
     if not weights:
         return
     top = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -1259,10 +950,9 @@ def _render_predicted_opponent_lineups(unique_opponent_lineups: dict, weights: d
             if uniek:
                 st.caption(" · ".join(uniek))
 def _expected_matches_per_player(bundle: dict, chosen_ids: list, needed: int, max_per: int) -> dict:
-    """PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: verwacht aantal matchen per tegenstander-
-    speler. Basis = gemiddeld aantal matchen per ontmoeting (model-stats),
-    herschaald naar `needed` (largest remainder) en begrensd op `max_per`.
-    Zonder historiek: None (de aanroeper valt terug op gelijk verdelen)."""
+    """PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: verwacht aantal matchen per tegenstander-speler.
+    PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: enkel nog INFORMATIEF (de opstellingen worden niet meer
+    met dit aantal beperkt). Zonder historiek: None."""
     if olm is None or not chosen_ids:
         return None
     try:
@@ -1298,20 +988,107 @@ def _filter_lineups_to_roster(unique_opponent_lineups: dict, chosen_ids: set, ch
         k: v for k, v in unique_opponent_lineups.items()
         if all(_ok(p) for b in v.get("boards") or [] for p in (b.get("opponent_pair") or []))
     }
+# ─────────────────────────────────────────────
+# PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11 - zie moduledocstring.
+# ─────────────────────────────────────────────
+@st.cache_resource(show_spinner=False, max_entries=3)
+def _cached_universe(ids: tuple, n_rot: int, mpr: int, max_lineups: int):
+    """Alle opstellingen voor dit roster (alleen-lezen, gedeeld). Geeft (lijst, totaal_bekend, is_steekproef)."""
+    return mu.enumerate_universe(list(ids), n_rot, mpr, max_lineups=max_lineups)
+def _bundle_signature(bundle: dict) -> tuple:
+    out = []
+    for fx in (bundle or {}).get("previous_fixtures") or []:
+        f = fx.get("fixture") or {}
+        out.append((str(f.get("date_text") or ""), len(fx.get("boards") or [])))
+    return tuple(out)
+def _universe_weights(bundle: dict, keys: list, ids: tuple):
+    """Model-gewicht (genormaliseerd over het hele universum) per opstelling, of None zonder model / bij een te lange
+    rekentijd / bij een fout."""
+    if olm is None or not keys:
+        return None
+    try:
+        stats = olm.build_opponent_stats(bundle)
+        roster = {str(p.get("user_id")) for p in (bundle.get("unique_players") or []) if p.get("user_id")}
+        roster |= set(ids)
+        roster_uids = sorted(roster)
+        logs = mu.score_keys(keys, lambda k: olm.full_lineup_log_score(stats, list(k), roster_uids), _SCORE_TIME_BUDGET)
+        if logs is None:
+            return None
+        return olm.softmax_weights(logs)
+    except Exception:  # noqa: BLE001
+        return None
+def _select_theoretical_lineups(bundle: dict, opp: dict, ctx: dict, n_own_est: int, hist_keys: list) -> dict:
+    """Alle mogelijke tegenstander-opstellingen -> de doorgerekende deelverzameling. Gecachet in session_state.
+    Geeft {"boards": [boards per gekozen opstelling], "universe_weights": dict|None, "info": {...}}."""
+    ids = tuple(ctx["ids"])
+    n_rot = ctx["n_rot"]
+    ranks, ps, names = ctx["ranks"], ctx["ps"], ctx["names"]
+    k_target = max(_OPP_SUBSET_MIN, min(_OPP_SUBSET_MAX, _TARGET_MATCHUPS // max(1, int(n_own_est))))
+    sig = (
+        ids, n_rot, tuple(sorted(ranks.items())), tuple(sorted(ps.items())), _bundle_signature(bundle),
+        k_target, len(hist_keys), olm is not None,
+    )
+    cache_key = f"universe_sel_v1_{opp['ploeg_id']}"
+    cached = st.session_state.get(cache_key)
+    if cached and cached.get("sig") == sig:
+        return cached["result"]
+    def rank_fn(pairs):
+        return _rank_pairs_with_padelstat_tiebreak(pairs, ranks, ps)
+    universe, total_known, is_sample = _cached_universe(ids, n_rot, MATCHES_PER_ROTATION, _UNIVERSE_MAX_LINEUPS)
+    keys = [mu.ordered_key(l, rank_fn) for l in universe]
+    lineup_by_key = dict(zip(keys, universe))
+    weights = _universe_weights(bundle, keys, ids)
+    weight_reason = "" if weights is not None else ("geen model beschikbaar" if olm is None else "het model was te traag voor alle opstellingen")
+    hist_canon = {mu.canon_key(h, MATCHES_PER_ROTATION) for h in hist_keys}
+    pool = [k for k in keys if mu.canon_key(k, MATCHES_PER_ROTATION) not in hist_canon]
+    chosen, mass, n_extra = mu.select_subset(pool, weights, k_target, MATCHES_PER_ROTATION)
+    boards = [
+        _build_opponent_boards_and_points([list(rot) for rot in lineup_by_key[k]], names, ranks, ps)
+        for k in chosen
+    ]
+    info = {
+        "n_universe": len(keys), "universe_complete": total_known and not is_sample, "n_used": len(chosen),
+        "mass": mass, "n_extra": n_extra, "weighted": weights is not None, "k_target": k_target,
+        "weight_reason": weight_reason,
+        "n_hist_excluded_dups": len(keys) - len(pool),  # al door een effectief gespeelde opstelling vertegenwoordigd
+    }
+    result = {"boards": boards, "universe_weights": weights, "info": info, "ctx": ctx}
+    st.session_state[cache_key] = {"sig": sig, "result": result}
+    return result
+def _selection_caption(info: dict) -> str:
+    delen = []
+    if info["universe_complete"]:
+        delen.append(f"Met dit roster zijn **{info['n_universe']:,}** verschillende tegenstander-opstellingen mogelijk")
+    else:
+        delen.append(
+            f"Met dit roster zijn er zo veel tegenstander-opstellingen mogelijk dat een gespreide steekproef van "
+            f"**{info['n_universe']:,}** is gebruikt"
+        )
+    if info["n_used"] >= info["n_universe"] - info.get("n_hist_excluded_dups", 0):
+        delen.append("alle zijn doorgerekend")
+    elif info["weighted"] and info["mass"] is not None:
+        delen.append(
+            f"de **{info['n_used']:,}** meest waarschijnlijke (samen {info['mass'] * 100:.0f}% van het gewicht) zijn "
+            "doorgerekend, aangevuld zodat elk mogelijk koppel in elke rotatie minstens 1x voorkomt"
+        )
+    else:
+        delen.append(
+            f"**{info['n_used']:,}** gelijkmatig gespreide zijn doorgerekend ({info.get('weight_reason') or 'zonder gewichten'}), "
+            "aangevuld zodat elk mogelijk koppel in elke rotatie minstens 1x voorkomt"
+        )
+    return (
+        "; ".join(delen) + ". Een specifieke combinatie nodig? Filter in 'Alle matchups' op spelers of koppels: "
+        "dat rekent exact over alle opstellingen."
+    )
 def render_opponent_scenario_setup(
     bundle, opp, total_boards, synergy_fn, player_ratings, official_ranks_strict,
     opponent_ratings, available_ids, max_per_player, name_lookup_global=None,
     tournament_rules_dict=None,
 ) -> dict:
-    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 - zie moduledocstring. Eerste
-    helft van de vroegere _render_all_valid_matchups(): tegenstander-roster-
-    keuze, verwacht aantal matchen per speler, het statistisch model en de
-    scenario-matrix (lineup_scenario_matrix.py). Geeft een dict terug:
-    {"unique_opponent_lineups", "model_weights", "model_stats"} - dit wordt
-    ONGEWIJZIGD doorgegeven aan ZOWEL de Rotatieplanner (lineup_rotation.py,
-    via bundle/unique_opp_players - ongewijzigd) ALS aan render_matchup_
-    overview() hieronder, zodat beide met DEZELFDE tegenstander-opstellingen
-    en -gewichten werken."""
+    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: eerste helft van de vroegere _render_all_valid_matchups():
+    tegenstander-roster-keuze, de tegenstander-opstellingen, het statistisch model en de scenario-matrix.
+    Geeft {"unique_opponent_lineups", "model_weights", "model_stats", "opp_ctx", "universe_weights"} terug.
+    PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: ALLE mogelijke opstellingen (zie moduledocstring)."""
     st.divider()
     st.markdown('<div class="section-header">Opstelling-scenario\'s</div>', unsafe_allow_html=True)
     st.caption(
@@ -1321,6 +1098,8 @@ def render_opponent_scenario_setup(
     historical_boards_with_labels = _historical_opponent_boards_list(bundle)
     unique_players = bundle.get("unique_players", []) or []
     theoretical_boards: list = []
+    opp_ctx = None
+    universe_weights = None
     if not unique_players:
         st.info("Nog geen tegenstander-spelers gekend om theoretische opstellingen voor te berekenen.")
     else:
@@ -1338,10 +1117,10 @@ def render_opponent_scenario_setup(
         )
         chosen_opp_ids = [opp_label_to_id[lbl] for lbl in chosen_opp_labels]
         needed = 2 * total_boards
-        if len(chosen_opp_ids) < 2:
+        if len(chosen_opp_ids) < 2 * MATCHES_PER_ROTATION:
             st.info(
-                "Selecteer minstens 2 tegenstander-spelers om theoretische scenario's toe te voegen. "
-                "De historische opstelling(en) blijven sowieso al in de tabel staan."
+                f"Selecteer minstens {2 * MATCHES_PER_ROTATION} tegenstander-spelers om theoretische scenario's toe te "
+                "voegen. De historische opstelling(en) blijven sowieso al in de tabel staan."
             )
         else:
             chosen_opp_players = [p for p in unique_players if str(p.get("user_id")) in chosen_opp_ids]
@@ -1354,67 +1133,40 @@ def render_opponent_scenario_setup(
                     "'onbekende sterkte' bij het genereren van theoretische opstellingen."
                 )
             opponent_padelstat_ratings = _opponent_padelstat_ratings(bundle)
-            # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: voorstel op basis van het model, anders gelijk verdeeld.
+            # Informatief: het verwachte aantal matchen per speler (beperkt de opstellingen NIET meer).
             max_per_opp = max(1, int(total_boards) // 2)
             default_opp_max = (
                 _expected_matches_per_player(bundle, chosen_opp_ids, needed, max_per_opp)
                 or _default_opponent_max_per_player(chosen_opp_ids, needed)
             )
-            roster_sig_key = f"opp_roster_sig_{opp['ploeg_id']}"
-            roster_signature = (tuple(sorted(chosen_opp_ids)), int(total_boards))
-            if st.session_state.get(roster_sig_key) != roster_signature:
-                prefix = f"opp_max_v2_{opp['ploeg_id']}_"
-                for stale_key in [k for k in list(st.session_state) if str(k).startswith(prefix)]:
-                    st.session_state.pop(stale_key, None)
-                st.session_state[roster_sig_key] = roster_signature
-            st.caption(
-                f"Verwacht aantal wedstrijden per tegenstander-speler (verdeeld over {needed} "
-                "benodigde plaatsen - een speler mag, net als bij ons, meerdere matchen spelen met "
-                "verschillende partners, maar nooit 2 GELIJKTIJDIGE matchen binnen dezelfde rotatie). "
-                "Het voorstel is het VERWACHTE aantal matchen per speler (gemiddelde uit hun eerdere ontmoetingen, "
-                "herschaald naar het totaal) en wordt herberekend zodra je de selectie hierboven wijzigt:"
-            )
-            # PADEL_ANALYSIS_OPP_MAX_DERIVED_2026-10-03: geen invoervelden meer - het
-            # verwachte aantal matchen per speler wordt afgeleid (historiek, anders
-            # gelijk verdeeld) en enkel getoond.
-            opponent_max_per_player = {pid: int(default_opp_max.get(pid, 0)) for pid in chosen_opp_ids}
-            if sum(opponent_max_per_player.values()) != needed:
-                opponent_max_per_player = {
-                    pid: min(v, max_per_opp)
-                    for pid, v in _default_opponent_max_per_player(chosen_opp_ids, needed).items()
-                }
             delen = []
-            for pid in sorted(chosen_opp_ids, key=lambda u: -opponent_max_per_player.get(u, 0)):
+            for pid in sorted(chosen_opp_ids, key=lambda u: -int(default_opp_max.get(u, 0))):
                 naam = next((p.get("name", pid) for p in chosen_opp_players if str(p.get("user_id")) == pid), pid)
-                rk, ps = opponent_official_ranks.get(pid), opponent_padelstat_ratings.get(pid)
-                info = " · ".join(x for x in [f"P{int(rk)}" if rk is not None else "P?",
-                                              f"ps {int(ps)}" if ps is not None else ""] if x)
-                delen.append(f"{naam} ({info}): **{opponent_max_per_player.get(pid, 0)}**")
-            st.markdown("Verwacht aantal matchen per tegenstander-speler: " + " · ".join(delen))
-            opp_total_slots = sum(opponent_max_per_player.values())
-            if opp_total_slots != needed:
-                st.error(
-                    f"Som van tegenstander-plaatsen ({opp_total_slots}) moet gelijk zijn aan 2x wedstrijden "
-                    f"({needed}). Pas de aantallen hierboven aan."
-                )
-            else:
-                compute_key = f"theoretical_boards_{opp['ploeg_id']}"
-                meta_key = f"theoretical_boards_meta_{opp['ploeg_id']}"
-                sig_key = f"theoretical_boards_sig_{opp['ploeg_id']}"
-                signature = (tuple(sorted(chosen_opp_ids)), tuple(sorted(opponent_max_per_player.items())), int(total_boards))
-                if st.session_state.get(sig_key) != signature:
-                    lineups, meta = _generate_theoretical_opponent_boards_with_repeats(
-                        chosen_opp_players, opponent_max_per_player, opponent_official_ranks,
-                        opponent_padelstat_ratings, _THEORETICAL_MAX_VARIANTS,
-                    )
-                    st.session_state[compute_key] = lineups
-                    st.session_state[meta_key] = meta
-                    st.session_state[sig_key] = signature
-                theoretical_boards = st.session_state.get(compute_key) or []
-                meta = st.session_state.get(meta_key) or {"total_theoretical": 0, "truncated": False}
-                st.caption(f"**{meta['total_theoretical']}** theoretische tegenstander-opstellingen mogelijk met deze verdeling.")
-                if meta["truncated"]:
-                    st.warning(f"Enkel de eerste {_THEORETICAL_MAX_VARIANTS} van {meta['total_theoretical']} worden berekend.")
+                rk, ps_ = opponent_official_ranks.get(pid), opponent_padelstat_ratings.get(pid)
+                info_txt = " · ".join(x for x in [f"P{int(rk)}" if rk is not None else "P?",
+                                                  f"ps {int(ps_)}" if ps_ is not None else ""] if x)
+                delen.append(f"{naam} ({info_txt}): **{int(default_opp_max.get(pid, 0))}**")
+            st.markdown("Verwacht aantal matchen per tegenstander-speler (enkel ter info): " + " · ".join(delen))
+            names = {str(p.get("user_id")): p.get("name", str(p.get("user_id"))) for p in chosen_opp_players}
+            opp_ctx = {
+                "ids": sorted(str(i) for i in chosen_opp_ids), "names": names,
+                "ranks": opponent_official_ranks, "ps": opponent_padelstat_ratings,
+                "n_rot": max(1, int(total_boards) // MATCHES_PER_ROTATION),
+            }
+            hist_keys = []
+            for _label, hboards in historical_boards_with_labels:
+                hk = _opponent_lineup_key_of(hboards)
+                if hk is not None:
+                    hist_keys.append(hk)
+            try:
+                n_structs, _tr = _enumerate_rotation_aware_pairings([str(a) for a in available_ids], max_per_player)
+                n_own_est = max(1, int(len(n_structs) * 1.5))
+            except Exception:  # noqa: BLE001
+                n_own_est = 100
+            sel_result = _select_theoretical_lineups(bundle, opp, opp_ctx, n_own_est, hist_keys)
+            theoretical_boards = sel_result["boards"]
+            universe_weights = sel_result["universe_weights"]
+            st.caption(_selection_caption(sel_result["info"]))
     unique_opponent_lineups = _collect_unique_opponent_lineups(historical_boards_with_labels, theoretical_boards)
     # PADEL_ANALYSIS_ROSTER_AND_GROUPS_2026-10-03: niet-geselecteerde spelers -> opstelling weg.
     gekozen_namen = st.session_state.get(f"theoretical_opp_players_{opp['ploeg_id']}")
@@ -1430,44 +1182,117 @@ def render_opponent_scenario_setup(
             )
     if not unique_opponent_lineups:
         st.info("Nog geen tegenstander-opstelling gekend of berekend om tegen te analyseren.")
-        return {"unique_opponent_lineups": {}, "model_weights": None, "model_stats": None}
-    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per scenario.
-    model_weights, model_stats = _model_weights_for_lineups(bundle, unique_opponent_lineups)
+        return {"unique_opponent_lineups": {}, "model_weights": None, "model_stats": None,
+                "opp_ctx": opp_ctx, "universe_weights": universe_weights}
+    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: voorspelde kans per scenario (gecachet per verzameling).
+    mw_key = f"model_weights_v1_{opp['ploeg_id']}"
+    mw_sig = (frozenset(unique_opponent_lineups.keys()), _bundle_signature(bundle))
+    mw_cached = st.session_state.get(mw_key)
+    if mw_cached and mw_cached.get("sig") == mw_sig:
+        model_weights, model_stats = mw_cached["weights"], mw_cached["stats"]
+    else:
+        model_weights, model_stats = _model_weights_for_lineups(bundle, unique_opponent_lineups)
+        st.session_state[mw_key] = {"sig": mw_sig, "weights": model_weights, "stats": model_stats}
     if model_weights:
         _render_predicted_opponent_lineups(unique_opponent_lineups, model_weights, model_stats)
-    # PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03 - zie moduledocstring.
+    # PADEL_ANALYSIS_SCENARIO_MATRIX_2026-10-03: de matrix neemt enkel de meest waarschijnlijke scenario's;
+    # een beperkte verzameling (zoals voorheen) volstaat en houdt ze snel.
+    matrix_lineups = unique_opponent_lineups
+    if model_weights and len(unique_opponent_lineups) > 300:
+        top = sorted(unique_opponent_lineups, key=lambda k: -(model_weights.get(k, 0.0)))[:300]
+        top_set = set(top) | {k for k, v in unique_opponent_lineups.items() if v.get("is_historical")}
+        matrix_lineups = {k: v for k, v in unique_opponent_lineups.items() if k in top_set}
     if lsm is not None:
         try:
             lsm.render_scenario_matrix(
-                unique_opponent_lineups, model_weights, available_ids, max_per_player,
+                matrix_lineups, model_weights, available_ids, max_per_player,
                 int(total_boards), synergy_fn, player_ratings, official_ranks_strict,
                 opponent_ratings, tournament_rules_dict, name_lookup_global or {}, str(opp["ploeg_id"]),
                 model_stats=model_stats,
             )
         except Exception as exc:  # noqa: BLE001 - nooit de rest van de pagina breken
             st.warning(f"Scenario-analyse mislukt: {type(exc).__name__}: {exc}")
-    return {"unique_opponent_lineups": unique_opponent_lineups, "model_weights": model_weights, "model_stats": model_stats}
+    return {
+        "unique_opponent_lineups": unique_opponent_lineups, "model_weights": model_weights,
+        "model_stats": model_stats, "opp_ctx": opp_ctx, "universe_weights": universe_weights,
+    }
+def _opponent_lineup_key_of(boards: list):
+    """Zelfde sleutel als lineup_rotation._opponent_lineup_key(): tuple van frozensets van user_id's per match."""
+    pairs = []
+    for b in boards or []:
+        uids = frozenset(str(p.get("user_id")) for p in (b.get("opponent_pair") or []) if p.get("user_id"))
+        if len(uids) == 2:
+            pairs.append(uids)
+    return tuple(pairs) if pairs else None
+def _run_exact_search(
+    setup: dict, sel: dict, own_fixed_key, own_options: list, synergy_fn, player_ratings: dict,
+    official_ranks_strict: dict, opponent_ratings: dict, search_sig, cache_key: str,
+):
+    """Exacte zoekopdracht (gecachet): geeft (matchups, info) terug."""
+    ctx = setup.get("opp_ctx")
+    store = st.session_state.setdefault(cache_key, {})
+    ck = (
+        search_sig, tuple(sorted(sel.get("own_players") or [])), tuple(sorted(sel.get("own_pairs") or [])),
+        tuple(sorted(sel.get("opp_players") or [])), tuple(sorted(sel.get("opp_pairs") or [])),
+        own_fixed_key, bool(sel.get("vs")),
+    )
+    if ck in store:
+        return store[ck]
+    if ctx is None:
+        res = ([], {"n_own": 0, "n_opp_matching": 0, "n_opp_used": 0, "n_computed": 0, "truncated": False,
+                    "enum_truncated": False, "n_hist": 0})
+        return res
+    names, ranks, ps = ctx["names"], ctx["ranks"], ctx["ps"]
+    if own_fixed_key is not None:
+        own_fixed_key = frozenset(frozenset(str(x) for x in p) for p in own_fixed_key)
+    must_players = [k[3:] for k in sel.get("opp_players") or [] if k.startswith("id:")]
+    must_pairs = []
+    for pk in sel.get("opp_pairs") or []:
+        parts = [x[3:] for x in pk.split("|") if x.startswith("id:")]
+        if len(parts) == 2:
+            must_pairs.append(frozenset(parts))
+    unique = setup.get("unique_opponent_lineups") or {}
+    hist_info = {k: v for k, v in unique.items() if v.get("is_historical")}
+    def rank_fn(pairs):
+        return _rank_pairs_with_padelstat_tiebreak(pairs, ranks, ps)
+    def build_boards(lineup):
+        return _build_opponent_boards_and_points([list(rot) for rot in lineup], names, ranks, ps)
+    def compute(own_pairs, boards):
+        return _compute_matchup(own_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings)
+    results, info = mu.search_exact(
+        own_options=own_options, opp_ids=ctx["ids"], n_rotations=ctx["n_rot"],
+        matches_per_rotation=MATCHES_PER_ROTATION,
+        own_players=sel.get("own_players") or [], own_pair_keys=sel.get("own_pairs") or [],
+        fixed_key=own_fixed_key, must_opp_pairs=must_pairs, must_opp_players=must_players,
+        rank_pairs_fn=rank_fn, weights=setup.get("universe_weights"), hist_info=hist_info,
+        build_boards_fn=build_boards, compute_fn=compute, make_matchup_fn=_make_matchup,
+        cap=_SEARCH_MAX_COMPUTED, require_vs=bool(sel.get("vs")), time_budget=_SEARCH_TIME_BUDGET,
+    )
+    if len(store) > 12:
+        store.clear()
+    store[ck] = (results, info)
+    return results, info
 def render_matchup_overview(
     setup: dict, opp, available_ids, max_per_player, total_boards, synergy_fn,
     player_ratings, official_ranks_strict, opponent_ratings, report,
     name_lookup_global, sel_player_id, tournament_rules_dict=None, rules_label=None,
 ):
-    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04 - zie moduledocstring. Tweede
-    helft van de vroegere _render_all_valid_matchups(): de knop "Bereken alle
-    geldige matchups" + de groepenweergave, nu onder de kop "Alle matchups" en
-    ZONDER de aanroep van _render_best_for_selected_player() (die vraag
-    beantwoordt nu de Rotatieplanner, zie lineup_plan_screen.py).
-    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filters + padelstat in de koppel-tabellen."""
+    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: tweede helft van de vroegere _render_all_valid_matchups(): de
+    knop "Bereken alle geldige matchups" + de groepenweergave, nu onder de kop "Alle matchups".
+    PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: filters + padelstat in de koppel-tabellen.
+    PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: filters rekenen exact over de volledige set."""
     unique_opponent_lineups = (setup or {}).get("unique_opponent_lineups") or {}
     model_weights = (setup or {}).get("model_weights")
+    universe_weights = (setup or {}).get("universe_weights")
     if not unique_opponent_lineups:
         return []
     st.divider()
     st.markdown('<div class="section-header">Alle matchups</div>', unsafe_allow_html=True)
     st.caption(
-        "ALLE reglementair geldige, rotatie-veilige combinaties van onze opstelling tegen hun "
-        "opstelling, gemiddeld over alle doorgerekende tegenstander-scenario's - klik op een kolomkop "
-        "in de platte tabel hieronder om te sorteren. De opstelling die de tegenstander vorige keer "
+        "Alle reglementair geldige, rotatie-veilige combinaties van onze opstelling tegen de "
+        "doorgerekende tegenstander-opstellingen, gemiddeld over de tegenstander-scenario's. Zoek je een "
+        "specifieke combinatie (bv. ons koppel tegen een bepaald tegenstander-koppel)? Gebruik de filters: die "
+        "rekenen exact over alle opstellingen. De opstelling die de tegenstander vorige keer "
         "effectief speelde is gemarkeerd in de kolom 'Vorige keer'."
     )
     include_non_compliant = False
@@ -1484,11 +1309,7 @@ def render_matchup_overview(
         tuple(sorted(opponent_ratings.items())),
     )
     signature = (settings_signature, ratings_signature)
-    # PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: nieuwe sleutels - het resultaat heeft nu 5 delen.
-    # PADEL_ANALYSIS_POINT_PROBABILITY_2026-09-30: opnieuw nieuwe sleutels (v3), want elke matchup/groep
-    # heeft nu ook "point_probs" - een oud, gecachet resultaat zonder dat veld zou de nieuwe kolommen
-    # als "onbekend" tonen i.p.v. echt herberekend te worden.
-    # PADEL_ANALYSIS_OPPONENT_LINEUP_MODEL_2026-10-02: v4 - andere weging.
+    # Nieuwe sleutels (v4): het resultaat heeft 5 delen en elke matchup heeft "point_probs" en "opp_probability".
     result_key = f"scenario_result_v4_{opp['ploeg_id']}"
     sig_key = f"scenario_result_sig_v4_{opp['ploeg_id']}"
     clicked = st.button(
@@ -1502,7 +1323,7 @@ def render_matchup_overview(
                 unique_opponent_lineups, available_ids, max_per_player, synergy_fn,
                 player_ratings, official_ranks_strict, opponent_ratings, tournament_rules_dict,
                 include_non_compliant_variants=include_non_compliant,
-                opponent_weight_override=model_weights,
+                opponent_weight_override=model_weights, opponent_probability=universe_weights,
             )
             st.session_state[sig_key] = signature
     stored = st.session_state.get(result_key)
@@ -1530,7 +1351,7 @@ def render_matchup_overview(
         st.write(f"- Daaruit gegenereerde volgorde-varianten (incl. eventuele swap-varianten): **{build_diag['own_variants_generated']}**")
         st.write(f"- Daarvan uitgesloten door de reglementaire puntengrens: **{build_diag['own_excluded_by_rules']}**")
         st.write(f"- Reglementair geldige eigen combinaties (puntengrens OK): **{build_diag['own_valid']}**")
-        st.write(f"- Unieke tegenstander-opstellingen (na samenvoegen/filteren): **{len(unique_opponent_lineups)}**")
+        st.write(f"- Doorgerekende tegenstander-opstellingen (na samenvoegen/filteren): **{len(unique_opponent_lineups)}**")
         st.write(f"- Totaal doorgerekende matchup-kandidaten (voor ontdubbeling): **{total_seen}**")
         st.write(f"- Effectief doorgerekende matchups: **{build_diag.get('matchups_computed', 0)}**")
         st.write(f"- Unieke eigen opstellingen (groepen): **{build_diag.get('own_groups', 0)}**")
@@ -1544,7 +1365,6 @@ def render_matchup_overview(
             f"Meer dan {_MAX_COMPUTED_MATCHUPS:,} combinaties - de berekening werd daar gestopt. "
             "Verklein de spelersselectie of het tegenstander-roster voor een volledige dekking."
         )
-    # PADEL_ANALYSIS_MATCHUPS_ALL_OWN_LINEUPS_2026-09-29: eerlijk aantal (alle eigen opstellingen doorgerekend).
     st.caption(
         f"**{build_diag.get('matchups_computed', 0):,}** matchups doorgerekend over "
         f"**{build_diag.get('own_groups', 0)}** eigen opstellingen, gesorteerd van hoogste naar laagste "
@@ -1557,37 +1377,49 @@ def render_matchup_overview(
             "gekozen afdeling en het aantal beschikbare spelers."
         )
         return []
-    # PADEL_ANALYSIS_SAVE_BUTTON_VISIBILITY_FIX_2026-09-27: de "Analyse
-    # opslaan"-knop staat nu HIER, meteen zodra all_matchups bevestigd
-    # niet-leeg is - VOOR de zware rendering hieronder (gegroepeerde
-    # opstellingen, platte tabel, AI-sectie). Zie de uitgebreide
-    # toelichting bovenaan dit bestand.
     _render_save_analysis_button(
         all_matchups, opp, available_ids, name_lookup_global, total_boards, max_per_player, sel_player_id,
     )
     st.divider()
+    # PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11: ALLE eigen opstellingen (voor de filterlijsten en de exacte
+    # zoekopdracht), gecachet per instellingen.
+    own_key = f"own_options_v1_{opp['ploeg_id']}"
+    own_cached = st.session_state.get(own_key)
+    if own_cached and own_cached.get("sig") == signature:
+        own_options = own_cached["options"]
+    else:
+        own_options, _own_diag, _own_tr = _collect_valid_own_options(
+            available_ids, max_per_player, official_ranks_strict, player_ratings, tournament_rules_dict,
+        )
+        st.session_state[own_key] = {"sig": signature, "options": own_options}
+    opts = _filter_option_lists(own_options, name_lookup_global, (setup or {}).get("opp_ctx"))
+    search_cache_key = f"search_cache_v1_{opp['ploeg_id']}"
+    def run_search(sel, own_fixed_key=None):
+        return _run_exact_search(
+            setup, sel, own_fixed_key, own_options, synergy_fn, player_ratings, official_ranks_strict,
+            opponent_ratings, signature, search_cache_key,
+        )
     _render_own_lineup_groups_with_opponents(
         groups, name_lookup_global, ploeg_key=str(opp['ploeg_id']),
         own_ps=player_ratings, opp_ps=opponent_ratings,
+        filter_ctx={"opts": opts, "search": run_search if (setup or {}).get("opp_ctx") else None},
     )
-    # PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: _render_best_for_selected_player()
-    # wordt hier NIET MEER aangeroepen - zie moduledocstring.
     with st.expander("Platte tabel (alle matchups los naast elkaar, sorteerbaar per kolom)", expanded=False):
-        # PADEL_ANALYSIS_MATCHUP_FILTERS_2026-10-10: eerst filteren, daarna afkappen op de beste N.
         plat_prefix = f"flat_{opp['ploeg_id']}"
-        plat_sel = _render_filter_widgets(all_matchups, name_lookup_global, plat_prefix, own=True, opp=True)
-        gefilterd = _apply_filters(all_matchups, plat_sel)
+        has_opp_ctx = bool((setup or {}).get("opp_ctx"))
+        plat_sel = _render_filter_widgets(opts, plat_prefix, own=True, opp=has_opp_ctx)
         if _has_filter(plat_sel):
-            _filter_caption(len(gefilterd), len(all_matchups), "matchups")
-        if not gefilterd:
-            st.info("Geen enkele matchup voldoet aan deze filters.")
+            results, sinfo = run_search(plat_sel, None)
+            _render_search_results(
+                results, sinfo, name_lookup_global, player_ratings, opponent_ratings, f"{plat_prefix}_res",
+            )
         else:
             show_all_key = f"all_matchups_showall_{opp['ploeg_id']}"
             show_all = st.checkbox(
-                f"Toon alle {len(gefilterd)} matchups (i.p.v. de beste {_MATCHUP_DISPLAY_DEFAULT_N})",
+                f"Toon alle {len(all_matchups)} matchups (i.p.v. de beste {_MATCHUP_DISPLAY_DEFAULT_N})",
                 key=show_all_key,
-            ) if len(gefilterd) > _MATCHUP_DISPLAY_DEFAULT_N else False
-            display_matchups = gefilterd if show_all else gefilterd[:_MATCHUP_DISPLAY_DEFAULT_N]
+            ) if len(all_matchups) > _MATCHUP_DISPLAY_DEFAULT_N else False
+            display_matchups = all_matchups if show_all else all_matchups[:_MATCHUP_DISPLAY_DEFAULT_N]
             table_rows, board_column_names = _matchups_to_table_rows(
                 display_matchups, name_lookup_global, own_ps=player_ratings, opp_ps=opponent_ratings,
             )
@@ -1596,16 +1428,16 @@ def render_matchup_overview(
                 table_rows, use_container_width=True, hide_index=True,
                 column_config=column_config, column_order=column_order,
             )
-            st.caption(
-                "Elk speler-duo staat in zijn eigen kolom ('Ons duo' / 'Tegenstander'), met tussen haakjes de "
-                "padelstat (ps) van elke speler, naast een aparte winkans-kolom per match. 'Kans 2p/1p/0p' toont "
-                "de exacte kans op dat aantal competitiepunten voor DEZE ene tegenstander-opstelling (dus "
-                "ongewogen - de weging over alle scenario's zit enkel in de groepstitel hierboven). 'Rotatie1 M1' "
-                "= Match 1 van rotatie 1 (sterkste duo volgens officieel klassement, art. 6.6), 'Rotatie1 M2' = "
-                "Match 2, enz."
-            )
-            if not show_all and len(gefilterd) > len(display_matchups):
-                st.caption(f"Beste {len(display_matchups)} van {len(gefilterd)} matchups getoond - vink hierboven aan om alles te zien.")
+            if not show_all and len(all_matchups) > len(display_matchups):
+                st.caption(f"Beste {len(display_matchups)} van {len(all_matchups)} bewaarde matchups getoond - vink hierboven aan om alles te zien.")
+        st.caption(
+            "Elk speler-duo staat in zijn eigen kolom ('Ons duo' / 'Tegenstander'), met tussen haakjes de "
+            "padelstat (ps) van elke speler, naast een aparte winkans-kolom per match. 'Kans 2p/1p/0p' toont "
+            "de exacte kans op dat aantal competitiepunten voor DEZE ene tegenstander-opstelling (dus "
+            "ongewogen - de weging over alle scenario's zit enkel in de groepstitel). 'Kans opstelling' is hoe "
+            "waarschijnlijk het model die tegenstander-opstelling vindt. 'Rotatie1 M1' = Match 1 van rotatie 1 "
+            "(sterkste duo volgens officieel klassement, art. 6.6), 'Rotatie1 M2' = Match 2, enz."
+        )
     st.divider()
     # De AI-sectie werkt, zoals voorheen, op de beste 5 matchups van de volledige (ongefilterde) lijst.
     ai_matchups = list(all_matchups)[:5]
@@ -1662,11 +1494,8 @@ def _render_all_valid_matchups(
     player_ratings, official_ranks_strict, opponent_ratings, report,
     name_lookup_global, sel_player_id, tournament_rules_dict=None, rules_label=None,
 ):
-    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: dunne, backward-compatible
-    combinator - roept render_opponent_scenario_setup() en render_matchup_
-    overview() ACHTER elkaar aan (dus ZONDER de Rotatieplanner ertussen).
-    page_lineup_lab.py gebruikt sinds deze versie de 2 losse functies
-    rechtstreeks, met de Rotatieplanner ertussenin - zie die moduledocstring."""
+    """PADEL_ANALYSIS_PAGE_RESTRUCTURE_2026-10-04: dunne, backward-compatible combinator - roept
+    render_opponent_scenario_setup() en render_matchup_overview() ACHTER elkaar aan."""
     setup = render_opponent_scenario_setup(
         bundle, opp, total_boards, synergy_fn, player_ratings, official_ranks_strict,
         opponent_ratings, available_ids, max_per_player, name_lookup_global=name_lookup_global,
