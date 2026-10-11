@@ -34,6 +34,25 @@ werkt precies die spelers bij; "Gegevens opnieuw laden" wist de gecachete
 gegevens zodat de nieuwe matchen verschijnen. Ontbreekt retro_refresh.py of
 teammate_sync.py, dan draait de pagina gewoon door zonder dit blok.
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11 (op verzoek van Kim: "De nabeschouwing mag iets betere data tonen. Je
+mag daar ook de spelerstabel van de tegenstander tonen zoals je bij de analyse doet. Je mag daar ook de vorige matchen van
+die ploeg tonen zoals bij Analyse. Bij 'op basis van welke waarden' [...] wil ik liever de totale padelstat waardes van
+beide spelers tov van elkaar. Ook vreemd dat er staat 'nog geen historiek bijgehouden'. Dat is wel noodzakelijk")
+--------------------------------------------------------------------------
+1. ONDER ELKE MATCH staat nu altijd (niet verstopt): "Padelstat: wij 400 (Caroline 170 + Evy 230) tegen zij 450 (Lien 270 +
+   Evelien 180) -> verschil -50". Een benaderde waarde staat met "\u2248" ervoor. De uitklapper toont per speler de waarde, de
+   meetdatum en de soort (geldig op de wedstrijddag / oudste meting / enige meting voor of na de wedstrijd / momentopname /
+   klassement).
+2. "NOG GEEN HISTORIEK": de padelstat-historiek wordt sinds 03/10 bijgehouden (firebase_service.save_padelstat_rating) en
+   groeit enkel bij een verversing van de padelstat van die speler. Wie sindsdien niet ververst werd, heeft enkel de ene
+   vlakke waarde. De tekst zegt nu WANNEER die waarde gemeten is en of dat voor of na de wedstrijd was. Zie
+   backfill_padelstat_history.py voor het meteen aanvullen van een startpunt voor iedereen (zonder scrapen).
+3. WIJZIGING: een wedstrijd VOOR de eerste meting kreeg de MEEST RECENTE waarde (de verste in de tijd); nu de OUDSTE (de
+   dichtstbijzijnde). De gecachete kalibratierijen (1 uur) kunnen nog de oude waarden bevatten.
+4. TEGENPLOEG (retro_opponent_view.py): spelerstabel van de tegenploeg (waarden op de wedstrijddag, uit de gekende matchen),
+   het opgeslagen teamoverzicht zoals bij Analyse, en de vorige ontmoetingen van die ploeg (zelfde functie als bij Analyse,
+   achter een vinkje zodat de pagina snel blijft). Ontbreekt dat bestand, dan draait de pagina gewoon door.
+--------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 (op verzoek van
 Kim, met meting: "zit vandaag over 64k [Firestore-reads]. ik had pay as you
 go gedacht maar is raar" + bevestigd: ~10-15x op "Bereken kalibratie"
@@ -218,6 +237,11 @@ try:
     import retro_refresh as _rr
 except Exception:  # noqa: BLE001  pragma: no cover
     _rr = None
+# PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11: idem voor de tegenploeg-sectie.
+try:
+    import retro_opponent_view as _rov
+except Exception:  # noqa: BLE001  pragma: no cover
+    _rov = None
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _CALIBRATION_SETTINGS_COLLECTION = "app_settings"
 _CALIBRATION_SETTINGS_DOC = "retro_calibration"
@@ -525,63 +549,141 @@ def _latest_rating_from_history(history: list) -> Optional[float]:
     beste = max(history, key=lambda r: str(r.get("fetched_at") or ""))
     rating = beste.get("rating")
     return float(rating) if rating is not None else None
+def _fmt_date(value) -> str:
+    """"2026-10-05T10:53:00+00:00" / "2026-10-05" -> "05/10/2026"; onleesbaar -> "?"."""
+    iso = to_iso_date(str(value)[:10]) if value else None
+    if not iso:
+        return "?"
+    y, m, d = iso.split("-")
+    return f"{d}/{m}/{y}"
+def _history_clean(history: list) -> list:
+    """Enkel regels met een waarde EN een meetmoment, oplopend op meetmoment."""
+    regels = [r for r in (history or []) if r.get("rating") is not None and r.get("fetched_at")]
+    return sorted(regels, key=lambda r: str(r.get("fetched_at")))
+def _history_line_at(history: list, moment_iso: str):
+    """(meetmoment, rating) van de LAATSTE meting op of voor `moment_iso`, of None."""
+    beste = None
+    for regel in _history_clean(history):
+        t = str(regel.get("fetched_at"))
+        if t[:len(moment_iso)] <= moment_iso:
+            beste = (t, regel.get("rating"))
+    return beste
+# Korte uitleg per soort waarde (voor de tabel "Op basis van welke waarden?").
+_KIND_LABELS = {
+    "op_datum": "geldig op de wedstrijddag",
+    "oudste": "oudste meting (wedstrijd was ervoor)",
+    "recent": "meest recente meting (datum onbekend)",
+    "enkel_voor": "enige meting (vóór de wedstrijd)",
+    "enkel_na": "enige meting (ná de wedstrijd)",
+    "enkel_onbekend": "enige meting (datum onbekend)",
+    "momentopname": "momentopname planning (exact)",
+    "klassement": "officieel klassement (geen padelstat)",
+    "onbekend": "onbekend",
+}
+def _padelstat_priority_detail(
+    pid, date_text, ratings_cache: Dict[str, dict], fallback_value, fallback_label: str,
+) -> dict:
+    """GEDEELDE prioriteitsketen voor ZOWEL eigen spelers ALS tegenstanders. Geeft een dict terug:
+    {"value", "source" (tekst), "kind", "as_of" (meetdatum, ISO) of None, "exact" (bool)}.
+      1. padelstat-historiek: de laatste meting OP OF VOOR de wedstrijddag (exact);
+      2. ligt de wedstrijd VOOR de eerste meting: de OUDSTE meting (de dichtstbijzijnde in de tijd);
+         is de wedstrijddatum onbekend: de meest recente meting;
+      3. het vlakke, niet-gehistoriseerde "rating"-veld, met zijn meetdatum;
+      4. `fallback_value`/`fallback_label` (officieel klassement);
+      5. onbekend.
+    PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11: voorheen kreeg een wedstrijd VOOR de eerste meting de
+    MEEST RECENTE waarde (de verste in de tijd); nu de oudste (de dichtstbijzijnde)."""
+    entry = ratings_cache.get(str(pid)) or {}
+    history = _history_clean(entry.get("history") or [])
+    iso = to_iso_date(date_text)
+    if iso and history:
+        hit = _history_line_at(history, iso)
+        if hit is not None:
+            return {"value": float(hit[1]), "kind": "op_datum", "as_of": hit[0][:10], "exact": True,
+                    "source": f"padelstat-historiek (waarde van {_fmt_date(hit[0])}, geldig op de wedstrijddag)"}
+        eerste = history[0]
+        return {"value": float(eerste["rating"]), "kind": "oudste", "as_of": str(eerste["fetched_at"])[:10],
+                "exact": False,
+                "source": f"padelstat (oudste bekende waarde, van {_fmt_date(eerste['fetched_at'])}; de wedstrijd was "
+                          "vóór die meting - benadering)"}
+    if history:  # wedstrijddatum onbekend
+        laatste = history[-1]
+        return {"value": float(laatste["rating"]), "kind": "recent", "as_of": str(laatste["fetched_at"])[:10],
+                "exact": False,
+                "source": f"padelstat (meest recente meting, van {_fmt_date(laatste['fetched_at'])}; "
+                          "wedstrijddatum onbekend - benadering)"}
+    flat = entry.get("flat_rating")
+    if flat is not None:
+        as_of_raw = entry.get("flat_fetched_at")
+        as_of = to_iso_date(str(as_of_raw)[:10]) if as_of_raw else None
+        if as_of and iso and as_of <= iso:
+            kind, uitleg = "enkel_voor", "enige waarde die we hebben, gemeten vóór de wedstrijd - redelijke benadering; nog geen historiek"
+        elif as_of and iso:
+            kind, uitleg = "enkel_na", "enige waarde die we hebben, gemeten ná de wedstrijd - benadering; nog geen historiek"
+        else:
+            kind, uitleg = "enkel_onbekend", "enige waarde die we hebben; meetdatum onbekend; nog geen historiek"
+        datum = f" van {_fmt_date(as_of_raw)}" if as_of else ""
+        return {"value": float(flat), "kind": kind, "as_of": as_of, "exact": False,
+                "source": f"padelstat{datum} ({uitleg})"}
+    if fallback_value is not None:
+        return {"value": float(fallback_value), "kind": "klassement", "as_of": None, "exact": False,
+                "source": fallback_label}
+    return {"value": None, "kind": "onbekend", "as_of": None, "exact": False, "source": "onbekend"}
 def _padelstat_priority_rating(
     pid, date_text, ratings_cache: Dict[str, dict], fallback_value, fallback_label: str,
 ):
-    """GEDEELDE prioriteitsketen voor ZOWEL eigen spelers ALS tegenstanders:
-      1. padelstat-historiek OP DATUM (exact);
-      2. meest recente padelstat-HISTORIEK-waarde (any datum - "huidig");
-      3. het vlakke, niet-gehistoriseerde "rating"-veld;
-      4. `fallback_value`/`fallback_label`.
-    Geeft (waarde, bron) terug; waarde is None als ECHT niets gekend is."""
-    cache_entry = ratings_cache.get(str(pid)) or {}
-    history = cache_entry.get("history") or []
-    iso = to_iso_date(date_text)
-    if iso:
-        hist = _rating_at_from_history(history, iso)
-        if hist is not None:
-            return float(hist), "padelstat-historiek (op datum)"
-    latest = _latest_rating_from_history(history)
-    if latest is not None:
-        return latest, "meest recente padelstat-historiek (geen regel exact op die datum - benadering)"
-    flat = cache_entry.get("flat_rating")
-    if flat is not None:
-        return float(flat), "padelstat (nog geen historiek bijgehouden voor deze speler - huidige waarde)"
-    if fallback_value is not None:
-        return float(fallback_value), fallback_label
-    return None, "onbekend"
+    """Zoals _padelstat_priority_detail(), maar als (waarde, bron) - de oude signatuur voor bestaande aanroepers.
+    LET OP: de bron-tekst bevat NOOIT het woord 'klassement' behalve bij de terugval op het officieel klassement
+    (zo herkennen _source_is_padelstat() en gather_raw_match_data() een echte padelstat-waarde)."""
+    d = _padelstat_priority_detail(pid, date_text, ratings_cache, fallback_value, fallback_label)
+    return d["value"], d["source"]
 # --------------------------------------------------------------- voorspelling
-def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
-                  ratings_cache: Dict[str, dict]):
+def _own_value_detail(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
+                      ratings_cache: Dict[str, dict]) -> dict:
     pid = str(player_id)
     if snapshot_own and pid in snapshot_own:
         v = snapshot_own[pid]
         if v.get("padelstat") is not None:
-            return float(v["padelstat"]), "momentopname (padelstat)"
+            return {"value": float(v["padelstat"]), "source": "momentopname (padelstat)", "kind": "momentopname",
+                    "as_of": None, "exact": True}
         if v.get("official_rank") is not None:
-            return float(v["official_rank"]), "momentopname (klassement)"
+            return {"value": float(v["official_rank"]), "source": "momentopname (klassement)", "kind": "klassement",
+                    "as_of": None, "exact": False}
     fallback = (current_official_ranks or {}).get(pid)
-    return _padelstat_priority_rating(
+    return _padelstat_priority_detail(
         pid, date_text, ratings_cache, fallback,
         "huidig officieel klassement (laatste redmiddel, geen padelstat gekend)",
     )
-def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
-                       ratings_cache: Dict[str, dict]):
+def _own_value_at(player_id, date_text, current_official_ranks: dict, snapshot_own: dict,
+                  ratings_cache: Dict[str, dict]):
+    d = _own_value_detail(player_id, date_text, current_official_ranks, snapshot_own, ratings_cache)
+    return d["value"], d["source"]
+def _opponent_value_detail(user_id, ranking_text, date_text, snapshot_opp: dict,
+                           ratings_cache: Dict[str, dict]) -> dict:
     uid = str(user_id) if user_id else None
     if snapshot_opp and uid and uid in snapshot_opp:
         v = snapshot_opp[uid]
         if v.get("padelstat") is not None:
-            return float(v["padelstat"]), "momentopname (padelstat)"
+            return {"value": float(v["padelstat"]), "source": "momentopname (padelstat)", "kind": "momentopname",
+                    "as_of": None, "exact": True}
         if v.get("official_rank") is not None:
-            return float(v["official_rank"]), "momentopname (klassement)"
+            return {"value": float(v["official_rank"]), "source": "momentopname (klassement)", "kind": "klassement",
+                    "as_of": None, "exact": False}
     if not uid:
         official = ll.parse_ranking(ranking_text)
-        return (float(official), "officieel klassement (van toen, uit het uitslagenblad)") if official is not None else (None, "onbekend")
+        if official is not None:
+            return {"value": float(official), "source": "officieel klassement (van toen, uit het uitslagenblad)",
+                    "kind": "klassement", "as_of": None, "exact": False}
+        return {"value": None, "source": "onbekend", "kind": "onbekend", "as_of": None, "exact": False}
     official = ll.parse_ranking(ranking_text)
-    return _padelstat_priority_rating(
+    return _padelstat_priority_detail(
         uid, date_text, ratings_cache, official,
         "officieel klassement (van toen, uit het uitslagenblad - laatste redmiddel, geen padelstat gekend)",
     )
+def _opponent_value_at(user_id, ranking_text, date_text, snapshot_opp: dict,
+                       ratings_cache: Dict[str, dict]):
+    d = _opponent_value_detail(user_id, ranking_text, date_text, snapshot_opp, ratings_cache)
+    return d["value"], d["source"]
 def _effective_win_probability(
     our_avg, their_avg, our_ids, their_ids, scale: float, bias: float = 0.0,
     form_weight: float = 0.0, form_adjustment: Optional[Dict[str, dict]] = None,
@@ -614,11 +716,13 @@ def predict_board(
     p1, p2 = tuple(board["pair"])
     snap_own = (snapshot or {}).get("own_players") or {}
     snap_opp = (snapshot or {}).get("opponent_players") or {}
-    our_vals = [_own_value_at(p, date_text, current_official_ranks, snap_own, ratings_cache) for p in (p1, p2)]
-    their_vals = [
-        _opponent_value_at(board.get("opp1_user_id"), board.get("opp1_ranking"), date_text, snap_opp, ratings_cache),
-        _opponent_value_at(board.get("opp2_user_id"), board.get("opp2_ranking"), date_text, snap_opp, ratings_cache),
+    our_det = [_own_value_detail(p, date_text, current_official_ranks, snap_own, ratings_cache) for p in (p1, p2)]
+    their_det = [
+        _opponent_value_detail(board.get("opp1_user_id"), board.get("opp1_ranking"), date_text, snap_opp, ratings_cache),
+        _opponent_value_detail(board.get("opp2_user_id"), board.get("opp2_ranking"), date_text, snap_opp, ratings_cache),
     ]
+    our_vals = [(d["value"], d["source"]) for d in our_det]
+    their_vals = [(d["value"], d["source"]) for d in their_det]
     our_known = [v for v, _ in our_vals if v is not None]
     their_known = [v for v, _ in their_vals if v is not None]
     our_avg = sum(our_known) / len(our_known) if our_known else None
@@ -634,7 +738,10 @@ def predict_board(
         "actual_won": board.get("won"), "score": board.get("score"),
         "opp1_name": board.get("opp1_name"), "opp2_name": board.get("opp2_name"),
         "opp1_user_id": board.get("opp1_user_id"), "opp2_user_id": board.get("opp2_user_id"),
+        "opp1_ranking": board.get("opp1_ranking"), "opp2_ranking": board.get("opp2_ranking"),
         "match_date": date_text,
+        # PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11: per speler waarde, bron, meetdatum en soort.
+        "our_detail": our_det, "their_detail": their_det,
     }
 def predict_encounter(
     boards: list, current_official_ranks: dict, ratings_cache: Dict[str, dict],
@@ -1156,6 +1263,58 @@ def _outcome_color(predicted_wp, actual_won) -> str:
     return "green" if correct else "red"
 def _source_is_padelstat(sources) -> bool:
     return all(s is not None and "klassement" not in s and s != "onbekend" for s in (sources or []))
+def _fmt_val(d: dict) -> str:
+    """"230" voor een exacte waarde, "\u2248230" voor een benadering, "?" als onbekend."""
+    v = d.get("value")
+    if v is None:
+        return "?"
+    return f"{v:.0f}" if d.get("exact") else f"\u2248{v:.0f}"
+def padelstat_compare_lines(bp: dict, name_lookup: dict) -> dict:
+    """Totalen van beide koppels tegenover elkaar. Geeft {"tekst", "ons_totaal", "hun_totaal", "verschil",
+    "benadering"} terug; de totalen zijn None zodra een van de 4 waarden ontbreekt."""
+    p1, p2 = bp["pair"]
+    ons_d, hun_d = bp.get("our_detail") or [], bp.get("their_detail") or []
+    ons_namen = [name_lookup.get(p1, str(p1)), name_lookup.get(p2, str(p2))]
+    hun_namen = [bp.get("opp1_name") or "?", bp.get("opp2_name") or "?"]
+    def _kant(namen, dets):
+        delen = [f"{n} {_fmt_val(d)}" for n, d in zip(namen, dets)]
+        vals = [d.get("value") for d in dets]
+        totaal = sum(vals) if len(vals) == 2 and all(v is not None for v in vals) else None
+        return delen, totaal
+    ons_delen, ons_tot = _kant(ons_namen, ons_d)
+    hun_delen, hun_tot = _kant(hun_namen, hun_d)
+    benadering = any(not d.get("exact") for d in (ons_d + hun_d))
+    # Een officieel klassement (terugval) staat op een andere schaal dan padelstat: het totaal is dan niet zuiver vergelijkbaar.
+    met_klassement = any(d.get("kind") == "klassement" for d in (ons_d + hun_d))
+    if ons_tot is not None and hun_tot is not None:
+        verschil = ons_tot - hun_tot
+        teken = "+" if verschil > 0 else ("\u2212" if verschil < 0 else "")
+        tekst = (
+            f"Padelstat: wij **{ons_tot:.0f}** ({' + '.join(ons_delen)}) tegen zij **{hun_tot:.0f}** "
+            f"({' + '.join(hun_delen)}) \u2192 verschil **{teken}{abs(verschil):.0f}**"
+        )
+    else:
+        verschil = None
+        tekst = (
+            f"Padelstat: wij {' + '.join(ons_delen) or '?'} tegen zij {' + '.join(hun_delen) or '?'} "
+            "(niet van alle 4 spelers gekend - geen totaal)"
+        )
+    return {"tekst": tekst, "ons_totaal": ons_tot, "hun_totaal": hun_tot, "verschil": verschil, "benadering": benadering,
+            "met_klassement": met_klassement}
+def _detail_rows(bp: dict, name_lookup: dict) -> list:
+    p1, p2 = bp["pair"]
+    rijen = []
+    for kant, namen, dets in (
+        ("Wij", [name_lookup.get(p1, str(p1)), name_lookup.get(p2, str(p2))], bp.get("our_detail") or []),
+        ("Zij", [bp.get("opp1_name") or "?", bp.get("opp2_name") or "?"], bp.get("their_detail") or []),
+    ):
+        for naam, d in zip(namen, dets):
+            rijen.append({
+                "Ploeg": kant, "Speler": naam, "Waarde": _fmt_val(d),
+                "Gemeten op": _fmt_date(d.get("as_of")) if d.get("as_of") else "-",
+                "Soort": _KIND_LABELS.get(d.get("kind"), d.get("kind") or "?"),
+            })
+    return rijen
 def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str, dict]] = None) -> None:
     p1, p2 = bp["pair"]
     ons = f"{name_lookup.get(p1, p1)} / {name_lookup.get(p2, p2)}"
@@ -1169,15 +1328,41 @@ def _render_board_row(bp: dict, name_lookup: dict, form_index: Optional[Dict[str
         f"voorspeld :{kleur}[**{_pct(bp['win_probability'])}**] ({bp['risk_note']}), "
         f"echt **{uitslag}**{badge}"
     )
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11: de totale padelstat van beide koppels tegenover elkaar,
+    # altijd zichtbaar (niet verstopt in de uitklapper).
+    if bp.get("our_detail") and bp.get("their_detail"):
+        vergelijk = padelstat_compare_lines(bp, name_lookup)
+        st.markdown(
+            vergelijk["tekst"]
+            + (" \u00b7 :orange[\u2248 = benadering]" if vergelijk["benadering"] else "")
+            + (" \u00b7 :orange[bevat officieel klassement i.p.v. padelstat - totalen niet zuiver vergelijkbaar]"
+               if vergelijk["met_klassement"] else "")
+        )
     with st.expander("Op basis van welke waarden?", expanded=False):
-        st.caption(
-            (f"Onze spelers: {bp['our_sources'][0]}, {bp['our_sources'][1]} "
-             f"(gemiddeld {bp['our_avg']:.0f})") if bp.get("our_avg") is not None else "Onze spelers: onbekend"
-        )
-        st.caption(
-            (f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
-             f"(gemiddeld {bp['their_avg']:.0f})") if bp.get("their_avg") is not None else "Tegenstander: onbekend"
-        )
+        if bp.get("our_detail") and bp.get("their_detail"):
+            st.dataframe(_detail_rows(bp, name_lookup), use_container_width=True, hide_index=True)
+            ongeveer = [d for d in (bp["our_detail"] + bp["their_detail"]) if not d.get("exact")]
+            if ongeveer:
+                st.caption(
+                    "\u2248 = benadering: voor die speler is er geen padelstat-meting op of vlak voor de wedstrijddag. "
+                    "Elke verversing van de padelstat bewaart de waarde met de meetdatum (historiek); zodra er "
+                    "metingen zijn van vóór de wedstrijd, wordt dit exact. Een wedstrijd die in de app gepland "
+                    "werd, heeft altijd exacte waarden (momentopname)."
+                )
+            if bp.get("our_avg") is not None and bp.get("their_avg") is not None:
+                st.caption(
+                    f"De winkans volgt uit het verschil van de gemiddelden: wij {bp['our_avg']:.0f} tegen zij "
+                    f"{bp['their_avg']:.0f} per speler."
+                )
+        else:
+            st.caption(
+                (f"Onze spelers: {bp['our_sources'][0]}, {bp['our_sources'][1]} "
+                 f"(gemiddeld {bp['our_avg']:.0f})") if bp.get("our_avg") is not None else "Onze spelers: onbekend"
+            )
+            st.caption(
+                (f"Tegenstander: {bp['their_sources'][0]}, {bp['their_sources'][1]} "
+                 f"(gemiddeld {bp['their_avg']:.0f})") if bp.get("their_avg") is not None else "Tegenstander: onbekend"
+            )
         if form_index:
             vorm_regels = []
             for pid in (p1, p2):
@@ -1339,6 +1524,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
             _rr.render_refresh_block(sel_player_id, sel_naam, gekozen_key, name_lookup, len(boards))
         except Exception as exc:  # noqa: BLE001
             st.caption(f"Het blok om teamgenoten bij te werken kon niet getoond worden: {type(exc).__name__}: {exc}")
+    # PADEL_ANALYSIS_RETRO_PADELSTAT_COMPARE_2026-10-11: de tegenploeg (spelerstabel + vorige ontmoetingen, zoals bij Analyse).
+    if _rov is not None:
+        try:
+            _rov.render_opponent_section(sel_player_id, sel_naam, gekozen_key, pred["boards"], name_lookup, profiles)
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"De tegenploeg kon niet getoond worden: {type(exc).__name__}: {exc}")
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
     n_known_boards = len(boards)
