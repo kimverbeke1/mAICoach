@@ -13,6 +13,27 @@ vereenvoudigde kalibratie, prefetch-scope-fix, tegenstander-lek-fix,
 model-consistentie tussen "Per match" en kalibratie, lazy kalibratie achter
 een knop, live voortgangsweergave per stap, teamgenoten-scan-cache.)
 --------------------------------------------------------------------------
+PADEL_ANALYSIS_RETRO_REFRESH_2026-10-11 (op verzoek van Kim: "bij de nabeschouwing
+zag ik nu maar 1 match van de 4. Het klopt dat er geen 4 konden getoond worden
+want enkel de 1ste rotatie was gespeeld. Maar die 2de match die terug ontbreekt is
+datzelfde probleem van voorheen. Ik had nochtans verversen schema gedaan. Mss moet
+er ergens een apart ververs knop bij nabeschouwing staan om specifiek enkel die
+data te verversen?")
+--------------------------------------------------------------------------
+ROOT CAUSE: "Schema nu verversen" werkt enkel voor de geselecteerde speler. Bij een
+lopende ontmoeting (enkel rotatie 1 gespeeld) staat de andere match van die
+rotatie in de gegevens van twee ploeggenoten die niet met de geselecteerde speler
+(of diens partner) samenspeelden - hun profiel wordt dan nergens vernieuwd.
+FIX: _resolve_encounter_teammates() bepaalt, met de documenten die ze toch al
+laadt, ook het ploeg-roster en wie voor DEZE ontmoeting verouderd is
+(teammate_sync.roster_info_for_encounter, via retro_refresh.compute_and_store).
+render_retrospective_tab() toont onder "Per match" het blok uit retro_refresh.py:
+met een waarschuwing en de namen als er matchen ontbreken (oneven of minder dan 2
+gekende matchen), anders een ingeklapte optie. De knop "Teamgenoten bijwerken"
+werkt precies die spelers bij; "Gegevens opnieuw laden" wist de gecachete
+gegevens zodat de nieuwe matchen verschijnen. Ontbreekt retro_refresh.py of
+teammate_sync.py, dan draait de pagina gewoon door zonder dit blok.
+--------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_PERSISTENT_CACHE_RESTORE_2026-10-05 (op verzoek van
 Kim, met meting: "zit vandaag over 64k [Firestore-reads]. ik had pay as you
 go gedacht maar is raar" + bevestigd: ~10-15x op "Bereken kalibratie"
@@ -138,7 +159,8 @@ lost zichzelf op zodra het token vernieuwd is en de profielen opnieuw
 gescraped zijn. (Aanvulling 2026-10-05: bij Nico Recour bleek een
 herscrape niet te helpen door een bug in het MERGE-VANGNET van
 scrape_player.py - zie PADEL_ANALYSIS_MERGE_VANGNET_KEEPS_NEW_2026-10-05
-in dat bestand.)
+in dat bestand.) [Aanvulling 2026-10-11: dit gat heeft nu een eigen
+ververs-knop, zie PADEL_ANALYSIS_RETRO_REFRESH_2026-10-11 bovenaan.]
 --------------------------------------------------------------------------
 PADEL_ANALYSIS_RETRO_MATCH_WORDING_SCORE_2026-10-05 (op verzoek van Kim: "Je
 spreekt altijd over borden. Vervang borden altijd door 'Matchen' en bord
@@ -191,6 +213,11 @@ except Exception:  # noqa: BLE001  pragma: no cover
             from contextlib import nullcontext
             return nullcontext()
     perf = _PerfNoop()
+# PADEL_ANALYSIS_RETRO_REFRESH_2026-10-11: defensief - zonder dit bestand draait de pagina gewoon door.
+try:
+    import retro_refresh as _rr
+except Exception:  # noqa: BLE001  pragma: no cover
+    _rr = None
 SNAPSHOT_COLLECTION = "lineup_snapshots"
 _CALIBRATION_SETTINGS_COLLECTION = "app_settings"
 _CALIBRATION_SETTINGS_DOC = "retro_calibration"
@@ -327,6 +354,7 @@ def _own_side_component(sel_player_id: str, boards: list) -> set:
 def _resolve_encounter_teammates(
     sel_player_id: str, encounter_key: tuple, profiles: list,
     exclude_ids: Optional[set] = None, max_candidates: int = 200,
+    sel_doc: Optional[dict] = None,
 ) -> Dict[str, dict]:
     """Zoekt, UITSLUITEND voor de ENE ontmoeting `encounter_key` (match_date,
     encounter), welke andere profielen een interclub-matchrecord hebben op
@@ -341,7 +369,11 @@ def _resolve_encounter_teammates(
     dat resterende gat achteraf via _own_side_component().
     Resultaat wordt gecached in st.session_state per (sel_player_id,
     encounter_key) - wisselen tussen weergaven of andere herrenders van
-    DEZELFDE ontmoeting doen deze scan dus maar 1x per sessie."""
+    DEZELFDE ontmoeting doen deze scan dus maar 1x per sessie.
+    PADEL_ANALYSIS_RETRO_REFRESH_2026-10-11: met `sel_doc` (het document van
+    sel_player_id zelf) bepaalt deze functie, met de documenten die ze toch al
+    geladen heeft, ook welke ploegleden voor deze ontmoeting verouderd zijn
+    (retro_refresh.compute_and_store) - voor het blok "Teamgenoten bijwerken"."""
     cache_key = f"retro_teammates_cache_{sel_player_id}_{encounter_key}"
     debug_key = f"retro_teammates_debug_{sel_player_id}_{encounter_key}"
     if cache_key in st.session_state:
@@ -371,6 +403,12 @@ def _resolve_encounter_teammates(
                 if m.get("match_type") == "interclub" and _encounter_key(m) == encounter_key:
                     gevonden[pid] = doc
                     break
+        if _rr is not None:
+            try:
+                profile_ids = {str(p.get("player_id")) for p in profiles if p.get("player_id")}
+                _rr.compute_and_store(sel_player_id, encounter_key, sel_doc, all_docs, profile_ids)
+            except Exception:  # noqa: BLE001
+                pass
     st.session_state[debug_key] = {
         "other_ids_count": len(other_ids), "docs_count": len(all_docs),
         "matched_count": len(gevonden), "error": error_txt,
@@ -1223,6 +1261,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     gekende_tegenstanders = _known_opponent_ids(eigen_boards)
     teammate_docs = _resolve_encounter_teammates(
         sel_player_id, gekozen_key, profiles, exclude_ids=gekende_tegenstanders,
+        sel_doc=docs.get(sel_player_id),
     )
     if teammate_docs:
         st.caption(
@@ -1294,6 +1333,12 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
     st.markdown("#### Per match: voorspeld tegenover echt")
     for bp in pred["boards"]:
         _render_board_row(bp, name_lookup, form_index=form_index)
+    # PADEL_ANALYSIS_RETRO_REFRESH_2026-10-11: ontbreekt er een match, dan staat hier wie bijgewerkt moet worden.
+    if _rr is not None:
+        try:
+            _rr.render_refresh_block(sel_player_id, sel_naam, gekozen_key, name_lookup, len(boards))
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"Het blok om teamgenoten bij te werken kon niet getoond worden: {type(exc).__name__}: {exc}")
     st.divider()
     st.markdown("#### Eindresultaat van de ontmoeting: voorspeld tegenover echt")
     n_known_boards = len(boards)
@@ -1307,7 +1352,7 @@ def render_retrospective_tab(profiles: list, sel_player_id) -> None:
         if actual is not None:
             st.markdown(
                 f"Gekende uitslag: **{actual['score_txt']}** - minstens 1 match ontbreekt nog in de data "
-                "(die speler is nog niet bijgewerkt)."
+                "(die speler is nog niet bijgewerkt - gebruik hierboven 'Teamgenoten bijwerken')."
             )
     else:
         encounter_pp = _combine_boards_to_point_probs([bp["win_probability"] for bp in pred["boards"]])

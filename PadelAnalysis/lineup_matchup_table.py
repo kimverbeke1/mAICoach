@@ -46,6 +46,15 @@ Oplossing:
   3. In "Details" van een groep filtert de tegenstander eveneens exact, voor precies die eigen opstelling.
   4. Elke matchup toont "Kans opstelling %": hoe waarschijnlijk het model de tegenstander-opstelling vindt.
   5. Zware tussenresultaten (universum, gewichten, voorstel, zoekopdrachten) zijn gecachet in st.session_state.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_MATCHUP_FILTER_BOTH_ROTATIONS_2026-10-11 (op verzoek van Kim: "het filtersysteem leek niet direct te werken.
+ook rekening houden dat dat dan voor beide rotaties moet zijn")
+--------------------------------------------------------------------------
+1. "Speelt TEGEN" geldt nu ook voor SPELERS (niet enkel koppels): onze gekozen speler(s)/koppel(s) moeten in een match
+   tegen de gekozen tegenstander-speler(s)/koppel(s) spelen, in rotatie 1 OF in rotatie 2 (matchup_universe.faces_each_other).
+   Het vinkje verschijnt zodra je aan onze kant EN aan hun kant iets kiest.
+2. Traagheid: de schatting van het aantal eigen opstellingen (een opsomming die seconden kan duren) draaide bij elke
+   herlading, dus ook bij elke filterkeuze; ze is nu gecachet. De exacte zoekopdracht toont een spinner.
 """
 import heapq
 import itertools
@@ -434,12 +443,13 @@ def _render_filter_widgets(opts: dict, key_prefix: str, own: bool = True, opp: b
         with c2:
             sel["opp_players"] = _multiselect_safe("Tegenstander-speler(s)", opts["opp_players"], f"{key_prefix}_f_tp", "Alle")
             sel["opp_pairs"] = _multiselect_safe("Tegenstander-koppel", opts["opp_pairs"], f"{key_prefix}_f_tpr", "Alle")
-        if sel["own_pairs"] and sel["opp_pairs"]:
+        if (sel["own_players"] or sel["own_pairs"]) and (sel["opp_players"] or sel["opp_pairs"]):
             sel["vs"] = st.checkbox(
-                "Ons koppel speelt TEGEN dit tegenstander-koppel (in dezelfde match)", value=True,
+                "Onze keuze speelt TEGEN de tegenstander-keuze (in dezelfde match, rotatie 1 of 2)", value=True,
                 key=f"{key_prefix}_f_vs",
-                help="Aan: je ziet enkel opstellingen waarin deze koppels tegen elkaar spelen. Uit: elk koppel moet "
-                     "ergens in de opstelling voorkomen, ook als ze niet tegen elkaar spelen.",
+                help="Aan: je ziet enkel opstellingen waarin onze gekozen speler(s)/koppel(s) in een match tegen de "
+                     "gekozen tegenstander(s) spelen, in rotatie 1 of in rotatie 2. Uit: alles moet ergens in de "
+                     "opstelling voorkomen, ook als ze niet tegen elkaar spelen.",
             )
     elif own:
         c1, c2 = st.columns(2)
@@ -619,13 +629,16 @@ def _render_search_results(results: list, info: dict, name_lookup_global: dict, 
         st.info(
             "Geen enkele combinatie voldoet aan deze filters. Controleer of de gekozen spelers/koppels samen in een "
             "reglementair geldige opstelling kunnen staan (puntengrens, speelbudget per speler)."
+            + (" Tip: het vinkje 'tegen elkaar' is aan - elke gekozen speler/koppel moet dan tegen een gekozen "
+               "tegenstander spelen. Zet het uit als alles gewoon ergens in de opstelling mag voorkomen."
+               if info.get("vs") else "")
         )
         return
     st.caption(
         f"**Exacte zoekopdracht over de volledige set:** {info['n_own']} eigen opstelling(en) x "
         f"{info['n_opp_used']:,} tegenstander-opstelling(en) = **{info['n_computed']:,}** combinaties "
         f"({info['n_hist']} daarvan effectief gespeeld)."
-        + (" Enkel opstellingen waarin je gekozen koppels tegen elkaar spelen." if info.get("vs") else "")
+        + (" Enkel opstellingen waarin je gekozen spelers/koppels tegen elkaar spelen (rotatie 1 of 2)." if info.get("vs") else "")
         + f" (berekend in {info.get('seconds', 0.0):.1f}s)"
     )
     if info.get("truncated"):
@@ -1158,11 +1171,20 @@ def render_opponent_scenario_setup(
                 hk = _opponent_lineup_key_of(hboards)
                 if hk is not None:
                     hist_keys.append(hk)
-            try:
-                n_structs, _tr = _enumerate_rotation_aware_pairings([str(a) for a in available_ids], max_per_player)
-                n_own_est = max(1, int(len(n_structs) * 1.5))
-            except Exception:  # noqa: BLE001
-                n_own_est = 100
+            # Gecachet: deze opsomming kan seconden duren en draaide anders bij ELKE herlading (ook bij elke
+            # filterkeuze) opnieuw. PADEL_ANALYSIS_MATCHUP_COMPLETENESS_2026-10-11.
+            est_key = f"n_own_est_v1_{opp['ploeg_id']}"
+            est_sig = (tuple(sorted(str(a) for a in available_ids)), tuple(sorted(max_per_player.items())))
+            est_cached = st.session_state.get(est_key)
+            if est_cached and est_cached.get("sig") == est_sig:
+                n_own_est = est_cached["n"]
+            else:
+                try:
+                    n_structs, _tr = _enumerate_rotation_aware_pairings([str(a) for a in available_ids], max_per_player)
+                    n_own_est = max(1, int(len(n_structs) * 1.5))
+                except Exception:  # noqa: BLE001
+                    n_own_est = 100
+                st.session_state[est_key] = {"sig": est_sig, "n": n_own_est}
             sel_result = _select_theoretical_lineups(bundle, opp, opp_ctx, n_own_est, hist_keys)
             theoretical_boards = sel_result["boards"]
             universe_weights = sel_result["universe_weights"]
@@ -1259,15 +1281,16 @@ def _run_exact_search(
         return _build_opponent_boards_and_points([list(rot) for rot in lineup], names, ranks, ps)
     def compute(own_pairs, boards):
         return _compute_matchup(own_pairs, boards, synergy_fn, player_ratings, official_ranks_strict, opponent_ratings)
-    results, info = mu.search_exact(
-        own_options=own_options, opp_ids=ctx["ids"], n_rotations=ctx["n_rot"],
-        matches_per_rotation=MATCHES_PER_ROTATION,
-        own_players=sel.get("own_players") or [], own_pair_keys=sel.get("own_pairs") or [],
-        fixed_key=own_fixed_key, must_opp_pairs=must_pairs, must_opp_players=must_players,
-        rank_pairs_fn=rank_fn, weights=setup.get("universe_weights"), hist_info=hist_info,
-        build_boards_fn=build_boards, compute_fn=compute, make_matchup_fn=_make_matchup,
-        cap=_SEARCH_MAX_COMPUTED, require_vs=bool(sel.get("vs")), time_budget=_SEARCH_TIME_BUDGET,
-    )
+    with st.spinner("Zoeken over alle opstellingen (eigen x tegenstander, beide rotaties)..."):
+        results, info = mu.search_exact(
+            own_options=own_options, opp_ids=ctx["ids"], n_rotations=ctx["n_rot"],
+            matches_per_rotation=MATCHES_PER_ROTATION,
+            own_players=sel.get("own_players") or [], own_pair_keys=sel.get("own_pairs") or [],
+            fixed_key=own_fixed_key, must_opp_pairs=must_pairs, must_opp_players=must_players,
+            rank_pairs_fn=rank_fn, weights=setup.get("universe_weights"), hist_info=hist_info,
+            build_boards_fn=build_boards, compute_fn=compute, make_matchup_fn=_make_matchup,
+            cap=_SEARCH_MAX_COMPUTED, require_vs=bool(sel.get("vs")), time_budget=_SEARCH_TIME_BUDGET,
+        )
     if len(store) > 12:
         store.clear()
     store[ck] = (results, info)

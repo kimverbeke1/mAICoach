@@ -236,18 +236,27 @@ def key_matches(key, must_pairs, must_players) -> bool:
         {str(x) for x in (must_players or ())} <= players
 
 
-def faces_each_other(own_ordered_pairs, key, own_pair_sets, opp_pair_sets) -> bool:
-    """Spelen de gekozen eigen koppels TEGEN de gekozen tegenstander-koppels (zelfde match)? Match i van onze
-    opstelling wordt gespeeld tegen match i van hun opstelling (zoals _compute_matchup() ze koppelt). Elk gekozen eigen
-    koppel moet tegen een gekozen tegenstander-koppel spelen, en omgekeerd."""
-    own_hit, opp_hit = set(), set()
+def faces_each_other(own_ordered_pairs, key, own_items, opp_items) -> bool:
+    """Spelen de gekozen eigen speler(s)/koppel(s) TEGEN de gekozen tegenstander-speler(s)/koppel(s)?
+    Match i van onze opstelling wordt gespeeld tegen match i van hun opstelling (zoals _compute_matchup() ze koppelt);
+    de matchen van ALLE rotaties tellen mee (een tegenstander kan in rotatie 1 OF 2 voorkomen).
+    Een 'item' is een verzameling van 1 speler-id (speler) of 2 (koppel). Voorwaarde: elk gekozen eigen item staat in
+    een match waarin ook een gekozen tegenstander-item staat, en omgekeerd."""
+    own_items = [frozenset(str(x) for x in i) for i in (own_items or ())]
+    opp_items = [frozenset(str(x) for x in i) for i in (opp_items or ())]
+    own_ok = [False] * len(own_items)
+    opp_ok = [False] * len(opp_items)
     for op, tp in zip(own_ordered_pairs, key):
-        fo = frozenset(str(x) for x in op)
-        ft = frozenset(str(x) for x in tp)
-        if fo in own_pair_sets and ft in opp_pair_sets:
-            own_hit.add(fo)
-            opp_hit.add(ft)
-    return own_hit == own_pair_sets and opp_hit == opp_pair_sets
+        fo = {str(x) for x in op}
+        ft = {str(x) for x in tp}
+        hit_o = [k for k, it in enumerate(own_items) if it <= fo]
+        hit_t = [k for k, it in enumerate(opp_items) if it <= ft]
+        if hit_o and hit_t:
+            for k in hit_o:
+                own_ok[k] = True
+            for k in hit_t:
+                opp_ok[k] = True
+    return all(own_ok) and all(opp_ok)
 
 
 def search_exact(
@@ -258,8 +267,8 @@ def search_exact(
     """EXACTE zoekopdracht: elke eigen opstelling die aan de eigen filters voldoet x elke tegenstander-opstelling
     die aan de tegenstander-filters voldoet. `hist_info` = {sleutel: info} van EFFECTIEF gespeelde opstellingen
     (zij worden meegenomen als ze aan de filter voldoen, ook als hun volgorde afwijkt).
-    `weights` = {sleutel: kans} (mag None zijn). `require_vs`: de gekozen eigen en tegenstander-koppels moeten TEGEN
-    ELKAAR spelen (dezelfde match); dat maakt de zoekopdracht veel specifieker.
+    `weights` = {sleutel: kans} (mag None zijn). `require_vs`: de gekozen eigen en tegenstander-spelers/koppels moeten TEGEN
+    ELKAAR spelen (dezelfde match, rotatie 1 of 2 - zie faces_each_other()); dat maakt de zoekopdracht veel specifieker.
     Worden het er meer dan `cap` (of duurt het langer dan `time_budget` seconden), dan worden de meest waarschijnlijke tegenstander-opstellingen gehouden en wordt dat in
     de info gemeld (nooit stil afgekapt). Geeft (matchups gesorteerd op verwachte gewonnen matchen, info) terug."""
     own_sel = [o for o in own_options if own_option_matches(o[0], own_players, own_pair_keys, fixed_key)]
@@ -282,13 +291,15 @@ def search_exact(
         entries.append((key, None, lineup, None))
     w = weights or {}
     n_hist = len(hist_canon)
-    own_pair_sets = {frozenset(x for x in pk.split("|")) for pk in (own_pair_keys or ())}
-    opp_pair_sets = {frozenset(str(x) for x in p) for p in (must_opp_pairs or ())}
-    vs_actief = bool(require_vs and own_pair_sets and opp_pair_sets)
+    own_items = [frozenset({str(p)}) for p in (own_players or ())] + \
+        [frozenset(pk.split("|")) for pk in (own_pair_keys or ())]
+    opp_items = [frozenset({str(p)}) for p in (must_opp_players or ())] + \
+        [frozenset(str(x) for x in p) for p in (must_opp_pairs or ())]
+    vs_actief = bool(require_vs and own_items and opp_items)
     relevant = []
     for e in entries:
         opts = own_sel if not vs_actief else [
-            o for o in own_sel if faces_each_other(o[0], e[0], own_pair_sets, opp_pair_sets)
+            o for o in own_sel if faces_each_other(o[0], e[0], own_items, opp_items)
         ]
         if opts:
             relevant.append((e, opts))
