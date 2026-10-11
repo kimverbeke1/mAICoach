@@ -23,6 +23,22 @@ WAAROM EEN STAND NIET KLOPT - vier mogelijke oorzaken, in volgorde van wat de kn
   gemeld; niets automatisch.)
 De diagnose vergelijkt per ploeg het aantal ontmoetingen en de punten van TVL met wat ons schema zegt (consistency_report()).
 De score van een ontmoeting is "matchen / sets / games", telkens thuis - uit (bevestigd, zie speelschema_view.py).
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_RANKING_REFRESH_V2_2026-10-11 (op verzoek van Kim: "ververs rangschikking heeft het probleem opgelost. Ik moest
+wel manueel pagina nog refreshen dus dat zou beter direct geupdate worden [...] ik snap ook niet goed waarom er naast ververs
+rangschikking ook een knop staat 'schema ook bij TVL ophalen'. Vanuit gebruiker standpunt maakt het niet uit van waar het komt
+als het maar klopt. dus 1 knop zou voldoende moeten zijn.")
+--------------------------------------------------------------------------
+1. EEN KNOP. "Schema ook bij TVL ophalen" is weg: de app beslist zelf (diagnose) of het schema bij TVL opgehaald moet worden.
+2. NIET MEER MANUEEL VERVERSEN. De vorige versie wachtte hoogstens 4 minuten op de achtergronddienst, terwijl die (matchdata,
+   padelstat, klassement, teamgenoten en poule-schema van de speler) langer kan duren; daarna werd het resultaat nooit meer
+   ingelezen en moest je zelf de pagina verversen. Nu blokkeert de pagina niet meer: een lopende update wordt elke 8 seconden
+   gecontroleerd (st.fragment(run_every=8)): staat er in de database een schema dat NA de start is weggeschreven, of meldt de
+   achtergronddienst "klaar", dan worden stand en schema opnieuw ingelezen en ververst de hele pagina zichzelf. Na een F5 gaat
+   het wachten door: het startmoment staat in de URL (?rank_wait=...). Na 20 minuten wordt het opgegeven, met een melding.
+3. SNELLER. De update vraagt aan de achtergronddienst enkel het schema (invoer schedule_only, zie scrape-padel.yml): geen
+   padelstat, klassement of teamgenoten. Kent de workflow die invoer nog niet (yml nog niet gecommit), dan weigert GitHub de
+   aanvraag (422) en start de app automatisch de gewone, volledige scrape.
 Zuivere logica (consistency_report) en weergave (render_refresh_block) zijn gescheiden; alle afhankelijkheden van de
 app (poule_ranking, dashboard_common, cloud_helpers, lineup_scout) komen via `adapters`, zodat alles offline te testen
 is (test_ranking_refresh.py).
@@ -157,6 +173,30 @@ def consistency_report(standings: list, fixtures: list) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------------------------- adapters
+_PENDING_MAX_SECONDS = 20 * 60     # zo lang wachten we op een schema-update, daarna geven we het op
+_POLL_SECONDS = 8                  # hoe vaak de wachtende pagina zichzelf controleert
+_QP_KEY = "rank_wait"              # URL-parameter: het startmoment van een lopende update (overleeft F5)
+_SLACK_SECONDS = 5                 # klokverschil tussen deze server en de achtergronddienst
+
+
+def _to_epoch(value) -> Optional[float]:
+    """datetime, ISO-tekst of getal -> seconden sinds 1970 (UTC); onleesbaar -> None."""
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def default_adapters() -> dict:
     """De echte app-afhankelijkheden. Elke ontbrekende module laat enkel de bijhorende mogelijkheid vallen."""
     ad: dict = {
@@ -167,11 +207,13 @@ def default_adapters() -> dict:
         "get_saved_schedule": lambda pid: ([], None),
         "clear_fs_cache": None,
         "clear_known_ctx": None,
+        "clear_fixtures_cache": None,
         "local_available": lambda: False,
         "local_refresh": None,
         "github_configured": lambda: False,
         "trigger_github": None,
-        "track_progress": None,
+        "find_run": None,
+        "run_progress": None,
     }
     try:
         import dashboard_common as dc
@@ -193,12 +235,42 @@ def default_adapters() -> dict:
         ad["github_configured"] = ch.is_github_trigger_configured
 
         def _trigger(pid):
+            """Start de achtergronddienst voor 1 speler. Eerst met 'schedule_only' (enkel het schema, veel sneller); kent de
+            workflow die invoer nog niet (scrape-padel.yml niet bijgewerkt), dan geweigerd (422) en dan de gewone start."""
             t0 = time.time()
-            ok, msg = ch.trigger_github_actions_scrape(player_ids=str(pid), mode="missing")
             wf = ch._get_github_settings()[2] or ch.DEFAULT_WORKFLOW_FILE
-            return ok, msg, wf, t0
+            ok, msg = ch.trigger_github_actions_scrape(
+                workflow_file=wf, inputs={"player_ids": str(pid), "mode": "missing", "schedule_only": "true"},
+            )
+            if ok:
+                return True, msg, wf, t0, True
+            if "geweigerd" in str(msg):
+                t0 = time.time()
+                ok, msg = ch.trigger_github_actions_scrape(player_ids=str(pid), mode="missing", workflow_file=wf)
+                return ok, msg, wf, t0, False
+            return False, msg, wf, t0, False
         ad["trigger_github"] = _trigger
-        ad["track_progress"] = getattr(ch, "_render_tracked_progress", None)
+
+        def _find_run(wf, after_epoch):
+            """ENKELE aanvraag (geen wachtlus): de run van deze workflow die na `after_epoch` gestart is, of None."""
+            import requests
+            token, repo, _w, _r = ch._get_github_settings()
+            if not token:
+                return None
+            resp = requests.get(
+                f"https://api.github.com/repos/{repo}/actions/workflows/{wf}/runs", params={"per_page": 5}, timeout=10,
+                headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+                         "X-GitHub-Api-Version": "2022-11-28"},
+            )
+            if resp.status_code != 200:
+                return None
+            for run in resp.json().get("workflow_runs", []) or []:
+                created = ch._iso_to_epoch(run.get("created_at"))
+                if created is not None and created >= after_epoch - _SLACK_SECONDS:
+                    return run
+            return None
+        ad["find_run"] = _find_run
+        ad["run_progress"] = getattr(ch, "_get_run_step_progress", None)
     except Exception:  # noqa: BLE001
         pass
     return ad
@@ -229,62 +301,75 @@ def _reload_schedule(ad: dict, pid: str):
     return fixtures or [], sched_at
 
 
-def _refresh_schedule(ad: dict, pid: str, reeks_url: str, note: Callable[[str], None]) -> bool:
-    """Haalt het schema opnieuw op bij TVL (oorzaak 3). True als het resultaat klaar is, anders False (met een toelichting)."""
+def _set_wait_param(t0: float) -> None:
+    try:
+        st.query_params[_QP_KEY] = str(int(t0))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_wait_param() -> None:
+    try:
+        if _QP_KEY in st.query_params:
+            del st.query_params[_QP_KEY]
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_wait_param() -> Optional[float]:
+    try:
+        v = st.query_params.get(_QP_KEY)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(v, list):
+        v = v[0] if v else None
+    try:
+        return float(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _start_schedule_update(ad: dict, pid: str, reeks_url: str, note: Callable[[str], None]) -> Optional[dict]:
+    """Start een schema-update (oorzaak 3). Lokaal rechtstreeks (geeft dan None terug: klaar), op de cloud via de
+    achtergronddienst zonder te blokkeren (geeft dan de wachtende toestand terug)."""
     if ad["local_available"]() and callable(ad.get("local_refresh")):
         with st.spinner("Schema ophalen bij TVL..."):
             try:
                 _fx, err, _meta = ad["local_refresh"](pid, reeks_url)
             except Exception as exc:  # noqa: BLE001
                 err = f"{type(exc).__name__}: {exc}"
-        if err:
-            note(f"Schema ophalen bij TVL mislukt: {err}")
-            return False
-        note("Schema opnieuw opgehaald bij TVL.")
-        return True
+        note(f"Schema ophalen bij TVL mislukt: {err}" if err else "Schema opnieuw opgehaald bij TVL.")
+        return None
     if not ad["github_configured"]() or not callable(ad.get("trigger_github")):
         note(
             "Het schema kan niet bij TVL opgehaald worden: er is geen verbinding met de achtergronddienst ingesteld "
             "(Streamlit-secret [github])."
         )
-        return False
-    ok, msg, wf, t0 = ad["trigger_github"](pid)
+        return None
+    ok, msg, wf, t0, schedule_only = ad["trigger_github"](pid)
     if not ok:
         extra = " Controleer of het GitHub-token in de Streamlit-secrets nog geldig is." if "verlopen" in str(msg) else ""
         note(f"Schema-update kon niet gestart worden: {msg}{extra}")
-        return False
-    note("Schema-update gestart op de achtergrond (duurt ongeveer 3 tot 5 minuten).")
-    track = ad.get("track_progress")
-    if not callable(track):
-        note("Klik over enkele minuten opnieuw op 'Ververs rangschikking' om het resultaat in te lezen.")
-        return False
-    placeholder = st.empty()
-    try:
-        outcome = track(wf, t0, placeholder) or {}
-    except Exception as exc:  # noqa: BLE001
-        note(f"De voortgang kon niet gevolgd worden ({type(exc).__name__}). Klik straks opnieuw op 'Ververs rangschikking'.")
-        return False
-    status = outcome.get("status")
-    if status == "success":
-        note("Schema-update klaar.")
-        return True
-    if status == "still_running":
-        note("De schema-update loopt nog. Klik over enkele minuten opnieuw op 'Ververs rangschikking' om het resultaat in te lezen.")
-    elif status == "completed_with_issue":
-        note("De schema-update is afgerond maar mogelijk niet volledig gelukt - het ingelezen schema kan nog oud zijn.")
-    else:
-        note("De voortgang van de schema-update was niet te volgen. Klik straks opnieuw op 'Ververs rangschikking'.")
-    return False
+        return None
+    note(
+        "Schema-update gestart op de achtergrond"
+        + (" (enkel het schema, ongeveer 2 minuten)." if schedule_only else " (de volledige scrape draait mee, dat duurt enkele minuten langer).")
+        + " Deze pagina ververst vanzelf zodra het klaar is."
+    )
+    return {"wf": wf, "t0": t0, "started": t0, "run_id": None, "schedule_only": schedule_only}
 
 
-def run_refresh(ad: dict, pid: str, reeks_url: str, url: str, force_schedule: bool) -> list:
-    """De verversactie. Geeft het logboek [(tijd, tekst)] terug."""
+def run_refresh(ad: dict, pid: str, reeks_url: str, url: str):
+    """De verversactie (1 knop). Geeft (logboek [(tijd, tekst)], wachtende toestand | None) terug.
+    Altijd: caches wissen, stand opnieuw ophalen, schema opnieuw uit de database lezen. Loopt ons schema dan nog achter op
+    TVL, dan start dit ook een schema-update; op de cloud wacht de pagina daar niet op maar controleert ze zichzelf."""
     log: list = []
 
     def note(tekst: str) -> None:
         # Belgische tijd, zoals de ophaaltijd van de stand (de server draait in UTC).
         log.append((ad["format_time"](datetime.now(timezone.utc)), tekst))
 
+    pending = None
     with st.spinner("Rangschikking en schema verversen..."):
         _clear_app_caches(ad, pid)
         data = None
@@ -300,18 +385,104 @@ def run_refresh(ad: dict, pid: str, reeks_url: str, url: str, force_schedule: bo
             else "Er staat (nog) geen schema in de database."
         )
     report = consistency_report((data or {}).get("standings"), fixtures) if data else None
-    if force_schedule or (report and report["needs_schedule_refresh"]):
-        if report and report["needs_schedule_refresh"] and not force_schedule:
-            note(f"TVL telt meer ontmoetingen dan ons schema kent (bij {', '.join(report['schema_achter'])}) - schema wordt opnieuw opgehaald.")
-        if _refresh_schedule(ad, pid, reeks_url, note):
+    if report and report["needs_schedule_refresh"]:
+        note(f"TVL telt meer ontmoetingen dan ons schema kent (bij {', '.join(report['schema_achter'])}) - het schema wordt opnieuw opgehaald.")
+        pending = _start_schedule_update(ad, pid, reeks_url, note)
+        if pending is None:  # lokaal klaar (of niet gelukt): nu opnieuw inlezen
             _clear_app_caches(ad, pid)
-            try:
-                data = ad["load_ranking"](url)
-            except Exception:  # noqa: BLE001
-                pass
-            fixtures, sched_at = _reload_schedule(ad, pid)
-            note(f"Nieuw schema ingelezen (bijgewerkt op {ad['format_time'](sched_at, True)}).")
-    return log
+            _reload_schedule(ad, pid)
+    return log, pending
+
+
+def finish_pending(ad: dict, pid: str, url: str, note_text: str) -> None:
+    """Een schema-update is klaar (of afgebroken): caches wissen, stand en schema opnieuw inlezen, wachttoestand opruimen."""
+    _clear_app_caches(ad, pid)
+    try:
+        ad["load_ranking"](url)
+    except Exception:  # noqa: BLE001
+        pass
+    fixtures, sched_at = _reload_schedule(ad, pid)
+    log = list(st.session_state.get(f"rank_refresh_log_{pid}") or [])
+    log.append((ad["format_time"](datetime.now(timezone.utc)), f"{note_text} (schema bijgewerkt op {ad['format_time'](sched_at, True)})."))
+    st.session_state[f"rank_refresh_log_{pid}"] = log
+    st.session_state.pop(f"rank_refresh_pending_{pid}", None)
+    _clear_wait_param()
+
+
+def _fail_pending(ad: dict, pid: str, url: str, tekst: str) -> None:
+    """De wachttijd is voorbij of de run mislukte: opruimen met een melding (de diagnose toont of het schema nog achterloopt)."""
+    log = list(st.session_state.get(f"rank_refresh_log_{pid}") or [])
+    log.append((ad["format_time"](datetime.now(timezone.utc)), tekst))
+    st.session_state[f"rank_refresh_log_{pid}"] = log
+    st.session_state.pop(f"rank_refresh_pending_{pid}", None)
+    _clear_wait_param()
+
+
+def _pending_body(ad: dict, pid: str, url: str, reeks_url: str) -> None:
+    """Eén controle van een lopende schema-update (draait elke _POLL_SECONDS vanzelf, zonder dat je iets doet):
+    1. staat er in de database al een schema dat NA de start is weggeschreven? Dan is het klaar;
+    2. anders: hoe ver staat de achtergronddienst (voortgangsbalk), en is die al klaar of mislukt?
+    Bij 'klaar' wordt alles opnieuw ingelezen en de hele pagina vernieuwd."""
+    pending = st.session_state.get(f"rank_refresh_pending_{pid}")
+    if not pending:
+        return
+    now = time.time()
+    # 1. is het schema al vernieuwd?
+    fn = ad.get("clear_fs_cache")
+    if callable(fn):
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        _fx, sched_at = ad["get_saved_schedule"](pid)
+    except Exception:  # noqa: BLE001
+        sched_at = None
+    stamp = _to_epoch(sched_at)
+    if stamp is not None and stamp >= pending["t0"] - _SLACK_SECONDS:
+        finish_pending(ad, pid, url, "Schema-update klaar")
+        st.rerun()
+        return
+    # 2. voortgang van de achtergronddienst
+    progress = None
+    try:
+        if pending.get("run_id") is None and callable(ad.get("find_run")):
+            run = ad["find_run"](pending["wf"], pending["t0"])
+            if run:
+                pending["run_id"] = run.get("id")
+                st.session_state[f"rank_refresh_pending_{pid}"] = pending
+        if pending.get("run_id") is not None and callable(ad.get("run_progress")):
+            progress = ad["run_progress"](pending["run_id"])
+    except Exception:  # noqa: BLE001
+        progress = None
+    if progress and progress.get("status") == "completed":
+        if progress.get("conclusion") == "success":
+            finish_pending(ad, pid, url, "Schema-update klaar")
+        else:
+            _fail_pending(ad, pid, url, "De schema-update is afgerond maar niet gelukt - kijk of het schema nu nog achterloopt en probeer opnieuw.")
+        st.rerun()
+        return
+    if now - pending["started"] > _PENDING_MAX_SECONDS:
+        _fail_pending(
+            ad, pid, url,
+            f"De schema-update duurt langer dan {_PENDING_MAX_SECONDS // 60} minuten - er wordt niet langer gewacht. Klik opnieuw op "
+            "'Ververs rangschikking' als het schema nog achterloopt.",
+        )
+        st.rerun()
+        return
+    wacht = int(now - pending["started"])
+    if progress and progress.get("steps_total"):
+        done, total = int(progress.get("steps_done") or 0), int(progress["steps_total"])
+        stap = progress.get("current_step") or ""
+        st.progress(min(1.0, done / total), text=f"Schema-update bezig: stap {min(done + 1, total)} van {total}"
+                    + (f" \u2014 {stap}" if stap else "") + f" ({wacht}s)")
+    else:
+        st.info(f"Schema-update bezig ({wacht}s)... de voortgang is nog niet zichtbaar.")
+    st.caption("Deze pagina ververst vanzelf zodra het klaar is - je hoeft niets te doen.")
+
+
+# Een fragment met een eigen timer: alleen deze controle draait elke _POLL_SECONDS opnieuw, de rest van de pagina niet.
+_pending_polling = st.fragment(run_every=_POLL_SECONDS)(_pending_body)
 
 
 # ---------------------------------------------------------------------------------------------- weergave
@@ -328,7 +499,7 @@ def _render_report(report: Optional[dict], reeks_ok: bool = True) -> None:
     if report["schema_achter"]:
         regels.append(
             f"**Ons schema loopt achter** voor {', '.join(report['schema_achter'])}: TVL telt meer ontmoetingen dan er in "
-            "ons schema gespeeld zijn. Klik op **Ververs rangschikking** om het schema bij TVL op te halen."
+            "ons schema gespeeld zijn. Klik op **Ververs rangschikking**: dan wordt het schema bij TVL opgehaald."
         )
     if report["tvl_achter"]:
         regels.append(
@@ -368,27 +539,45 @@ def _render_report(report: Optional[dict], reeks_ok: bool = True) -> None:
 
 
 def render_refresh_block(player_id, reeks_url: str, adapters: Optional[dict] = None) -> None:
-    """Verversknop + diagnose, bedoeld boven de stand in de sectie "Rangschikking" van page_lineup_lab.py."""
+    """Verversknop + diagnose, bedoeld boven de stand in de sectie "Rangschikking" van page_lineup_lab.py.
+    EEN knop: stand en schema opnieuw inlezen en, als het schema achterloopt, het schema bij TVL ophalen. Dat laatste
+    wordt niet afgewacht met een blokkerende pagina: een lopende update wordt elke paar seconden gecontroleerd en de
+    pagina ververst zichzelf zodra ze klaar is. Na een F5 gaat het wachten gewoon door (de URL onthoudt het startmoment)."""
     ad = adapters or default_adapters()
     pid = str(player_id)
     url = ad["ranking_url"](reeks_url)
     if not url:
         return
     state_key = f"rank_refresh_log_{pid}"
-    c1, c2, _c3 = st.columns([2, 2, 3])
+    pend_key = f"rank_refresh_pending_{pid}"
+    # Na een F5 is de sessie leeg maar de URL onthoudt het startmoment van een lopende update.
+    if st.session_state.get(pend_key) is None:
+        t0 = _read_wait_param()
+        if t0 is not None:
+            if time.time() - t0 > _PENDING_MAX_SECONDS:
+                _clear_wait_param()
+            else:
+                wf = None
+                try:
+                    import cloud_helpers as _ch
+                    wf = _ch._get_github_settings()[2] or _ch.DEFAULT_WORKFLOW_FILE
+                except Exception:  # noqa: BLE001
+                    wf = "scrape-padel.yml"
+                st.session_state[pend_key] = {"wf": wf, "t0": t0, "started": t0, "run_id": None, "schedule_only": None}
+    pending = st.session_state.get(pend_key)
+    c1, _c2 = st.columns([2, 5])
     with c1:
         klik = st.button(
-            "\U0001F504 Ververs rangschikking", key=f"rank_refresh_btn_{pid}", type="primary",
+            "\U0001F504 Ververs rangschikking", key=f"rank_refresh_btn_{pid}", type="primary", disabled=bool(pending),
             help="Haalt de stand (punten) opnieuw op bij TVL en leest het speelschema opnieuw in. Loopt ons schema achter op "
-                 "TVL, dan wordt het schema meteen bij TVL vernieuwd.",
+                 "TVL, dan wordt het schema meteen bij TVL vernieuwd en ververst de pagina zichzelf zodra dat klaar is.",
         )
-    with c2:
-        forceer = st.button(
-            "\U0001F4C5 Schema ook bij TVL ophalen", key=f"rank_refresh_sched_btn_{pid}",
-            help="Haalt het poule-schema ALTIJD opnieuw op bij TVL (ongeveer 3 tot 5 minuten), ook als alles klopt.",
-        )
-    if klik or forceer:
-        st.session_state[state_key] = run_refresh(ad, pid, reeks_url, url, force_schedule=bool(forceer))
+    if klik:
+        log, new_pending = run_refresh(ad, pid, reeks_url, url)
+        st.session_state[state_key] = log
+        if new_pending:
+            st.session_state[pend_key] = new_pending
+            _set_wait_param(new_pending["t0"])
         st.rerun()
     try:
         data = ad["load_ranking"](url)
@@ -410,5 +599,7 @@ def render_refresh_block(player_id, reeks_url: str, adapters: Optional[dict] = N
         st.caption(" \u00b7 ".join(delen) + ".")
     for tijd, tekst in st.session_state.get(state_key) or []:
         st.caption(f"{tijd} \u2013 {tekst}")
+    if st.session_state.get(pend_key):
+        _pending_polling(ad, pid, url, reeks_url)
     if data:
         _render_report(consistency_report(data.get("standings"), fixtures))

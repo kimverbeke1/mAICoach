@@ -341,6 +341,17 @@ module wist de stand-cache, de gedeelde leescache en de in de sessie vastgehoude
 kopie van het schema (vm_fixtures_<speler>, werd nooit vernieuwd), leest het schema
 opnieuw in en start zo nodig een schema-update. Faalt de import of de weergave, dan
 toont de sectie gewoon de stand zoals voorheen.
+--------------------------------------------------------------------------
+PADEL_ANALYSIS_PLAYER_IN_URL_2026-10-11 (op verzoek van Kim: "bij een refresh zie ik wel altijd de spelersnaam wijzigen naar mijn
+naam. dat is niet ok")
+--------------------------------------------------------------------------
+ROOT CAUSE (zelfde patroon als PADEL_ANALYSIS_SECTION_IN_URL_2026-10-04): de gekozen speler ("Toon analyse voor:") leefde enkel
+in st.session_state. Na een paginaherlaad (F5, of een verbroken verbinding tijdens het wachten op een schema-update) start een
+NIEUWE sessie en valt de keuzelijst terug op de standaardspeler (jij). De sectie bleef wel behouden (URL), de speler niet.
+FIX: de gekozen speler staat nu ook in de URL (?lineup_player=<player_id>) en wordt daaruit gelezen bij een nieuwe sessie. De
+startindex wordt 1x per sessie vastgelegd (lineup_lab_default_idx), zodat de widget tijdens de sessie niet van identiteit
+verandert wanneer de URL meebeweegt met je keuze. Onbekende of verouderde waarden in de URL vallen stil terug op de
+standaardspeler.
 """
 import streamlit as st
 from dashboard_common import (
@@ -461,6 +472,24 @@ def _sync_section_to_url(section: str) -> None:
     try:
         if st.query_params.get(_SECTION_QUERY_KEY) != section:
             st.query_params[_SECTION_QUERY_KEY] = section
+    except Exception:  # noqa: BLE001
+        pass
+# PADEL_ANALYSIS_PLAYER_IN_URL_2026-10-11: zie moduledocstring.
+_PLAYER_QUERY_KEY = "lineup_player"
+def _player_id_from_url():
+    """De speler uit de URL (?lineup_player=...), of None. Faalt altijd stil."""
+    try:
+        value = st.query_params.get(_PLAYER_QUERY_KEY)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return str(value) if value else None
+def _sync_player_to_url(player_id) -> None:
+    """Zet de gekozen speler in de URL, zodat een F5 dezelfde speler terugbrengt. Faalt altijd stil."""
+    try:
+        if st.query_params.get(_PLAYER_QUERY_KEY) != str(player_id):
+            st.query_params[_PLAYER_QUERY_KEY] = str(player_id)
     except Exception:  # noqa: BLE001
         pass
 def _fixture_key(fx_bundle: dict):
@@ -986,10 +1015,20 @@ def page_lineup_lab():
     home_id = settings.get("home_player_id")
     home_label = next((lbl for lbl, p in profile_map.items() if p.get("player_id") == home_id), None)
     labels = list(profile_map.keys())
-    default_idx = labels.index(home_label) if home_label in labels else 0
+    # PADEL_ANALYSIS_PLAYER_IN_URL_2026-10-11: de speler uit de URL (na F5) gaat voor de standaardspeler. De startindex wordt
+    # 1x per sessie vastgelegd, zodat de widget niet van identiteit verandert terwijl de URL met je keuze meebeweegt.
+    if "lineup_lab_default_idx" not in st.session_state:
+        url_pid = _player_id_from_url()
+        url_label = next((lbl for lbl, p in profile_map.items() if url_pid and str(p.get("player_id")) == url_pid), None)
+        if url_label is not None:
+            st.session_state["lineup_lab_default_idx"] = labels.index(url_label)
+        else:
+            st.session_state["lineup_lab_default_idx"] = labels.index(home_label) if home_label in labels else 0
+    default_idx = min(st.session_state["lineup_lab_default_idx"], max(0, len(labels) - 1))
     sel_label = st.selectbox("Toon analyse voor:", labels, index=default_idx, key="lineup_lab_sel_player")
     sel_profile = profile_map[sel_label]
     sel_player_id = sel_profile.get("player_id")
+    _sync_player_to_url(sel_player_id)
     # PADEL_ANALYSIS_LAZY_SECTIONS_2026-09-28: st.radio i.p.v. st.tabs -
     # zie de module-docstring. Tabs voeren ELKE tab-body uit bij elke
     # render; met een radio + if/elif draait er nog exact EEN sectie.
