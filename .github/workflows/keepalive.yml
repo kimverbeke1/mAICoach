@@ -1,0 +1,16 @@
+name: Keep mAICoach Awake
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping mAICoach
+        run: |
+          echo "Pinging mAICoach..."
+          curl -L -s -o /dev/null -w "HTTP Status: %{http_code}\n" https://maicoach.streamlit.app/
