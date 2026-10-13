@@ -13,4 +13,4 @@ jobs:
       - name: Ping mAICoach
         run: |
           echo "Pinging mAICoach..."
-          curl -L -s -o /dev/null -w "HTTP Status: %{http_code}\n" https://maicoach.streamlit.app/
+          curl -L -I https://maicoach.streamlit.app/
