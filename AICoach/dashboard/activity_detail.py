@@ -14,11 +14,10 @@ Met 4-6 grafieken onder elkaar was scrollen door de tab daardoor bijna
 onmogelijk.
 
 FIX:
-  - Alle grafieken lopen via charts.show_plotly(): standaard statisch
-    (pagina scrollt gewoon, tikken toont nog steeds de waarden).
-  - Bovenaan de tab "Grafieken" staat EEN "Zoom"-schakelaar voor alle
-    streamgrafieken samen: aan = pannen langs de x-as met 1 vinger plus
-    zoomknoppen. De y-as blijft altijd vast.
+  - Alle grafieken lopen via charts.show_plotly().
+  - MATCHFITAI_CHARTS_TOUCH_2026-10-16: GEEN schakelaar meer. De
+    streamgrafieken verschuif je met 1 vinger en zoom je met knijpen,
+    enkel langs de x-as; de y-as blijft vast.
   - Streamgrafieken tonen bij tikken de waarde op dat punt (hovermode
     "x unified") en hebben elk een unieke key per activiteit.
   - De hartslagzone-grafiek is altijd statisch (zoomen heeft daar geen zin).
@@ -32,7 +31,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from AICoach.activity_comparison import find_similar_activities
-from AICoach.dashboard.charts import show_plotly, zoom_switch
+from AICoach.dashboard.charts import show_plotly
 from AICoach.dashboard.ui_helpers import (
     display_value,
     format_duration,
@@ -158,9 +157,8 @@ def _x_axis(frame: pd.DataFrame):
 
 
 def _render_stream_charts(frame: pd.DataFrame, activity_id: str) -> None:
-    # MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: één schakelaar voor alle
-    # streamgrafieken van deze activiteit.
-    interactive = zoom_switch(f"activity_streams_{activity_id}")
+    # MATCHFITAI_CHARTS_TOUCH_2026-10-16: geen schakelaar meer - altijd
+    # verschuiven (1 vinger) en zoomen (knijpen) langs de x-as.
     x_values, x_title = _x_axis(frame)
     plotted = 0
     for series_key, columns, label, color in STREAM_SERIES:
@@ -189,7 +187,7 @@ def _render_stream_charts(frame: pd.DataFrame, activity_id: str) -> None:
             hovermode="x unified",
             showlegend=False,
         )
-        show_plotly(fig, key=f"activity_stream_{activity_id}_{series_key}", interactive=interactive)
+        show_plotly(fig, key=f"activity_stream_{activity_id}_{series_key}")
         plotted += 1
     if plotted == 0:
         st.info("Geen bruikbare stream-metingen gevonden voor deze activiteit.")

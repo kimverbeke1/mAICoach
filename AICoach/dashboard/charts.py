@@ -54,6 +54,21 @@ render_time_chart() loopt:
   - zoom_switch(key): de "Zoom"-schakelaar (zelfde gedrag als hierboven).
   - show_plotly(fig, key, interactive): zet dragmode/fixedrange correct
     (statisch, of pannen + zoomknoppen) en tekent de grafiek.
+
+--------------------------------------------------------------------------
+MATCHFITAI_CHARTS_TOUCH_2026-10-16 (op verzoek van Kim: "ik wil geen
+zoom-schakelaar, ik wil gewoon de grafiek met mijn vingers verschuiven en
+inzoomen")
+--------------------------------------------------------------------------
+De "Zoom"-schakelaar is verwijderd. Elke grafiek is nu standaard
+interactief:
+  - 1 vinger slepen  = grafiek horizontaal verschuiven (pan).
+  - 2 vingers knijpen / scrollwiel = in- en uitzoomen.
+  - dubbeltikken     = terug naar het volledige beeld.
+Enkel de x-as (tijd/afstand) zoomt en schuift; de y-as past zich niet aan
+een veeg aan, zodat een schuine veeg niet per ongeluk de schaal verandert.
+Gevolg: wie met de vinger OP een grafiek veegt, verschuift de grafiek i.p.v.
+de pagina - scrol de pagina door naast of tussen de grafieken te vegen.
 """
 import numpy as np
 import pandas as pd
@@ -74,7 +89,7 @@ PLOT_CONFIG = {
 # Met de schakelaar "Zoom" aan: pannen + betrouwbare zoomknoppen.
 PLOT_CONFIG_INTERACTIVE = {
     "displaylogo": False,
-    "displayModeBar": True,
+    "displayModeBar": False,
     "scrollZoom": True,
     "doubleClick": "reset",
     "responsive": True,
@@ -328,7 +343,7 @@ def zoom_switch(key, label="Zoom"):
 _zoom_switch = zoom_switch
 
 
-def show_plotly(fig, key=None, interactive=False):
+def show_plotly(fig, key=None, interactive=True):
     """MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: tekent een willekeurige
     Plotly-figuur met mobielvriendelijk gedrag.
 
@@ -363,20 +378,17 @@ def render_time_chart(
     if allow_granularity:
         options = list(GRANULARITY_RULES.keys())
         default_index = options.index(default_granularity) if default_granularity in options else 0
-        left, right = st.columns([3, 1])
-        with left:
-            choice = st.radio(
-                "Weergave",
-                options,
-                index=default_index,
-                horizontal=True,
-                key=f"{key}_granularity",
-                label_visibility="collapsed",
-            )
-        with right:
-            interactive = zoom_switch(key)
-    else:
-        interactive = zoom_switch(key)
+        choice = st.radio(
+            "Weergave",
+            options,
+            index=default_index,
+            horizontal=True,
+            key=f"{key}_granularity",
+            label_visibility="collapsed",
+        )
+    # MATCHFITAI_CHARTS_TOUCH_2026-10-16: altijd verschuiven/zoomen met de
+    # vingers, geen schakelaar meer.
+    interactive = True
 
     code = GRANULARITY_RULES.get(choice) if allow_granularity else None
     plot_df = df
