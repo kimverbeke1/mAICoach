@@ -5,19 +5,22 @@ Firestore-collecties:
   crypto_results/{key}         laatst berekende dip-tabel per combinatie van instellingen (JSON)
   crypto_settings/coins        per munt opgeslagen schijven/winstdoel
 
-Credentials (eerste die werkt):
-  1. firebase_admin is al geïnitialiseerd door een andere pagina (mAICoach/PadelAnalysis) -> hergebruiken
-  2. st.secrets: eerste sectie met 'private_key' en 'client_email' (service account), of een sectie/waarde
-     FIREBASE_SERVICE_ACCOUNT_JSON met de JSON-tekst
-  3. env FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_SERVICE_ACCOUNT / FIREBASE_CREDENTIALS (JSON-tekst),
-     zoals in de GitHub Actions
-  4. env GOOGLE_APPLICATION_CREDENTIALS (pad naar JSON-bestand)
-Zonder credentials werkt alles lokaal, zoals voorheen.  CRYPTO_NO_CLOUD=1 schakelt Firestore uit.
+Welke Firestore-verbinding (eerste die werkt):
+  1. PadelAnalysis/firebase_service.py -> `db`: EXACT dezelfde verbinding (project + database) als
+     PadelAnalysis. Zo schrijft Crypto gegarandeerd in dezelfde, bestaande Firestore-database.
+  2. Service account uit st.secrets of env (FIREBASE_SERVICE_ACCOUNT_JSON eerst; daarna een
+     secrets-sectie met 'private_key' + 'client_email'), zoals in de GitHub Actions.
+  3. env GOOGLE_APPLICATION_CREDENTIALS.
+Bij de EERSTE toegang wordt de verbinding getest met één leesopdracht. Mislukt die (bv. NotFound =
+database bestaat niet in dat project, of geen rechten), dan schakelt de module over op LOKAAL en toont
+status() de reden. De pagina crasht dus nooit meer door Firestore.
+CRYPTO_NO_CLOUD=1 schakelt Firestore volledig uit.
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
 import pandas as pd
@@ -28,14 +31,35 @@ COLL_SETTINGS = "crypto_settings"
 CLOUD_INTERVALS = {"1d"}          # enkel dagdata in Firestore (uur/kwartier is te groot voor één document)
 ENV_JSON_KEYS = ("FIREBASE_SERVICE_ACCOUNT_JSON", "FIREBASE_SERVICE_ACCOUNT", "FIREBASE_CREDENTIALS")
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+_LOCAL_RESULTS = os.path.join(os.environ.get("CRYPTO_CACHE_DIR") or os.path.join(_HERE, "data_cache"), "results")
+
 _db = None
 _err: str | None = None
-_LOCAL_RESULTS = os.path.join(os.environ.get("CRYPTO_CACHE_DIR") or
-                              os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_cache"), "results")
+_via: str = ""
+
+
+def _short(e: Exception) -> str:
+    msg = str(e).split("\n")[0]
+    return f"{type(e).__name__}: {msg[:160]}"
+
+
+def _from_padel():
+    """Hergebruik de Firestore-client van PadelAnalysis (firebase_service.db)."""
+    p = os.path.join(_ROOT, "PadelAnalysis")
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.append(p)
+    import firebase_service as fb  # noqa: PLC0415
+    db = getattr(fb, "db", None)
+    if db is None and hasattr(fb, "get_db"):
+        db = fb.get_db()
+    return db
 
 
 def _service_account() -> dict | None:
-    """Zoek een service-account-dict in st.secrets of in omgevingsvariabelen."""
+    """Service-account-dict uit st.secrets of omgevingsvariabelen. FIREBASE_SERVICE_ACCOUNT_JSON krijgt
+    voorrang op andere secties (er kan ook een sleutel voor een ander Google-project in staan)."""
     try:
         import streamlit as st
         sec = st.secrets
@@ -43,6 +67,9 @@ def _service_account() -> dict | None:
             if k in sec:
                 v = sec[k]
                 return json.loads(v) if isinstance(v, str) else dict(v)
+        for k in ("firebase", "firebase_service_account", "FIREBASE"):
+            if k in sec and hasattr(sec[k], "keys") and "private_key" in sec[k]:
+                return dict(sec[k])
         for k in sec:
             v = sec[k]
             if hasattr(v, "keys") and "private_key" in v and "client_email" in v:
@@ -56,51 +83,73 @@ def _service_account() -> dict | None:
     return None
 
 
+def _from_secrets():
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    if not firebase_admin._apps:
+        info = _service_account()
+        if info:
+            firebase_admin.initialize_app(credentials.Certificate(info))
+        elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            firebase_admin.initialize_app()
+        else:
+            return None
+    return firestore.client()
+
+
 def get_db():
-    """Firestore-client of None (dan lokaal werken). Wordt één keer per proces bepaald."""
-    global _db, _err
+    """Firestore-client of None (dan lokaal werken). Wordt één keer per proces bepaald én getest."""
+    global _db, _err, _via
     if _db is not None or _err is not None:
         return _db
     if os.environ.get("CRYPTO_NO_CLOUD") == "1":
         _err = "uitgeschakeld (CRYPTO_NO_CLOUD=1)"
         return None
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-        if not firebase_admin._apps:
-            info = _service_account()
-            if info:
-                firebase_admin.initialize_app(credentials.Certificate(info))
-            elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-                firebase_admin.initialize_app()
-            else:
-                _err = "geen Firebase-credentials gevonden"
-                return None
-        _db = firestore.client()
-    except Exception as e:  # noqa: BLE001
-        _err = f"{type(e).__name__}: {e}"
-        _db = None
-    return _db
+    errors = []
+    for name, fn in (("PadelAnalysis", _from_padel), ("service account", _from_secrets)):
+        try:
+            db = fn()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {_short(e)}")
+            continue
+        if db is None:
+            continue
+        try:                                   # verbindingstest: één leesopdracht
+            db.collection(COLL_SETTINGS).document("coins").get()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {_short(e)}")
+            continue
+        _db, _via = db, name
+        return _db
+    _err = "; ".join(errors) if errors else "geen Firebase-credentials gevonden"
+    return None
 
 
 def status() -> str:
     get_db()
-    return "☁️ Firestore" if _db is not None else f"💻 lokaal ({_err})"
+    return f"☁️ Firestore (via {_via})" if _db is not None else f"💻 lokaal ({_err})"
 
 
 def is_cloud() -> bool:
     return get_db() is not None
 
 
+def _disable(e: Exception) -> None:
+    """Fout tijdens gebruik: verder lokaal werken i.p.v. de pagina te laten crashen."""
+    global _db, _err
+    _db, _err = None, f"uitgevallen tijdens gebruik: {_short(e)}"
+
+
 # --------------------------------------------------------------------------- candles
 def load_candles(symbol: str, interval: str) -> tuple[pd.DataFrame | None, dict]:
-    """(df, meta) uit Firestore, of (None, {}) als niet beschikbaar."""
+    """(df, meta) uit Firestore, of (None, {}) als Firestore niet beschikbaar is."""
     db = get_db() if interval in CLOUD_INTERVALS else None
     if db is None:
         return None, {}
     try:
         snap = db.collection(COLL_CANDLES).document(f"{symbol}_{interval}").get()
-    except Exception:  # noqa: BLE001 - netwerk/rechten: val terug op lokaal
+    except Exception as e:  # noqa: BLE001
+        _disable(e)
         return None, {}
     if not snap.exists:
         return pd.DataFrame(), {}
@@ -127,18 +176,26 @@ def save_candles(symbol: str, interval: str, df: pd.DataFrame, meta: dict) -> bo
             "checked_from": meta.get("checked_from"), "updated": int(time.time()),
         })
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _disable(e)
         return False
 
 
 # --------------------------------------------------------------------------- resultaten (dip-tabel)
+def _local_result_path(key: str) -> str:
+    return os.path.join(_LOCAL_RESULTS, f"{key}.json")
+
+
 def load_result(key: str) -> dict | None:
     """{'json': <tabel als JSON>, 'ts': epoch, 'source': 'app'|'github'} of None."""
     db = get_db()
     if db is not None:
-        snap = db.collection(COLL_RESULTS).document(key).get()
-        return snap.to_dict() if snap.exists else None
-    p = os.path.join(_LOCAL_RESULTS, f"{key}.json")
+        try:
+            snap = db.collection(COLL_RESULTS).document(key).get()
+            return snap.to_dict() if snap.exists else None
+        except Exception as e:  # noqa: BLE001
+            _disable(e)
+    p = _local_result_path(key)
     if os.path.exists(p):
         with open(p, encoding="utf-8") as fh:
             return json.load(fh)
@@ -149,26 +206,37 @@ def save_result(key: str, table_json: str, source: str = "app") -> None:
     doc = {"json": table_json, "ts": int(time.time()), "source": source}
     db = get_db()
     if db is not None:
-        db.collection(COLL_RESULTS).document(key).set(doc)
-        return
+        try:
+            db.collection(COLL_RESULTS).document(key).set(doc)
+            return
+        except Exception as e:  # noqa: BLE001
+            _disable(e)
     os.makedirs(_LOCAL_RESULTS, exist_ok=True)
-    with open(os.path.join(_LOCAL_RESULTS, f"{key}.json"), "w", encoding="utf-8") as fh:
+    with open(_local_result_path(key), "w", encoding="utf-8") as fh:
         json.dump(doc, fh)
 
 
 # --------------------------------------------------------------------------- instellingen per munt
 def load_settings() -> dict | None:
-    """Dict uit Firestore, of None als er geen Firestore is (dan lokaal bestand gebruiken)."""
+    """Dict uit Firestore, of None als er geen (werkende) Firestore is: dan het lokale bestand gebruiken."""
     db = get_db()
     if db is None:
         return None
-    snap = db.collection(COLL_SETTINGS).document("coins").get()
-    return (snap.to_dict() or {}) if snap.exists else {}
+    try:
+        snap = db.collection(COLL_SETTINGS).document("coins").get()
+        return (snap.to_dict() or {}) if snap.exists else {}
+    except Exception as e:  # noqa: BLE001
+        _disable(e)
+        return None
 
 
 def save_settings(data: dict) -> bool:
     db = get_db()
     if db is None:
         return False
-    db.collection(COLL_SETTINGS).document("coins").set(data)
-    return True
+    try:
+        db.collection(COLL_SETTINGS).document("coins").set(data)
+        return True
+    except Exception as e:  # noqa: BLE001
+        _disable(e)
+        return False
