@@ -69,6 +69,19 @@ Enkel de x-as (tijd/afstand) zoomt en schuift; de y-as past zich niet aan
 een veeg aan, zodat een schuine veeg niet per ongeluk de schaal verandert.
 Gevolg: wie met de vinger OP een grafiek veegt, verschuift de grafiek i.p.v.
 de pagina - scrol de pagina door naast of tussen de grafieken te vegen.
+
+--------------------------------------------------------------------------
+MATCHFITAI_CHARTS_RANGESLIDER_2026-10-16 (gemeld door Kim: "slepen werkt,
+knijpen niet")
+--------------------------------------------------------------------------
+ROOT CAUSE: Plotly.js ondersteunt geen pinch-to-zoom op touchscreens - enkel
+slepen wordt naar een muisbeweging vertaald. scrollZoom geldt alleen voor een
+muiswiel. Er is geen Plotly-instelling die knijpen laat werken.
+FIX: onder elke tijd/afstand-as staat nu een RANGESLIDER (mini-overzicht van
+de volledige grafiek). Zoomen op mobiel: sleep de linker- of rechterrand van
+het venster in de slider naar binnen; verschuiven: sleep het venster zelf of
+sleep zoals voorheen in de grafiek. Dubbeltikken in de grafiek zet alles
+terug. De legende staat onder de slider, zodat ze er niet mee overlapt.
 """
 import numpy as np
 import pandas as pd
@@ -308,12 +321,14 @@ def configure_time_chart(
     fig.update_layout(
         hovermode="x unified",
         dragmode="pan" if interactive else False,
-        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0, title_text=""),
+        legend=dict(orientation="h", yanchor="top", y=-0.32, xanchor="left", x=0, title_text=""),
         margin=dict(l=8, r=8, t=42, b=8),
         uirevision=uirevision,
     )
     fig.update_yaxes(fixedrange=True)
     fig.update_xaxes(fixedrange=not interactive)
+    if interactive:
+        _add_rangeslider(fig)
     if x_start is not None and x_end is not None:
         pad = pd.Timedelta(days=pad_days)
         fig.update_xaxes(range=[x_start - pad, x_end + pad])
@@ -325,6 +340,20 @@ def configure_time_chart(
             line_color="#d62728",
         )
     return fig
+
+
+def _add_rangeslider(fig):
+    """MATCHFITAI_CHARTS_RANGESLIDER_2026-10-16: zoomen op mobiel via de
+    randen van het venster in de slider (Plotly kent geen pinch-zoom)."""
+    fig.update_xaxes(
+        rangeslider=dict(
+            visible=True,
+            thickness=0.12,
+            bgcolor="rgba(128,128,128,0.08)",
+            bordercolor="rgba(128,128,128,0.35)",
+            borderwidth=1,
+        )
+    )
 
 
 def zoom_switch(key, label="Zoom"):
@@ -355,6 +384,12 @@ def show_plotly(fig, key=None, interactive=True):
     fig.update_layout(dragmode="pan" if interactive else False)
     fig.update_yaxes(fixedrange=True)
     fig.update_xaxes(fixedrange=not interactive)
+    if interactive:
+        _add_rangeslider(fig)
+        # Extra hoogte voor de slider, zodat de grafiek zelf niet krimpt.
+        height = fig.layout.height
+        if height:
+            fig.update_layout(height=int(height) + 50)
     config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
     st.plotly_chart(fig, use_container_width=True, config=config, key=key)
 
@@ -456,7 +491,7 @@ def render_time_chart(
     )
     if load_bars:
         fig.update_layout(hovermode="closest", bargap=0)
-    fig.update_layout(height=380)
+    fig.update_layout(height=440, margin=dict(l=8, r=8, t=42, b=70))
 
     config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
 
