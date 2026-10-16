@@ -2,10 +2,10 @@
 #
 # Nachtelijke update voor de Crypto-pagina (mAICoach-app):
 #   1. haalt voor de Coinbase-top (standaard 150 munten, zie REFRESH_TOP_N in crypto_scan.py) enkel de
-#      NIEUWE dagkoersen op en bewaart ze in Firestore (collectie crypto_candles). Zo staat de data ook
-#      klaar als je overdag meer munten kiest dan de standaard;
-#   2. rekent de dip-tabel met de standaardinstellingen van de app (standaard top 75) en bewaart die in
+#      NIEUWE dagkoersen op en bewaart ze in Firestore (collectie crypto_candles);
+#   2. rekent de dip-tabel met de standaardinstellingen van de app voor AL die munten en bewaart die in
 #      Firestore (collectie crypto_results), zodat de app bij het openen meteen een tabel toont.
+#      Munten met te weinig historiek staan er ook in, als '⚪ Te weinig data'.
 #
 # De eerste run duurt het langst (5 jaar historiek per munt); daarna komt er per munt maar één dag bij.
 # De log toont de duur per munt.
@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_top_n:
-        description: "Aantal munten waarvoor koersdata ververst wordt (leeg = standaard 150)"
+        description: "Aantal munten waarvoor koersdata ververst wordt (leeg = standaard 150; minimum = tabel)"
         required: false
         default: ""
 

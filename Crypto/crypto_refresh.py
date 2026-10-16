@@ -1,13 +1,13 @@
 """Nachtelijke update (GitHub Actions):
-  1. koersdata bijwerken in Firestore voor de Coinbase-top REFRESH_TOP_N (standaard 150) munten,
-     zodat de data ook klaarstaat als je overdag meer munten kiest dan de standaard;
-  2. de dip-tabel met de standaardinstellingen (DEFAULT_CFG, standaard top 75) berekenen en bewaren,
-     zodat de app bij het openen meteen een tabel heeft.
+  1. koersdata bijwerken in Firestore voor de Coinbase-top REFRESH_TOP_N (standaard 150) munten;
+  2. de dip-tabel met de standaardinstellingen (DEFAULT_CFG) voor AL die munten berekenen en bewaren,
+     zodat de app bij het openen meteen een tabel heeft. Munten met te weinig historiek komen er ook in,
+     als '⚪ Te weinig data'.
 
 Lokaal testen:  python crypto_refresh.py            (vanuit de map Crypto)
 Omgeving:       FIREBASE_SERVICE_ACCOUNT_JSON  (JSON-tekst van de service account)
                 CRYPTO_REQUIRE_CLOUD=1         -> stop met fout als Firestore niet bereikbaar is
-                CRYPTO_REFRESH_TOP_N=200       -> optioneel ander aantal munten voor de koersdata
+                CRYPTO_REFRESH_TOP_N=200       -> optioneel meer munten enkel voor de koersdata
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def main() -> int:
     n_data = _refresh_n(cfg["top_n"])
     tops = get_top_symbols(n_data)                    # gesorteerd op 24u-volume
     table_syms = set(tops["symbol"].head(cfg["top_n"]))
-    print(f"Koersdata voor {len(tops)} munten, tabel voor de top {len(table_syms)}.")
+    print(f"Koersdata voor {len(tops)} munten, tabel voor {len(table_syms)} munten.")
 
     @lru_cache(maxsize=None)
     def klines(sym: str):
@@ -61,7 +61,7 @@ def main() -> int:
         fixed = None if tr is None else {"tranches": list(tr), "target": tg}
         return walk_forward(klines(sym), cfg["lookback"], cfg["fee"], cfg["min_trades"], cfg["test_frac"], fixed)
 
-    rows, errors = [], 0
+    rows, errors, short = [], 0, 0
     t_data = t_calc = 0.0
     for i, (sym, cbt) in enumerate(zip(tops["symbol"], tops["coinbase"]), 1):
         try:
@@ -75,7 +75,12 @@ def main() -> int:
                 r = scan_coin(sym, cbt, cfg, settings, klines(sym), opt_fn, wf_fn)
                 d_calc = time.time() - s1
                 t_calc += d_calc
-                msg += f"  berekening {d_calc:5.1f}s  {'ok' if r else 'te weinig data'}"
+                if r and r.get("too_short"):
+                    short += 1
+                    state = "te weinig data (toch in de tabel)"
+                else:
+                    state = "ok" if r else "geen data"
+                msg += f"  berekening {d_calc:5.1f}s  {state}"
                 if r:
                     rows.append(r)
             else:
@@ -90,7 +95,7 @@ def main() -> int:
     t = finalize(rows)
     key = cfg_key(cfg, settings)
     store.save_result(key, table_to_json(t), source="github")
-    print(f"Tabel bewaard onder {key}: {len(t)} munten, {errors} fouten. "
+    print(f"Tabel bewaard onder {key}: {len(t)} munten ({short} met te weinig data), {errors} fouten. "
           f"Tijd: data {t_data:.0f}s, berekening {t_calc:.0f}s, totaal {time.time() - t0:.0f}s.")
     print(t[["symbol", "verdict", "now"]].to_string(index=False))
     return 0

@@ -1,7 +1,12 @@
 """Dip-kopen: koop als de koers diep onder het hoogste punt van de voorbije periode staat,
 verkoop bij een vast winstdoel. Ondersteunt meerdere schijven (bedragen) per munt,
 een automatische zoektocht naar de historisch beste koopdrempel/winstdoel per munt,
-en een betrouwbaarheidstest (training/test) van dat optimum."""
+en een betrouwbaarheidstest (training/test) van dat optimum.
+
+SNELHEID_2026-10-16: de optimalisatie (12 koopdrempels × 8 winstdoelen, en nog eens in de training van de
+betrouwbaarheidstest) gebruikt een snelle variant van de backtest voor één schijf (_fast_single). Die rekent
+met gewone Python-lijsten en houdt enkel bij wat de optimalisatie nodig heeft (trades, eindwaarde, laagste
+waarde). De uitkomst is identiek aan ladder_backtest met één schijf, maar ±5 à 10× sneller."""
 from __future__ import annotations
 
 import numpy as np
@@ -198,6 +203,29 @@ def ladder_backtest(df: pd.DataFrame, lookback: int, tranches: list[tuple[float,
     }
 
 
+def _fast_single(high: list, close: list, dd: list, start: int, dip: float, target: float, fee: float,
+                 capital: float = 1000.0) -> tuple[int, float, float]:
+    """Snelle backtest voor ÉÉN schijf (zelfde regels als ladder_backtest).
+    Geeft (afgeronde trades, eindwaarde, laagste waarde). Lijsten i.p.v. numpy = veel snellere lus."""
+    cash, qty, entry, sells, lowest = capital, 0.0, 0.0, 0, capital
+    thr, up, keep = -dip, 1.0 + target, 1.0 - fee
+    for i in range(start, len(close)):
+        if qty > 0.0:
+            tp = entry * up
+            if high[i] >= tp:
+                cash = qty * tp * keep
+                qty = 0.0
+                sells += 1
+        elif dd[i] <= thr and cash > 0.0:          # NaN <= x is False, net als in ladder_backtest
+            qty = cash / close[i] * keep
+            entry = close[i]
+            cash = 0.0
+        eq = cash + qty * close[i]
+        if eq < lowest:
+            lowest = eq
+    return sells, cash + qty * close[-1], lowest
+
+
 # --------------------------------------------------------------------------- optimalisatie
 def optimize_dip(df: pd.DataFrame, lookback: int, fee: float, min_trades: int = 3) -> dict:
     """
@@ -206,21 +234,29 @@ def optimize_dip(df: pd.DataFrame, lookback: int, fee: float, min_trades: int = 
     Zo wint geen toevalstreffer, maar een zone waar het resultaat stabiel goed is.
     Combinaties met minder dan `min_trades` afgeronde trades tellen niet mee (te weinig bewijs).
     """
-    dd = drawdown_series(df, lookback).to_numpy(float)
+    close_a = df["close"].to_numpy(float)
+    n = len(close_a)
+    start = lookback - 1
     nd, nt = len(DIP_GRID), len(TARGET_GRID)
     ann = np.full((nd, nt), np.nan)
     trades = np.zeros((nd, nt), dtype=int)
     rows = []
-    for a, dip in enumerate(DIP_GRID):
-        for b, tgt in enumerate(TARGET_GRID):
-            bt = ladder_backtest(df, lookback, [(float(dip), 1000.0)], float(tgt), fee, dd=dd)
-            if not bt.get("valid"):
-                continue
-            trades[a, b] = bt["dip_round_trips"]
-            if bt["dip_round_trips"] >= min_trades and not np.isnan(bt["dip_annual_pct"]):
-                ann[a, b] = bt["dip_annual_pct"]
-            rows.append({"dip_pct": dip * 100, "target_pct": tgt * 100, "annual_pct": bt["dip_annual_pct"],
-                         "trades": bt["dip_round_trips"], "lowest_pct": bt["lowest_pct"]})
+    if n - start >= 30:
+        high = df["high"].to_numpy(float).tolist()
+        close = close_a.tolist()
+        dd = drawdown_series(df, lookback).to_numpy(float).tolist()
+        years = (n - start) / 365
+        cap = 1000.0
+        for a, dip in enumerate(DIP_GRID):
+            for b, tgt in enumerate(TARGET_GRID):
+                sells, final, lowest = _fast_single(high, close, dd, start, float(dip), float(tgt), fee, cap)
+                total = final / cap - 1
+                annual = ((1 + total) ** (1 / years) - 1) * 100 if years >= 0.5 and total > -1 else np.nan
+                trades[a, b] = sells
+                if sells >= min_trades and not np.isnan(annual):
+                    ann[a, b] = annual
+                rows.append({"dip_pct": dip * 100, "target_pct": tgt * 100, "annual_pct": annual,
+                             "trades": sells, "lowest_pct": (lowest / cap - 1) * 100})
 
     robust = np.full_like(ann, np.nan)
     for a in range(nd):
@@ -229,7 +265,7 @@ def optimize_dip(df: pd.DataFrame, lookback: int, fee: float, min_trades: int = 
                 block = ann[max(0, a - 1):a + 2, max(0, b - 1):b + 2]
                 robust[a, b] = np.nanmedian(block)
 
-    grid = pd.DataFrame(rows)
+    grid = pd.DataFrame(rows, columns=["dip_pct", "target_pct", "annual_pct", "trades", "lowest_pct"])
     if np.all(np.isnan(robust)):
         return {"found": False, "grid": grid,
                 "reason": f"geen enkele combinatie met minstens {min_trades} afgeronde trades"}

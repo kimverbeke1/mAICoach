@@ -13,22 +13,42 @@ import pandas as pd
 
 from crypto_dip import dip_stats, ladder_backtest
 
-# Standaardinstellingen = de standaardwaarden van de app. De nachtelijke update rekent hiermee,
-# zodat de app bij het openen meteen een kant-en-klare tabel vindt. ÉÉN plek: de app leest
+# Standaardinstellingen = de standaardwaarden van de app. De nachtelijke update rekent hiermee voor ALLE
+# munten (top 150), zodat de app bij het openen meteen een kant-en-klare tabel vindt. ÉÉN plek: de app leest
 # zijn standaardwaarden ook hier, zodat de opslag-sleutel altijd overeenkomt.
-DEFAULT_CFG = dict(days=5 * 365 + 5, lookback=365, amount=1000.0, optimal=True, dip=0.50, target=0.30,
-                   maxwait=365, min_trades=3, fee=(0.25 + 0.0) / 100, top_n=75, test_frac=0.30, only_cb=True)
-# De nachtelijke update ververst de KOERSDATA voor meer munten dan de tabel, zodat de data al klaarstaat
-# als je overdag een groter aantal kiest (dan moet enkel de berekening nog lopen).
+DEFAULT_CFG = dict(days=5 * 365 + 5, lookback=365, amount=5000.0, optimal=True, dip=0.50, target=0.30,
+                   maxwait=365, min_trades=3, fee=(0.25 + 0.0) / 100, top_n=150, test_frac=0.30, only_cb=True)
+# Koersdata die de nachtelijke update ververst (= ook de munten van de standaardtabel).
 REFRESH_TOP_N = 150
+# Wijzig je in de app een instelling, dan rekent de app opnieuw voor zoveel munten (instelbaar in de app).
+LIVE_TOP_N = 75
+# Instellingen die bepalen of de app de nachtelijke tabel kan gebruiken (top_n hoort er niet bij).
+DEFAULT_KEYS = ("days", "lookback", "amount", "optimal", "dip", "target", "maxwait", "min_trades", "fee",
+                "test_frac", "only_cb")
 
 TEST_COLS = ["wf_params", "train_period", "train_annual_txt", "test_period", "test_status", "test_trades",
              "test_pct", "test_annual_txt", "test_eur", "test_bh_pct"]
 EXTRA_TEST_COLS = ["test_buys", "test_open_days", "test_open_pct", "train_buys",
                    "train_annual_pct", "test_annual_pct", "train_short", "test_short"]
+# Kolommen die er altijd moeten zijn, ook als (bijna) alle munten te weinig data hebben.
+BASE_COLS = ["source", "dip_pct", "target_pct", "current_dd_pct", "to_zone_pct", "history_days", "episodes",
+             "ep_text", "episode_hit_pct", "hit_rate_pct", "median_days", "median_further_pct",
+             "worst_further_pct", "still_open", "bt_start", "bt_years", "dip_round_trips", "avg_hold_days",
+             "capital", "final_eur", "profit_eur", "dip_annual_pct", "buy_hold_eur", "invested_pct",
+             "lowest_eur", "open_cost_eur", "open_value_eur", "open_result_eur", "open_result_pct",
+             "too_short", "need_days"]
 
 OptimizeFn = Callable[[str], dict]                                  # sym -> optimize_dip-resultaat
 WalkFn = Callable[[str, "tuple | None", "float | None"], dict]      # sym, fixed_tranches, fixed_target -> wf
+
+
+def is_default(cfg: dict) -> bool:
+    """True als alle instellingen (behalve het aantal munten) gelijk zijn aan de standaard."""
+    def same(a, b):
+        if isinstance(a, float) or isinstance(b, float):
+            return round(float(a), 6) == round(float(b), 6)
+        return a == b
+    return all(same(cfg.get(k), DEFAULT_CFG[k]) for k in DEFAULT_KEYS)
 
 
 def cfg_key(cfg: dict, settings: dict) -> str:
@@ -36,6 +56,14 @@ def cfg_key(cfg: dict, settings: dict) -> str:
     norm = {k: (round(v, 6) if isinstance(v, float) else v) for k, v in sorted(cfg.items())}
     raw = json.dumps({"cfg": norm, "settings": settings}, sort_keys=True, default=str)
     return "dip_" + hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+def _flag(v) -> bool:
+    """Robuust ja/nee voor kolommen met True/NaN (ook na JSON)."""
+    try:
+        return v is not None and not pd.isna(v) and bool(v)
+    except (TypeError, ValueError):
+        return False
 
 
 def fmt_annual(v, short: bool = False) -> str:
@@ -101,6 +129,14 @@ def test_fields(sym: str, cfg: dict, p: dict, wf_fn: WalkFn) -> dict:
 
 def verdict(r: pd.Series) -> tuple[str, str, int]:
     """(label, reden, sorteer-rang). Beoordeelt enkel op de TEST (data die de instelling niet zag)."""
+    if _flag(r.get("too_short")):
+        n, need = r.get("history_days"), r.get("need_days")
+        n_txt = "?" if pd.isna(n) else f"{n:.0f}"
+        need_txt = "?" if pd.isna(need) else f"{need:.0f}"
+        return ("⚪ Te weinig data",
+                f"Maar {n_txt} dagen koersdata; met deze referentieperiode zijn er minstens {need_txt} nodig. "
+                "Kies bij ⚙️ Instellingen een kortere referentie (bv. 90 of 180 dagen) om deze munt mee te nemen.", 5)
+
     status, tp, bh = r.get("test_status"), r.get("test_pct"), r.get("test_bh_pct")
     train, trades, eps = r.get("train_annual_pct"), r.get("test_trades"), r.get("episodes")
     open_days, med, tr_buys = r.get("test_open_days"), r.get("median_days"), r.get("train_buys")
@@ -161,7 +197,7 @@ def sort_table(t: pd.DataFrame) -> pd.DataFrame:
     """Op oordeel; binnen een oordeel op Test %/jaar, maar bij een korte test (< 0,5 jaar) op Test totaal %."""
     ann = pd.to_numeric(t["test_annual_pct"], errors="coerce")
     tot = pd.to_numeric(t["test_pct"], errors="coerce")
-    short = t["test_short"].map(lambda x: bool(x) if pd.notna(x) else False)
+    short = t["test_short"].map(_flag)
     t = t.copy()
     t["_k1"] = ann.where(~short, tot).fillna(-1e9)
     t["_k2"] = pd.to_numeric(t["dip_annual_pct"], errors="coerce").fillna(-1e9)
@@ -170,19 +206,26 @@ def sort_table(t: pd.DataFrame) -> pd.DataFrame:
 
 def scan_coin(sym: str, cbt: str, cfg: dict, settings: dict, df: pd.DataFrame,
               optimize_fn: OptimizeFn, wf_fn: WalkFn) -> dict | None:
-    """Eén tabelrij. None als er te weinig data is."""
-    if len(df) < cfg["lookback"] + 60:
+    """Eén tabelrij. Munten met te weinig data krijgen een rij '⚪ Te weinig data' (zodat ze zichtbaar blijven
+    en meetellen zodra je een kortere referentie kiest). None enkel als er helemaal geen data is."""
+    if df is None or len(df) == 0:
         return None
+    need = cfg["lookback"] + 60
+    if len(df) < need:
+        return {"symbol": sym, "coinbase": cbt, "history_days": len(df), "need_days": need, "too_short": True,
+                "capital": cfg["amount"], "source": "–"}
     p = coin_params(sym, cfg, settings, optimize_fn)
     first_dip = min(d for d, _ in p["tranches"])
     s = dip_stats(df, cfg["lookback"], first_dip, p["target"], cfg["maxwait"])
     bt = ladder_backtest(df, cfg["lookback"], p["tranches"], p["target"], cfg["fee"])
     if not bt.get("valid"):
-        return None
+        return {"symbol": sym, "coinbase": cbt, "history_days": len(df), "need_days": need, "too_short": True,
+                "capital": cfg["amount"], "source": "–"}
     s.update({k: v for k, v in bt.items() if k not in ("trades", "equity", "valid")})
     s.update({
         "symbol": sym, "coinbase": cbt, "source": p["source"], "dip_pct": first_dip * 100,
-        "target_pct": p["target"] * 100, "n_tranches": len(p["tranches"]),
+        "target_pct": p["target"] * 100, "n_tranches": len(p["tranches"]), "too_short": False,
+        "need_days": need,
         "to_zone_pct": max(0.0, (1 - (1 - first_dip) / (1 + s["current_dd_pct"] / 100)) * 100)
         if not np.isnan(s["current_dd_pct"]) else np.nan,
         "ep_text": f"{s['episodes_hit']} van {s['episodes_eval']}" if s["episodes_eval"] else "–",
@@ -194,7 +237,7 @@ def scan_coin(sym: str, cbt: str, cfg: dict, settings: dict, df: pd.DataFrame,
 
 def finalize(rows: list[dict]) -> pd.DataFrame:
     t = pd.DataFrame(rows)
-    for c in TEST_COLS + EXTRA_TEST_COLS:
+    for c in BASE_COLS + TEST_COLS + EXTRA_TEST_COLS:
         if c not in t:
             t[c] = np.nan
     v = t.apply(verdict, axis=1, result_type="expand")

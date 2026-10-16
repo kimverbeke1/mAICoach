@@ -5,7 +5,10 @@ Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py).
 
 De dip-resultaten worden standaard getoond als een COMPACTE, SORTEERBARE tabel (±12 kerncijfers). Klik een
 rij aan: daaronder verschijnen alle cijfers van die munt in kleine tabellen (kenmerk · waarde · uitleg) en een
-knop voor de grafiek. Filters: enkel in koopzone, per oordeel. De brede tabel blijft beschikbaar."""
+knop voor de grafiek. Filters: enkel in koopzone, per oordeel. De brede tabel blijft beschikbaar.
+
+Standaardinstellingen -> de app toont de nachtelijke tabel (alle 150 munten, meteen klaar).
+Gewijzigde instellingen -> de app rekent zelf, voor de top 'Aantal munten bij herberekening' (standaard 75)."""
 from __future__ import annotations
 
 import sys
@@ -27,21 +30,21 @@ from crypto_backtest import grid_backtest
 from crypto_data import base_of, coinbase_label, get_coinbase_products, get_klines, get_top_symbols, quote_of
 from crypto_dip import dip_stats, drawdown_series, ladder_backtest, optimize_dip, top_info, walk_forward
 from crypto_metrics import add_score, compute_metrics, zigzag_pivots
-from crypto_scan import (DEFAULT_CFG, TEST_COLS, cfg_key, coin_params, finalize, fmt_annual, scan_coin, setup_text,
-                         table_from_json, table_to_json, wf_for)
+from crypto_scan import (DEFAULT_CFG, LIVE_TOP_N, TEST_COLS, cfg_key, coin_params, finalize, fmt_annual,
+                         is_default, scan_coin, setup_text, table_from_json, table_to_json, wf_for)
 from crypto_texts import C_HELP, DIP_EXAMPLES, DIP_EXPLAIN, GENERAL, H, VERDICT_RULES
 
 K = "crypto_"  # prefix voor session_state-keys (geen botsing met mAICoach/PadelAnalysis)
 
 FEE_PRESETS = {"Coinbase (intro)": (0.25, 0.50), "Eigen waarden": None}
 VERDICT_LABELS = ["🟢 Interessant", "🟡 Twijfel", "⚪ Niets bewezen", "⚪ Niet getest",
-                  "🟠 Onder water", "🔴 Niet interessant"]
+                  "🟠 Onder water", "🔴 Niet interessant", "⚪ Te weinig data"]
 VERDICT_COLORS = {"🟢": "#d4f4dd", "🟡": "#fff1b8", "⚪": "#e9ecef", "🟠": "#ffe0b8", "🔴": "#f8d7da"}
 DEFAULT_COINS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 VIEW_OPTIONS = ["Compacte tabel (sorteerbaar)", "Brede tabel (alle kolommen)"]
 
 # --------------------------------------------------------------------------- weergave per munt
-# Korte uitleg per kenmerk (één regel) voor de openklapbare kaarten. De volledige uitleg blijft in de
+# Korte uitleg per kenmerk (één regel) voor de detail-tabellen per munt. De volledige uitleg blijft in de
 # tooltips van de brede tabel en in 'ℹ️ Uitleg kolommen'.
 SHORT = {
     "coinbase": "Markten waarin je de munt op Coinbase kan kopen.",
@@ -127,7 +130,7 @@ def _isna(v) -> bool:
 
 
 def _fmt(v, kind: str) -> str:
-    """Waarde leesbaar voor de kaart. Leeg/NaN = '–'."""
+    """Waarde leesbaar voor de detail-tabellen. Leeg/NaN = '–'."""
     if _isna(v) or (isinstance(v, str) and not v.strip()):
         return "–"
     try:
@@ -174,18 +177,6 @@ def _md_table(r: pd.Series, items, show_help: bool) -> str:
     return "\n".join(lines)
 
 
-def _card_label(r: pd.Series) -> str:
-    """Eén regel per munt: oordeel · munt · koopzone · test · eindwaarde."""
-    parts = [str(r.get("verdict", "")), f"**{r['symbol']}**", str(r.get("now", "–"))]
-    if not _isna(r.get("test_pct")):
-        parts.append(f"test {float(r['test_pct']):+.0f}%")
-    if not _isna(r.get("capital")) and not _isna(r.get("final_eur")):
-        parts.append(f"€ {float(r['capital']):,.0f} → € {float(r['final_eur']):,.0f}".replace(",", "."))
-    if not _isna(r.get("dip_pct")) and not _isna(r.get("target_pct")):
-        parts.append(f"koop −{float(r['dip_pct']):.0f}% / verkoop +{float(r['target_pct']):.0f}%")
-    return "  ·  ".join(parts)
-
-
 def _render_coin_sections(r: pd.Series, cfg: dict, show_help: bool) -> None:
     """Alle cijfers van één munt in kleine tabellen (kenmerk · waarde · uitleg), twee kolommen naast elkaar."""
     if isinstance(r.get("why"), str) and r["why"]:
@@ -199,12 +190,12 @@ def _render_coin_sections(r: pd.Series, cfg: dict, show_help: bool) -> None:
 
 
 def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
-    """Smalle tabel met de kerncijfers, alle kolommen numeriek waar mogelijk (zodat sorteren klopt)."""
+    """Smalle tabel met de kerncijfers, numerieke kolommen numeriek (zodat sorteren klopt)."""
     def num(c):
         return pd.to_numeric(t[c], errors="coerce").values if c in t.columns else [float("nan")] * len(t)
 
     short = t["test_short"] if "test_short" in t.columns else [False] * len(t)
-    v = pd.DataFrame({
+    return pd.DataFrame({
         "nr": range(1, len(t) + 1),
         "symbol": t["symbol"].values,
         "verdict": t["verdict"].values,
@@ -219,8 +210,8 @@ def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
         "dip_annual_pct": num("dip_annual_pct"),
         "episodes": num("episodes"),
         "worst_further_pct": num("worst_further_pct"),
+        "history_days": num("history_days"),
     })
-    return v
 
 
 def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
@@ -251,6 +242,7 @@ def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
             "dip_annual_pct": _num("%/jaar", "%.1f", "dip_annual_pct"),
             "episodes": _num("Keren in zone", "%d", "episodes"),
             "worst_further_pct": _num("Ergste verdere daling %", "%.0f", "worst_further_pct"),
+            "history_days": _num("Dagen data", "%d", "history_days"),
         })
     rows_sel = []
     try:
@@ -451,36 +443,52 @@ def _grid_tab(cfg: dict) -> None:
 
 # --------------------------------------------------------------------------- dip: instellingen
 def _dip_settings(fee: float) -> dict:
+    """Standaardwaarden komen uit DEFAULT_CFG (crypto_scan.py), zodat ze altijd overeenkomen met de nachtelijke
+    tabel. Zijn alle instellingen standaard, dan gebruikt de app die tabel (alle munten); anders rekent hij zelf
+    voor de top 'Aantal munten bij herberekening'."""
+    d = DEFAULT_CFG
     with st.expander("⚙️ Instellingen dip-kopen", expanded=False):
-        top_n = st.slider("Aantal munten (Coinbase-top op 24u-volume)", 10, 150, int(DEFAULT_CFG["top_n"]), 5,
-                          key=K + "dip_topn",
-                          help=f"Standaard {DEFAULT_CFG['top_n']}: die tabel wordt elke nacht vooraf berekend en "
-                               "staat dus meteen klaar. De nachtelijke update ververst de koersdata voor een ruimere "
-                               "top; kies je hier een ander aantal, dan moet enkel de berekening nog lopen.")
         c1, c2, c3 = st.columns(3)
-        years = c1.selectbox("Historiek (jaar)", [2, 3, 5, 8], index=2, key=K + "dip_years", help=H["dip_hist"])
-        lookback = c2.selectbox("Referentie 'hoogste punt' (dagen)", [90, 180, 365, 730], index=2,
+        years_opts = [2, 3, 5, 8]
+        years = c1.selectbox("Historiek (jaar)", years_opts, index=years_opts.index(round(d["days"] / 365)),
+                             key=K + "dip_years", help=H["dip_hist"])
+        lb_opts = [90, 180, 365, 730]
+        lookback = c2.selectbox("Referentie 'hoogste punt' (dagen)", lb_opts, index=lb_opts.index(d["lookback"]),
                                 key=K + "dip_lookback", help=H["lookback"])
-        amount = c3.number_input("Bedrag per munt (€)", 50.0, 1_000_000.0, 1000.0, 100.0,
+        amount = c3.number_input("Bedrag per munt (€)", 50.0, 1_000_000.0, float(d["amount"]), 500.0,
                                  key=K + "dip_amount", help=H["amount"])
         mode = st.radio("Koopdrempel en winstdoel", ["Optimaal per munt (automatisch)", "Vaste waarden"],
-                        horizontal=True, key=K + "dip_mode", help=H["mode"])
+                        index=0 if d["optimal"] else 1, horizontal=True, key=K + "dip_mode", help=H["mode"])
         fixed = mode.startswith("Vaste")
         c4, c5, c6, c7 = st.columns(4)
-        dip = c4.number_input("Koopdrempel: daling %", 10.0, 95.0, 50.0, 5.0, key=K + "dip_dip",
+        dip = c4.number_input("Koopdrempel: daling %", 10.0, 95.0, float(d["dip"] * 100), 5.0, key=K + "dip_dip",
                               help=H["dip"], disabled=not fixed) / 100
-        target = c5.number_input("Winstdoel %", 2.0, 300.0, 30.0, 5.0, key=K + "dip_target",
+        target = c5.number_input("Winstdoel %", 2.0, 300.0, float(d["target"] * 100), 5.0, key=K + "dip_target",
                                  help=H["target"], disabled=not fixed) / 100
-        maxwait = c6.selectbox("Max. wachttijd voor 'kans' (dagen)", [30, 90, 180, 365, 730], index=3,
+        mw_opts = [30, 90, 180, 365, 730]
+        maxwait = c6.selectbox("Max. wachttijd voor 'kans' (dagen)", mw_opts, index=mw_opts.index(d["maxwait"]),
                                key=K + "dip_maxwait", help=H["maxwait"])
-        min_trades = c7.number_input("Min. trades (optimalisatie)", 1, 20, 3, 1, key=K + "dip_mintrades",
-                                     help=H["min_trades"])
+        min_trades = c7.number_input("Min. trades (optimalisatie)", 1, 20, int(d["min_trades"]), 1,
+                                     key=K + "dip_mintrades", help=H["min_trades"])
+        tf_opts = [0, 20, 25, 30, 40, 50]
         test_frac = st.select_slider("🧪 Betrouwbaarheidstest: testperiode = laatste … van de backtest",
-                                     options=[0, 20, 25, 30, 40, 50], value=30, format_func=lambda v: f"{v}%",
-                                     key=K + "dip_testfrac", help=H["test_frac"]) / 100
-    return dict(days=years * 365 + 5, lookback=lookback, amount=amount, optimal=not fixed, dip=dip,
-                target=target, maxwait=maxwait, min_trades=int(min_trades), fee=fee, top_n=top_n,
-                test_frac=test_frac, only_cb=True)
+                                     options=tf_opts, value=int(round(d["test_frac"] * 100)),
+                                     format_func=lambda v: f"{v}%", key=K + "dip_testfrac",
+                                     help=H["test_frac"]) / 100
+        live_n = st.slider(
+            "Aantal munten bij herberekening (gewijzigde instellingen)", 10, int(d["top_n"]), LIVE_TOP_N, 5,
+            key=K + "dip_live_n",
+            help=f"Met de standaardinstellingen toont de app de nachtelijke tabel met alle {d['top_n']} munten "
+                 "(meteen klaar). Wijzig je een instelling hierboven, dan rekent de app zelf, voor de top van dit "
+                 "aantal munten (op 24u-volume).")
+    cfg = dict(days=years * 365 + 5, lookback=lookback, amount=amount, optimal=not fixed, dip=dip,
+               target=target, maxwait=maxwait, min_trades=int(min_trades), fee=fee, top_n=d["top_n"],
+               test_frac=test_frac, only_cb=True)
+    std = is_default(cfg)
+    if not std:
+        cfg["top_n"] = int(live_n)
+    st.session_state[K + "dip_is_default"] = std
+    return cfg
 
 
 def _coin_params(sym: str, cfg: dict) -> dict:
@@ -515,9 +523,10 @@ def _compute_table(cfg: dict) -> pd.DataFrame | None:
         return None
     settings = cs.load_all()
     rows = []
+    t0 = time.time()
     bar = st.progress(0.0, text="Dagdata bijwerken" + (" en optimaliseren…" if cfg["optimal"] else "…"))
     for i, (sym, cbt) in enumerate(zip(tops["symbol"], tops["coinbase"])):
-        bar.progress((i + 1) / len(tops), text=f"{sym} ({i + 1}/{len(tops)})")
+        bar.progress((i + 1) / len(tops), text=f"{sym} ({i + 1}/{len(tops)}) · {time.time() - t0:.0f} s")
         try:
             df = _klines(sym, "1d", cfg["days"])
             r = scan_coin(sym, cbt, cfg, settings, df, _opt_fn(cfg), _wf_fn(cfg))
@@ -526,12 +535,21 @@ def _compute_table(cfg: dict) -> pd.DataFrame | None:
         except Exception as e:
             st.warning(f"{sym}: {e}")
     bar.empty()
+    st.session_state[K + "dip_calc_s"] = time.time() - t0
     return finalize(rows) if rows else None
 
 
 # --------------------------------------------------------------------------- dip: tabel
 def _dip_tab(cfg: dict) -> None:
     st.caption("Lange termijn: koop enkel na een diepe val, verkoop bij een winstdoel en wacht zo lang als nodig.")
+    std = st.session_state.get(K + "dip_is_default", True)
+    if std:
+        st.caption(f"⚙️ Standaardinstellingen: de tabel met alle **{cfg['top_n']} munten** wordt elke nacht "
+                   "berekend en staat meteen klaar.")
+    else:
+        st.caption(f"⚙️ Aangepaste instellingen: de app rekent zelf, voor de top **{cfg['top_n']} munten** "
+                   "(instelbaar bij *Aantal munten bij herberekening*). Zet alles terug op de standaard om de "
+                   "nachtelijke tabel met alle munten te zien.")
     key = cfg_key(cfg, cs.load_all())
 
     # Bewaard resultaat voor deze instellingen? Eén keer per sleutel per sessie opzoeken.
@@ -563,15 +581,18 @@ def _dip_tab(cfg: dict) -> None:
 
     t = st.session_state.get(K + "dip_table")
     if t is None:
-        st.info("Nog geen resultaat voor deze instellingen. Druk op **Dip-analyse uitvoeren**: de eerste keer "
-                "duurt dit wat langer (koersdata + optimalisatie per munt); daarna wordt alles bewaard.")
+        st.info("Nog geen resultaat voor deze instellingen. Druk op **Dip-analyse uitvoeren**; het resultaat "
+                "wordt daarna bewaard.")
         return
     meta = st.session_state.get(K + "dip_meta") or {}
     if meta.get("ts"):
         when = pd.Timestamp(meta["ts"], unit="s", tz="UTC").tz_convert("Europe/Brussels")
         age_h = (time.time() - meta["ts"]) / 3600
         src = {"github": "nachtelijke update", "app": "in de app"}.get(meta.get("source"), meta.get("source"))
-        txt = f"📦 Berekend op **{when:%d/%m/%Y %H:%M}** ({src})."
+        txt = f"📦 Berekend op **{when:%d/%m/%Y %H:%M}** ({src}), {len(t)} munten."
+        calc_s = st.session_state.get(K + "dip_calc_s")
+        if calc_s and meta.get("source") == "app":
+            txt += f" Rekentijd {calc_s:.0f} s."
         if age_h > 36:
             txt += " ⚠️ Ouder dan anderhalve dag: druk op *Opnieuw berekenen* voor de recentste koersen."
         st.caption(txt)
@@ -582,7 +603,10 @@ def _dip_tab(cfg: dict) -> None:
     st.markdown("**Oordeel:** " + "  ·  ".join(f"{lbl} **{counts[lbl]}**" for lbl in VERDICT_LABELS
                                                   if lbl in counts.index)
                 + "  — gesorteerd van interessant naar niet interessant.")
-    in_zone = t[t["to_zone_pct"] <= 0]
+    if "⚪ Te weinig data" in counts.index:
+        st.caption("⚪ *Te weinig data* = jonge munt met minder historiek dan de referentieperiode + 60 dagen. "
+                   "Kies bij ⚙️ Instellingen een kortere referentie (bv. 90 of 180 dagen) om ze mee te rekenen.")
+    in_zone = t[pd.to_numeric(t["to_zone_pct"], errors="coerce") <= 0]
     if in_zone.empty:
         st.caption("Geen enkele munt staat nu in haar koopzone.")
     else:
@@ -636,7 +660,8 @@ def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
     st.caption("👆 **Klik een rij aan** om de grafiek en details van die munt (historisch én nu) direct onder de tabel te zien.")
     event = st.dataframe(
         _style_verdict(view), hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key=K + f"dip_df_{st.session_state.get(K + 'dip_ver', 0)}_{len(t)}",
+        on_select="rerun", selection_mode="single-row",
+        key=K + f"dip_df_{st.session_state.get(K + 'dip_ver', 0)}_{len(t)}",
         column_config={
             "symbol": "Munt",
             "coinbase": st.column_config.TextColumn("Coinbase", help=C_HELP["coinbase"]),
@@ -846,7 +871,8 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
         st.error(f"Kon data niet ophalen: {e}")
         return
     if len(df) < cfg["lookback"] + 60:
-        st.warning("Te weinig historiek voor deze referentieperiode.")
+        st.warning(f"Te weinig historiek voor deze referentieperiode: {len(df)} dagen data, minstens "
+                   f"{cfg['lookback'] + 60} nodig. Kies bij ⚙️ Instellingen een kortere referentie.")
         return
 
     opt = _optimize(sym, cfg["days"], cfg["lookback"], cfg["fee"], cfg["min_trades"])
