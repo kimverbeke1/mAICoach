@@ -1,4 +1,28 @@
 # -*- coding: utf-8 -*-
+# activity_detail.py
+"""Detailweergave van één activiteit in mAICoach.
+
+--------------------------------------------------------------------------
+MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16 (op verzoek van Kim: zoomen en
+scrollen op mobiel werkt ook in de activiteitsgrafieken niet goed)
+--------------------------------------------------------------------------
+ROOT CAUSE: de streamgrafieken (hartslag, tempo, hoogte, cadans, vermogen,
+temperatuur) en de hartslagzone-grafiek kregen enkel PLOT_CONFIG mee, maar
+geen dragmode. Plotly staat dan standaard op box-zoom: op een touchscreen
+start elke veeg over een grafiek een zoomkader i.p.v. de pagina te scrollen.
+Met 4-6 grafieken onder elkaar was scrollen door de tab daardoor bijna
+onmogelijk.
+
+FIX:
+  - Alle grafieken lopen via charts.show_plotly(): standaard statisch
+    (pagina scrollt gewoon, tikken toont nog steeds de waarden).
+  - Bovenaan de tab "Grafieken" staat EEN "Zoom"-schakelaar voor alle
+    streamgrafieken samen: aan = pannen langs de x-as met 1 vinger plus
+    zoomknoppen. De y-as blijft altijd vast.
+  - Streamgrafieken tonen bij tikken de waarde op dat punt (hovermode
+    "x unified") en hebben elk een unieke key per activiteit.
+  - De hartslagzone-grafiek is altijd statisch (zoomen heeft daar geen zin).
+"""
 from __future__ import annotations
 
 import io
@@ -8,7 +32,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from AICoach.activity_comparison import find_similar_activities
-from AICoach.dashboard.charts import PLOT_CONFIG
+from AICoach.dashboard.charts import show_plotly, zoom_switch
 from AICoach.dashboard.ui_helpers import (
     display_value,
     format_duration,
@@ -116,7 +140,6 @@ def _fetch_stream_frame(activity_id: str) -> pd.DataFrame:
             return pd.read_csv(io.StringIO(csv_text))
     except Exception:  # noqa: BLE001
         pass
-
     return pd.DataFrame()
 
 
@@ -134,10 +157,13 @@ def _x_axis(frame: pd.DataFrame):
     return pd.Series(range(len(frame))), "Meetpunt"
 
 
-def _render_stream_charts(frame: pd.DataFrame) -> None:
+def _render_stream_charts(frame: pd.DataFrame, activity_id: str) -> None:
+    # MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: één schakelaar voor alle
+    # streamgrafieken van deze activiteit.
+    interactive = zoom_switch(f"activity_streams_{activity_id}")
     x_values, x_title = _x_axis(frame)
     plotted = 0
-    for _, columns, label, color in STREAM_SERIES:
+    for series_key, columns, label, color in STREAM_SERIES:
         col = _first_column(frame, columns)
         if col is None:
             continue
@@ -152,6 +178,7 @@ def _render_stream_charts(frame: pd.DataFrame) -> None:
                 line=dict(width=2, color=color),
                 name=label,
                 connectgaps=True,
+                hovertemplate="%{x:.1f}<br>" + label + ": %{y:.1f}<extra></extra>",
             )
         )
         fig.update_layout(
@@ -159,8 +186,10 @@ def _render_stream_charts(frame: pd.DataFrame) -> None:
             xaxis_title=x_title,
             margin=dict(l=8, r=8, t=36, b=8),
             height=260,
+            hovermode="x unified",
+            showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+        show_plotly(fig, key=f"activity_stream_{activity_id}_{series_key}", interactive=interactive)
         plotted += 1
     if plotted == 0:
         st.info("Geen bruikbare stream-metingen gevonden voor deze activiteit.")
@@ -186,6 +215,7 @@ def _render_map(frame: pd.DataFrame) -> bool:
 
 
 def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) -> None:
+    activity_id = str(selected.get("id") or "")
     st.markdown(f"## {selected['name']} | {selected['date'].strftime('%d/%m/%Y')}")
     st.caption(f"{selected['sport']} | {selected.get('device') or 'Onbekend apparaat'}")
 
@@ -216,7 +246,7 @@ def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) ->
         st.metric("Gemiddeld tempo", format_pace(selected.get("distance_km"), selected.get("duration_min")))
 
     with st.spinner("Streamdata laden..."):
-        stream_frame = _fetch_stream_frame(str(selected.get("id") or ""))
+        stream_frame = _fetch_stream_frame(activity_id)
 
     detail_tabs = st.tabs([
         "Grafieken",
@@ -230,7 +260,7 @@ def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) ->
         if stream_frame.empty:
             st.info("Geen streamdata beschikbaar voor deze activiteit.")
         else:
-            _render_stream_charts(stream_frame)
+            _render_stream_charts(stream_frame, activity_id)
 
     with detail_tabs[1]:
         if stream_frame.empty or not _render_map(stream_frame):
@@ -259,7 +289,8 @@ def render_activity_detail(selected: pd.Series, all_activities: pd.DataFrame) ->
                 text=zone_df["Aandeel (%)"], texttemplate="%{text:.1f}%",
             ))
             fig.update_layout(title="Tijd per hartslagzone", yaxis_title="Aandeel (%)", margin=dict(l=8, r=8, t=42, b=8))
-            st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+            # MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: altijd statisch.
+            show_plotly(fig, key=f"activity_zones_{activity_id}", interactive=False)
 
     with detail_tabs[3]:
         details = []

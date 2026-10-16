@@ -40,6 +40,20 @@ van de bars", "trendlijn voor fitness" en "zones voor form")
        -30 tot -10  Optimaal
        < -30        Hoog risico
      De y-as toont altijd minstens -35 tot +15, zodat de zones zichtbaar zijn.
+
+--------------------------------------------------------------------------
+MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16 (op verzoek van Kim: dezelfde
+mobiele zoomproblemen in de activiteitsdetails)
+--------------------------------------------------------------------------
+ROOT CAUSE: activity_detail.py bouwt eigen grafieken en gaf enkel
+PLOT_CONFIG mee. Een Plotly-figuur zonder expliciete dragmode staat
+standaard op "zoom" (box-zoom): op een touchscreen start elke veeg dan een
+zoomkader i.p.v. de pagina te laten scrollen.
+FIX: twee gedeelde, publieke helpers voor ELKE grafiek die niet via
+render_time_chart() loopt:
+  - zoom_switch(key): de "Zoom"-schakelaar (zelfde gedrag als hierboven).
+  - show_plotly(fig, key, interactive): zet dragmode/fixedrange correct
+    (statisch, of pannen + zoomknoppen) en tekent de grafiek.
 """
 import numpy as np
 import pandas as pd
@@ -298,14 +312,36 @@ def configure_time_chart(
     return fig
 
 
-def _zoom_switch(key):
+def zoom_switch(key, label="Zoom"):
+    """De "Zoom"-schakelaar. Uit (standaard): statisch, de pagina scrollt
+    normaal op mobiel. Aan: pannen met 1 vinger plus zoomknoppen."""
     switch = getattr(st, "toggle", None) or st.checkbox
     return switch(
-        "Zoom",
+        label,
         value=False,
         key=f"{key}_interactive",
         help="Aan: pannen en zoomknoppen. Uit: de pagina scrollt normaal op mobiel.",
     )
+
+
+# Oude interne naam, blijft werken.
+_zoom_switch = zoom_switch
+
+
+def show_plotly(fig, key=None, interactive=False):
+    """MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: tekent een willekeurige
+    Plotly-figuur met mobielvriendelijk gedrag.
+
+    interactive=False: geen pan/zoom (dragmode=False, vaste assen) -> de
+    pagina scrollt gewoon, tikken toont nog steeds de waarden.
+    interactive=True: x-as pannen met 1 vinger + zoomknoppen; de y-as blijft
+    vast zodat een verticale veeg niet per ongeluk de schaal verandert.
+    """
+    fig.update_layout(dragmode="pan" if interactive else False)
+    fig.update_yaxes(fixedrange=True)
+    fig.update_xaxes(fixedrange=not interactive)
+    config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
+    st.plotly_chart(fig, use_container_width=True, config=config, key=key)
 
 
 def render_time_chart(
@@ -338,9 +374,9 @@ def render_time_chart(
                 label_visibility="collapsed",
             )
         with right:
-            interactive = _zoom_switch(key)
+            interactive = zoom_switch(key)
     else:
-        interactive = _zoom_switch(key)
+        interactive = zoom_switch(key)
 
     code = GRANULARITY_RULES.get(choice) if allow_granularity else None
     plot_df = df
