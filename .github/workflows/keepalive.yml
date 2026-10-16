@@ -2,15 +2,27 @@ name: Keep mAICoach Awake
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
-  workflow_dispatch:
+    - cron: "0 */6 * * *"   # every 6 hours (UTC)
+  workflow_dispatch:         # manual trigger
 
 jobs:
-  ping:
+  keepalive:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Ping mAICoach
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Selenium
         run: |
-          echo "Pinging mAICoach..."
-          curl -L -I https://maicoach.streamlit.app/
+          python -m pip install --upgrade pip
+          pip install selenium
+
+      - name: Wake mAICoach
+        run: python keepalive_wake.py
