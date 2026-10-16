@@ -3,9 +3,9 @@
 - Lokaal los te draaien via:  streamlit run crypto_app.py
 Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py).
 
-De dip-resultaten worden standaard getoond als een lijst van OPENKLAPBARE munten: één regel per munt met
-de kern (oordeel, koopzone, test, eindwaarde) en, opengeklapt, alle cijfers gegroepeerd in kleine tabellen
-(kenmerk · waarde · uitleg). De brede tabel blijft beschikbaar via 'Weergave'."""
+De dip-resultaten worden standaard getoond als een COMPACTE, SORTEERBARE tabel (±12 kerncijfers). Klik een
+rij aan: daaronder verschijnen alle cijfers van die munt in kleine tabellen (kenmerk · waarde · uitleg) en een
+knop voor de grafiek. Filters: enkel in koopzone, per oordeel. De brede tabel blijft beschikbaar."""
 from __future__ import annotations
 
 import sys
@@ -27,7 +27,7 @@ from crypto_backtest import grid_backtest
 from crypto_data import base_of, coinbase_label, get_coinbase_products, get_klines, get_top_symbols, quote_of
 from crypto_dip import dip_stats, drawdown_series, ladder_backtest, optimize_dip, top_info, walk_forward
 from crypto_metrics import add_score, compute_metrics, zigzag_pivots
-from crypto_scan import (TEST_COLS, cfg_key, coin_params, finalize, fmt_annual, scan_coin, setup_text,
+from crypto_scan import (DEFAULT_CFG, TEST_COLS, cfg_key, coin_params, finalize, fmt_annual, scan_coin, setup_text,
                          table_from_json, table_to_json, wf_for)
 from crypto_texts import C_HELP, DIP_EXAMPLES, DIP_EXPLAIN, GENERAL, H, VERDICT_RULES
 
@@ -38,7 +38,7 @@ VERDICT_LABELS = ["🟢 Interessant", "🟡 Twijfel", "⚪ Niets bewezen", "⚪ 
                   "🟠 Onder water", "🔴 Niet interessant"]
 VERDICT_COLORS = {"🟢": "#d4f4dd", "🟡": "#fff1b8", "⚪": "#e9ecef", "🟠": "#ffe0b8", "🔴": "#f8d7da"}
 DEFAULT_COINS = ["BTC-USD", "ETH-USD", "SOL-USD"]
-VIEW_OPTIONS = ["Per munt (openklapbaar)", "Brede tabel"]
+VIEW_OPTIONS = ["Compacte tabel (sorteerbaar)", "Brede tabel (alle kolommen)"]
 
 # --------------------------------------------------------------------------- weergave per munt
 # Korte uitleg per kenmerk (één regel) voor de openklapbare kaarten. De volledige uitleg blijft in de
@@ -186,32 +186,109 @@ def _card_label(r: pd.Series) -> str:
     return "  ·  ".join(parts)
 
 
-def _render_cards(t: pd.DataFrame, cfg: dict) -> None:
-    """Lijst van openklapbare munten. De grafiek van een munt verschijnt direct onder die munt."""
-    show_help = st.toggle("Toon uitleg per kenmerk", value=True, key=K + "card_help")
-    st.caption("👇 Klap een munt open voor alle cijfers. Met **📈 Grafiek en details** verschijnt de grafiek "
-               "direct onder die munt.")
-    sel = st.session_state.get(K + "card_sel")
-    for idx, (_, r) in enumerate(t.iterrows()):
-        sym = r["symbol"]
-        with st.expander(_card_label(r), expanded=(sel == sym)):
-            if isinstance(r.get("why"), str) and r["why"]:
-                st.markdown(f"**Waarom dit oordeel:** {r['why']}")
-            sections = [s for s in SECTIONS if not (s[0].startswith("🧪") and cfg["test_frac"] <= 0)]
-            left, right = st.columns(2)
-            for i, (title, items) in enumerate(sections):
-                with (left if i % 2 == 0 else right):
-                    st.markdown(f"**{title}**")
-                    st.markdown(_md_table(r, items, show_help))
-            is_open = sel == sym
-            if st.button("✖️ Grafiek sluiten" if is_open else "📈 Grafiek en details",
-                         key=K + f"card_btn_{idx}_{sym}"):
-                st.session_state[K + "card_sel"] = None if is_open else sym
-                st.rerun()
-        if sel == sym:
-            with st.container(border=True):
-                st.subheader(f"📈 {sym}: historiek en nu")
-                _detail_dip(sym, cfg, kp="card_")
+def _render_coin_sections(r: pd.Series, cfg: dict, show_help: bool) -> None:
+    """Alle cijfers van één munt in kleine tabellen (kenmerk · waarde · uitleg), twee kolommen naast elkaar."""
+    if isinstance(r.get("why"), str) and r["why"]:
+        st.markdown(f"**{r.get('verdict', '')} – waarom:** {r['why']}")
+    sections = [s for s in SECTIONS if not (s[0].startswith("🧪") and cfg["test_frac"] <= 0)]
+    left, right = st.columns(2)
+    for i, (title, items) in enumerate(sections):
+        with (left if i % 2 == 0 else right):
+            st.markdown(f"**{title}**")
+            st.markdown(_md_table(r, items, show_help))
+
+
+def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
+    """Smalle tabel met de kerncijfers, alle kolommen numeriek waar mogelijk (zodat sorteren klopt)."""
+    def num(c):
+        return pd.to_numeric(t[c], errors="coerce").values if c in t.columns else [float("nan")] * len(t)
+
+    short = t["test_short"] if "test_short" in t.columns else [False] * len(t)
+    v = pd.DataFrame({
+        "nr": range(1, len(t) + 1),
+        "symbol": t["symbol"].values,
+        "verdict": t["verdict"].values,
+        "now": t["now"].values,
+        "to_zone_pct": num("to_zone_pct"),
+        "rule": [f"−{d:.0f}% / +{g:.0f}%" if not (_isna(d) or _isna(g)) else "–"
+                 for d, g in zip(t["dip_pct"], t["target_pct"])],
+        "test_pct": num("test_pct"),
+        "test_annual_pct": num("test_annual_pct"),
+        "test_short": [bool(x) if not _isna(x) else False for x in short],
+        "final_eur": num("final_eur"),
+        "dip_annual_pct": num("dip_annual_pct"),
+        "episodes": num("episodes"),
+        "worst_further_pct": num("worst_further_pct"),
+    })
+    return v
+
+
+def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
+    """Compacte, sorteerbare tabel. Klik een rij aan voor alle cijfers en de grafiek van die munt."""
+    view = _compact_view(t)
+    st.caption("↕️ Klik op een kolomkop om te sorteren (kolom **#** = standaardvolgorde, beste oordeel bovenaan). "
+               "👆 Klik een rij aan voor alle cijfers en de grafiek van die munt.")
+    event = st.dataframe(
+        _style_verdict(view), hide_index=True, width="stretch",
+        on_select="rerun", selection_mode="single-row",
+        key=K + f"cmp_df_{st.session_state.get(K + 'dip_ver', 0)}_{len(view)}",
+        column_config={
+            "nr": st.column_config.NumberColumn("#", format="%d", width="small",
+                                                help="Standaardvolgorde: op oordeel, dan op testresultaat. "
+                                                     "Klik hier om terug te sorteren."),
+            "symbol": st.column_config.TextColumn("Munt"),
+            "verdict": st.column_config.TextColumn("Oordeel", help=C_HELP["verdict"]),
+            "now": st.column_config.TextColumn("Koopzone nu?", help=C_HELP["now"]),
+            "to_zone_pct": _num("Nog te zakken %", "%.0f", "to_zone_pct"),
+            "rule": st.column_config.TextColumn("Koop / verkoop", help="Koopdrempel (onder de top) / winstdoel "
+                                                "(boven de aankoopprijs) die voor deze munt gebruikt worden."),
+            "test_pct": _num("🧪 Test totaal %", "%.0f", "test_pct"),
+            "test_annual_pct": _num("🧪 Test %/jaar", "%.0f", "test_annual_pct"),
+            "test_short": st.column_config.CheckboxColumn(
+                "⚠️ Korte test", help="Testperiode korter dan een half jaar: 'Test %/jaar' is dan omgerekend en "
+                                     "onbetrouwbaar. Kijk naar 'Test totaal %'."),
+            "final_eur": st.column_config.NumberColumn("Eindwaarde €", format="€ %.0f", help=C_HELP["final_eur"]),
+            "dip_annual_pct": _num("%/jaar", "%.1f", "dip_annual_pct"),
+            "episodes": _num("Keren in zone", "%d", "episodes"),
+            "worst_further_pct": _num("Ergste verdere daling %", "%.0f", "worst_further_pct"),
+        })
+    rows_sel = []
+    try:
+        rows_sel = list(event.selection.rows)
+    except Exception:
+        pass
+    if not rows_sel or rows_sel[0] >= len(t):
+        return
+    r = t.iloc[rows_sel[0]]
+    sym = r["symbol"]
+    with st.container(border=True):
+        st.subheader(f"🔎 {sym}")
+        show_help = st.toggle("Toon uitleg per kenmerk", value=True, key=K + "card_help")
+        _render_coin_sections(r, cfg, show_help)
+        graph_open = st.session_state.get(K + "card_sel") == sym
+        if st.button("✖️ Grafiek sluiten" if graph_open else "📈 Grafiek en details (schijven, top, koopniveau)",
+                     key=K + f"cmp_btn_{sym}"):
+            st.session_state[K + "card_sel"] = None if graph_open else sym
+            st.rerun()
+        if graph_open:
+            st.divider()
+            _detail_dip(sym, cfg, kp="card_")
+
+
+def _filter_table(t: pd.DataFrame) -> pd.DataFrame:
+    """Snelle filters boven de tabel: enkel in koopzone, en per oordeel."""
+    present = [lbl for lbl in VERDICT_LABELS if lbl in set(t["verdict"])]
+    c1, c2 = st.columns([1, 3])
+    only_zone = c1.toggle("🛒 Enkel in koopzone", value=False, key=K + "f_zone",
+                          help="Toon enkel munten die vandaag onder hun koopdrempel staan.")
+    chosen = c2.multiselect("Oordeel", present, default=present, key=K + "f_verdict",
+                            help="Toon enkel munten met deze oordelen (bv. enkel 🟢 en 🟡).")
+    out = t[t["verdict"].isin(chosen)] if chosen else t.iloc[0:0]
+    if only_zone:
+        out = out[pd.to_numeric(out["to_zone_pct"], errors="coerce") <= 0]
+    if len(out) < len(t):
+        st.caption(f"{len(out)} van {len(t)} munten getoond.")
+    return out.reset_index(drop=True)
 
 
 def _num(label, fmt, key):
@@ -373,8 +450,13 @@ def _grid_tab(cfg: dict) -> None:
 
 
 # --------------------------------------------------------------------------- dip: instellingen
-def _dip_settings(fee: float, top_n: int) -> dict:
+def _dip_settings(fee: float) -> dict:
     with st.expander("⚙️ Instellingen dip-kopen", expanded=False):
+        top_n = st.slider("Aantal munten (Coinbase-top op 24u-volume)", 10, 150, int(DEFAULT_CFG["top_n"]), 5,
+                          key=K + "dip_topn",
+                          help=f"Standaard {DEFAULT_CFG['top_n']}: die tabel wordt elke nacht vooraf berekend en "
+                               "staat dus meteen klaar. De nachtelijke update ververst de koersdata voor een ruimere "
+                               "top; kies je hier een ander aantal, dan moet enkel de berekening nog lopen.")
         c1, c2, c3 = st.columns(3)
         years = c1.selectbox("Historiek (jaar)", [2, 3, 5, 8], index=2, key=K + "dip_years", help=H["dip_hist"])
         lookback = c2.selectbox("Referentie 'hoogste punt' (dagen)", [90, 180, 365, 730], index=2,
@@ -413,7 +495,7 @@ def _style_verdict(df: pd.DataFrame):
                     return f"background-color: {c}; color: #111"
         return ""
     try:
-        return df.style.map(_c, subset=["verdict", "why"])
+        return df.style.map(_c, subset=[c for c in ("verdict", "why") if c in df.columns])
     except Exception:  # oudere pandas/jinja2: gewoon zonder kleur tonen
         return df
 
@@ -521,10 +603,14 @@ def _dip_tab(cfg: dict) -> None:
         st.markdown(DIP_EXAMPLES)
 
     view_mode = st.radio("Weergave", VIEW_OPTIONS, horizontal=True, key=K + "dip_view",
-                         help="Per munt: één regel per munt, openklapbaar met alle cijfers in kleine tabellen. "
-                              "Brede tabel: alle kolommen naast elkaar (handig om te sorteren en te vergelijken).")
+                         help="Compact: ±12 kerncijfers, sorteerbaar; klik een rij voor alle cijfers en de grafiek. "
+                              "Breed: alle kolommen naast elkaar.")
+    t = _filter_table(t)
+    if t.empty:
+        st.info("Geen munten voor deze filters.")
+        return
     if view_mode == VIEW_OPTIONS[0]:
-        _render_cards(t, cfg)
+        _render_compact(t, cfg)
         st.caption("⚠️ Verleden ≠ toekomst; survivorship bias maakt kansen te optimistisch.")
         return
     _render_wide(t, cfg)
@@ -550,7 +636,7 @@ def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
     st.caption("👆 **Klik een rij aan** om de grafiek en details van die munt (historisch én nu) direct onder de tabel te zien.")
     event = st.dataframe(
         _style_verdict(view), hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key=K + f"dip_df_{st.session_state.get(K + 'dip_ver', 0)}",
+        on_select="rerun", selection_mode="single-row", key=K + f"dip_df_{st.session_state.get(K + 'dip_ver', 0)}_{len(t)}",
         column_config={
             "symbol": "Munt",
             "coinbase": st.column_config.TextColumn("Coinbase", help=C_HELP["coinbase"]),
@@ -988,7 +1074,7 @@ def render_crypto_page() -> None:
         gcfg = _grid_settings(fee)
         _grid_tab(gcfg)
     with t1:
-        dcfg = _dip_settings(fee, gcfg["top_n"])
+        dcfg = _dip_settings(fee)
         _dip_tab(dcfg)
     with t3:
         _detail_tab(gcfg, dcfg)

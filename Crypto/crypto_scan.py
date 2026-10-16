@@ -14,9 +14,13 @@ import pandas as pd
 from crypto_dip import dip_stats, ladder_backtest
 
 # Standaardinstellingen = de standaardwaarden van de app. De nachtelijke update rekent hiermee,
-# zodat de app bij het openen meteen een kant-en-klare tabel vindt.
+# zodat de app bij het openen meteen een kant-en-klare tabel vindt. ÉÉN plek: de app leest
+# zijn standaardwaarden ook hier, zodat de opslag-sleutel altijd overeenkomt.
 DEFAULT_CFG = dict(days=5 * 365 + 5, lookback=365, amount=1000.0, optimal=True, dip=0.50, target=0.30,
-                   maxwait=365, min_trades=3, fee=(0.25 + 0.0) / 100, top_n=30, test_frac=0.30, only_cb=True)
+                   maxwait=365, min_trades=3, fee=(0.25 + 0.0) / 100, top_n=75, test_frac=0.30, only_cb=True)
+# De nachtelijke update ververst de KOERSDATA voor meer munten dan de tabel, zodat de data al klaarstaat
+# als je overdag een groter aantal kiest (dan moet enkel de berekening nog lopen).
+REFRESH_TOP_N = 150
 
 TEST_COLS = ["wf_params", "train_period", "train_annual_txt", "test_period", "test_status", "test_trades",
              "test_pct", "test_annual_txt", "test_eur", "test_bh_pct"]

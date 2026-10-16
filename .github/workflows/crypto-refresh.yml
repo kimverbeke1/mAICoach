@@ -1,10 +1,14 @@
 # .github/workflows/crypto-refresh.yml
 #
 # Nachtelijke update voor de Crypto-pagina (mAICoach-app):
-#   1. haalt per Coinbase-topmunt enkel de NIEUWE dagkoersen op en bewaart ze in Firestore
-#      (collectie crypto_candles);
-#   2. rekent de dip-tabel met de standaardinstellingen van de app en bewaart die in Firestore
-#      (collectie crypto_results), zodat de app bij het openen meteen een tabel toont.
+#   1. haalt voor de Coinbase-top (standaard 150 munten, zie REFRESH_TOP_N in crypto_scan.py) enkel de
+#      NIEUWE dagkoersen op en bewaart ze in Firestore (collectie crypto_candles). Zo staat de data ook
+#      klaar als je overdag meer munten kiest dan de standaard;
+#   2. rekent de dip-tabel met de standaardinstellingen van de app (standaard top 75) en bewaart die in
+#      Firestore (collectie crypto_results), zodat de app bij het openen meteen een tabel toont.
+#
+# De eerste run duurt het langst (5 jaar historiek per munt); daarna komt er per munt maar één dag bij.
+# De log toont de duur per munt.
 #
 # Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON (dezelfde als scrape-padel.yml).
 #
@@ -18,6 +22,11 @@ on:
   schedule:
     - cron: "15 3 * * *"        # elke nacht om 03:15 UTC (05:15 Belgische zomertijd)
   workflow_dispatch:
+    inputs:
+      refresh_top_n:
+        description: "Aantal munten waarvoor koersdata ververst wordt (leeg = standaard 150)"
+        required: false
+        default: ""
 
 concurrency:
   group: crypto-refresh
@@ -26,7 +35,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: Crypto
@@ -47,4 +56,5 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           CRYPTO_REQUIRE_CLOUD: "1"
+          CRYPTO_REFRESH_TOP_N: ${{ github.event.inputs.refresh_top_n }}
         run: python crypto_refresh.py
