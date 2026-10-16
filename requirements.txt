@@ -13,3 +13,4 @@ google-cloud-firestore
 firebase-admin
 beautifulsoup4
 lxml
+selenium
