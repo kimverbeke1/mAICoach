@@ -15,9 +15,9 @@ onmogelijk.
 
 FIX:
   - Alle grafieken lopen via charts.show_plotly().
-  - MATCHFITAI_CHARTS_TOUCH_2026-10-16: GEEN schakelaar meer. De
-    streamgrafieken verschuif je met 1 vinger en zoom je met knijpen,
-    enkel langs de x-as; de y-as blijft vast.
+  - MATCHFITAI_CHARTS_ECHARTS_2026-10-16 (Kim: "pinch is beter"): de
+    streamgrafieken worden met ECharts getekend (charts.render_stream_echart):
+    knijpen = zoomen, 1 vinger = verschuiven, enkel langs de x-as.
   - Streamgrafieken tonen bij tikken de waarde op dat punt (hovermode
     "x unified") en hebben elk een unieke key per activiteit.
   - De hartslagzone-grafiek is altijd statisch (zoomen heeft daar geen zin).
@@ -31,7 +31,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from AICoach.activity_comparison import find_similar_activities
-from AICoach.dashboard.charts import show_plotly
+from AICoach.dashboard.charts import render_stream_echart, show_plotly
 from AICoach.dashboard.ui_helpers import (
     display_value,
     format_duration,
@@ -157,8 +157,6 @@ def _x_axis(frame: pd.DataFrame):
 
 
 def _render_stream_charts(frame: pd.DataFrame, activity_id: str) -> None:
-    # MATCHFITAI_CHARTS_TOUCH_2026-10-16: geen schakelaar meer - altijd
-    # verschuiven (1 vinger) en zoomen (knijpen) langs de x-as.
     x_values, x_title = _x_axis(frame)
     plotted = 0
     for series_key, columns, label, color in STREAM_SERIES:
@@ -168,26 +166,8 @@ def _render_stream_charts(frame: pd.DataFrame, activity_id: str) -> None:
         y_values = pd.to_numeric(frame[col], errors="coerce")
         if y_values.notna().sum() < 3:
             continue
-        fig = go.Figure(
-            go.Scatter(
-                x=x_values,
-                y=y_values,
-                mode="lines",
-                line=dict(width=2, color=color),
-                name=label,
-                connectgaps=True,
-                hovertemplate="%{x:.1f}<br>" + label + ": %{y:.1f}<extra></extra>",
-            )
-        )
-        fig.update_layout(
-            title=dict(text=label, x=0.01, xanchor="left"),
-            xaxis_title=x_title,
-            margin=dict(l=8, r=8, t=36, b=8),
-            height=260,
-            hovermode="x unified",
-            showlegend=False,
-        )
-        show_plotly(fig, key=f"activity_stream_{activity_id}_{series_key}")
+        # MATCHFITAI_CHARTS_ECHARTS_2026-10-16: ECharts i.p.v. Plotly -> pinch-zoom.
+        render_stream_echart(x_values, y_values, label, color, x_title)
         plotted += 1
     if plotted == 0:
         st.info("Geen bruikbare stream-metingen gevonden voor deze activiteit.")

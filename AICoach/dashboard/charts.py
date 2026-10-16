@@ -3,86 +3,32 @@
 """Tijdsgrafieken voor mAICoach.
 
 --------------------------------------------------------------------------
-MATCHFITAI_CHARTS_MOBILE_2026-10-16 (op verzoek van Kim: "zoom in/out /
-pinching werkt niet goed op mobiel", "training load toont rare positionering
-van de bars", "trendlijn voor fitness" en "zones voor form")
+MATCHFITAI_CHARTS_ECHARTS_2026-10-16 (op verzoek van Kim: "pinch is beter")
 --------------------------------------------------------------------------
-1. MOBIEL ZOOMEN
-   ROOT CAUSE: elke grafiek stond standaard op dragmode="pan" + scrollZoom.
-   Op een touchscreen vangt Plotly daardoor elke veeg op: de pagina scrollt
-   niet meer zodra je vinger op een grafiek staat, en pinch-zoom van Plotly
-   zelf is op mobiel onbetrouwbaar.
-   FIX: grafieken zijn standaard STATISCH (geen pan/zoom, pagina scrollt
-   gewoon, tikken toont nog steeds waarden en selecteert een dag). Per
-   grafiek staat een schakelaar "Zoom": aan = pannen met 1 vinger plus
-   knoppen voor inzoomen / uitzoomen / reset (die werken wel betrouwbaar op
-   mobiel). De periode kies je zoals voorheen via "Periode" op het dashboard.
-   Daarnaast hing uirevision vast op 1 constante waarde, waardoor een
-   eerder ingezoomd venster bleef "plakken" na het wisselen van Dag/Week/
-   Maand of periode. uirevision hangt nu af van grafiek + weergave + bereik.
+Plotly.js ondersteunt geen pinch-to-zoom op touchscreens (enkel slepen). De
+tijdsgrafieken en de streamgrafieken van activiteiten worden daarom nu met
+Apache ECharts getekend, dat pinch wel native ondersteunt:
+  - 2 vingers knijpen  = in- en uitzoomen (enkel de x-as).
+  - 1 vinger slepen    = verschuiven.
+  - muiswiel (PC)      = zoomen.
+ECharts wordt via een CDN geladen in een st.components.v1.html-blok; er is
+GEEN extra Python-pakket nodig.
 
-2. TRAINING LOAD-BARS
-   ROOT CAUSE: bij Week/Maand kreeg elke bar als x-positie de LAATSTE datum
-   met data in die periode (bv. de 27e, of vandaag in de lopende maand).
-   De bars stonden daardoor onregelmatig verschoven en hadden wisselende
-   breedtes. Bovendien betekende "W-MON" in pandas weken die op MAANDAG
-   EINDIGEN (dinsdag t.e.m. maandag) i.p.v. maandag t.e.m. zondag.
-   FIX: training load wordt nu altijd als bars getoond (ook per dag en per
-   week), gecentreerd in het midden van hun periode en met een vaste
-   breedte van 80% van die periode. Weken lopen maandag t.e.m. zondag.
+Wat hetzelfde blijft: Dag/Week/Maand-keuze, training load als bars die in
+het midden van hun periode staan (weken ma-zo), fitness-trendlijn met
+helling per week, Form-zones (> 5 Fris, -10..5 Grijze zone, -30..-10
+Optimaal, < -30 Hoog risico), rode lijn op de geselecteerde dag.
 
-3. FITNESS-TRENDLIJN en FORM-ZONES
-   - trend_field="fitness": voegt een gestippelde lineaire trendlijn toe
-     over de getoonde periode, met de helling per week in de legende.
-   - show_form_zones=True: kleurbanden volgens Kim:
-       > 5          Fris
-       -10 tot 5    Grijze zone
-       -30 tot -10  Optimaal
-       < -30        Hoog risico
-     De y-as toont altijd minstens -35 tot +15, zodat de zones zichtbaar zijn.
+Wat wegvalt: een dag selecteren door op de grafiek te tikken. Een HTML-
+component kan geen klik terugsturen naar Streamlit; render_time_chart()
+geeft daarom altijd None terug (training_dashboard.py vangt dat al op).
 
---------------------------------------------------------------------------
-MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16 (op verzoek van Kim: dezelfde
-mobiele zoomproblemen in de activiteitsdetails)
---------------------------------------------------------------------------
-ROOT CAUSE: activity_detail.py bouwt eigen grafieken en gaf enkel
-PLOT_CONFIG mee. Een Plotly-figuur zonder expliciete dragmode staat
-standaard op "zoom" (box-zoom): op een touchscreen start elke veeg dan een
-zoomkader i.p.v. de pagina te laten scrollen.
-FIX: twee gedeelde, publieke helpers voor ELKE grafiek die niet via
-render_time_chart() loopt:
-  - zoom_switch(key): de "Zoom"-schakelaar (zelfde gedrag als hierboven).
-  - show_plotly(fig, key, interactive): zet dragmode/fixedrange correct
-    (statisch, of pannen + zoomknoppen) en tekent de grafiek.
-
---------------------------------------------------------------------------
-MATCHFITAI_CHARTS_TOUCH_2026-10-16 (op verzoek van Kim: "ik wil geen
-zoom-schakelaar, ik wil gewoon de grafiek met mijn vingers verschuiven en
-inzoomen")
---------------------------------------------------------------------------
-De "Zoom"-schakelaar is verwijderd. Elke grafiek is nu standaard
-interactief:
-  - 1 vinger slepen  = grafiek horizontaal verschuiven (pan).
-  - 2 vingers knijpen / scrollwiel = in- en uitzoomen.
-  - dubbeltikken     = terug naar het volledige beeld.
-Enkel de x-as (tijd/afstand) zoomt en schuift; de y-as past zich niet aan
-een veeg aan, zodat een schuine veeg niet per ongeluk de schaal verandert.
-Gevolg: wie met de vinger OP een grafiek veegt, verschuift de grafiek i.p.v.
-de pagina - scrol de pagina door naast of tussen de grafieken te vegen.
-
---------------------------------------------------------------------------
-MATCHFITAI_CHARTS_RANGESLIDER_2026-10-16 (gemeld door Kim: "slepen werkt,
-knijpen niet")
---------------------------------------------------------------------------
-ROOT CAUSE: Plotly.js ondersteunt geen pinch-to-zoom op touchscreens - enkel
-slepen wordt naar een muisbeweging vertaald. scrollZoom geldt alleen voor een
-muiswiel. Er is geen Plotly-instelling die knijpen laat werken.
-FIX: onder elke tijd/afstand-as staat nu een RANGESLIDER (mini-overzicht van
-de volledige grafiek). Zoomen op mobiel: sleep de linker- of rechterrand van
-het venster in de slider naar binnen; verschuiven: sleep het venster zelf of
-sleep zoals voorheen in de grafiek. Dubbeltikken in de grafiek zet alles
-terug. De legende staat onder de slider, zodat ze er niet mee overlapt.
+De hartslagzone-grafiek en eventuele andere Plotly-grafieken blijven via
+show_plotly() werken (statisch).
 """
+import json
+import math
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -327,8 +273,6 @@ def configure_time_chart(
     )
     fig.update_yaxes(fixedrange=True)
     fig.update_xaxes(fixedrange=not interactive)
-    if interactive:
-        _add_rangeslider(fig)
     if x_start is not None and x_end is not None:
         pad = pd.Timedelta(days=pad_days)
         fig.update_xaxes(range=[x_start - pad, x_end + pad])
@@ -372,7 +316,7 @@ def zoom_switch(key, label="Zoom"):
 _zoom_switch = zoom_switch
 
 
-def show_plotly(fig, key=None, interactive=True):
+def show_plotly(fig, key=None, interactive=False):
     """MATCHFITAI_CHARTS_MOBILE_SHARED_2026-10-16: tekent een willekeurige
     Plotly-figuur met mobielvriendelijk gedrag.
 
@@ -384,14 +328,99 @@ def show_plotly(fig, key=None, interactive=True):
     fig.update_layout(dragmode="pan" if interactive else False)
     fig.update_yaxes(fixedrange=True)
     fig.update_xaxes(fixedrange=not interactive)
-    if interactive:
-        _add_rangeslider(fig)
-        # Extra hoogte voor de slider, zodat de grafiek zelf niet krimpt.
-        height = fig.layout.height
-        if height:
-            fig.update_layout(height=int(height) + 50)
     config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
     st.plotly_chart(fig, use_container_width=True, config=config, key=key)
+
+
+
+# --------------------------------------------------------------------------- #
+# ECharts (MATCHFITAI_CHARTS_ECHARTS_2026-10-16)
+# --------------------------------------------------------------------------- #
+ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
+
+
+def _clean(value):
+    """NaN/inf -> None, numpy -> python, zodat json.dumps lukt."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return round(number, 2) if math.isfinite(number) else None
+
+
+def _iso(value):
+    stamp = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(stamp) else stamp.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def render_echart(option, height=380):
+    """Tekent een ECharts-optie met pinch-zoom/slepen langs de x-as."""
+    from streamlit.components.v1 import html as components_html
+
+    option = dict(option)
+    option.setdefault("animation", False)
+    option.setdefault("backgroundColor", "transparent")
+    option.setdefault("tooltip", {"trigger": "axis", "confine": True})
+    option.setdefault("grid", {"left": 44, "right": 14, "top": 40, "bottom": 58})
+    option["dataZoom"] = [{
+        "type": "inside",
+        "xAxisIndex": 0,
+        "filterMode": "none",
+        "zoomOnMouseWheel": True,
+        "moveOnMouseMove": True,
+        "moveOnMouseWheel": False,
+        "preventDefaultMouseMove": True,
+    }]
+    payload = json.dumps(option, ensure_ascii=False, allow_nan=False)
+    components_html(
+        f"""
+<div id="chart" style="width:100%;height:{height}px;touch-action:none;"></div>
+<script src="{ECHARTS_CDN}"></script>
+<script>
+  var chart = echarts.init(document.getElementById("chart"), null, {{renderer: "canvas"}});
+  chart.setOption({payload});
+  window.addEventListener("resize", function () {{ chart.resize(); }});
+</script>
+""",
+        height=height + 8,
+    )
+
+
+def _echart_title(title):
+    return {"text": title or "", "left": 4, "top": 2, "textStyle": {"fontSize": 14}}
+
+
+def _echart_legend():
+    return {"bottom": 0, "left": 0, "type": "scroll"}
+
+
+def _mark_line(selected_date):
+    iso = _iso(selected_date)
+    if not iso:
+        return None
+    return {
+        "symbol": "none",
+        "silent": True,
+        "label": {"show": False},
+        "lineStyle": {"color": "#d62728", "width": 1, "type": "solid"},
+        "data": [{"xAxis": iso}],
+    }
+
+
+def _form_mark_area():
+    data = []
+    for zone in FORM_ZONES:
+        data.append([
+            {"yAxis": zone["y0"], "name": zone["name"], "itemStyle": {"color": zone["band"]}},
+            {"yAxis": zone["y1"]},
+        ])
+    return {
+        "silent": True,
+        "label": {"position": "insideTopLeft", "fontSize": 10, "color": "#555"},
+        "data": data,
+    }
 
 
 def render_time_chart(
@@ -405,6 +434,7 @@ def render_time_chart(
     show_form_zones=False,
     trend_field=None,
 ):
+    """Tijdsgrafiek met pinch-zoom (ECharts). Geeft altijd None terug."""
     available = [field for field in fields if has_data(df, field)]
     if not available:
         return None
@@ -421,93 +451,114 @@ def render_time_chart(
             key=f"{key}_granularity",
             label_visibility="collapsed",
         )
-    # MATCHFITAI_CHARTS_TOUCH_2026-10-16: altijd verschuiven/zoomen met de
-    # vingers, geen schakelaar meer.
-    interactive = True
 
     code = GRANULARITY_RULES.get(choice) if allow_granularity else None
     plot_df = df
-    aggregated = False
     if code is not None:
         plot_df = aggregate_frame(df, available, code)
-        aggregated = True
         selected_date = None  # dagselectie is zinloos op geaggregeerde data
     if plot_df is None or plot_df.empty:
         return None
 
-    fig = go.Figure()
+    series = []
+    y_axis = {"type": "value", "scale": True, "splitLine": {"lineStyle": {"opacity": 0.3}}}
     load_bars = available == ["training_load"]
+
     if load_bars:
-        trace, x_start, x_end = _load_bar_trace(plot_df, code)
-        if trace is None:
+        frame = plot_df.copy()
+        frame["training_load"] = pd.to_numeric(frame["training_load"], errors="coerce")
+        frame = frame.dropna(subset=["training_load"])
+        if frame.empty:
             return None
-        fig.add_trace(trace)
-        pad_days = 0
-        vline_date = selected_date + pd.Timedelta(hours=12) if selected_date is not None else None
+        if code is None:
+            starts = pd.to_datetime(frame["date"]).dt.normalize()
+            ends = starts + pd.Timedelta(days=1)
+            name = "Training load (per dag)"
+        else:
+            starts = pd.to_datetime(frame["period_start"])
+            ends = pd.to_datetime(frame["period_end"])
+            name = "Training load (weektotaal)" if code == "W" else "Training load (maandtotaal)"
+        middles = starts + (ends - starts) / 2
+        series.append({
+            "name": name,
+            "type": "bar",
+            "barWidth": "80%" if code is not None else "60%",
+            "itemStyle": {"color": LOAD_COLOR},
+            "data": [[_iso(x), _clean(y)] for x, y in zip(middles, frame["training_load"])],
+        })
+        y_axis = {"type": "value", "min": 0, "splitLine": {"lineStyle": {"opacity": 0.3}}}
     else:
         for field in available:
             if field not in plot_df.columns:
                 continue
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df["date"],
-                    y=plot_df[field],
-                    mode="lines+markers",
-                    connectgaps=True,
-                    name=FIELD_LABELS.get(field, field),
-                    marker=dict(size=4),
-                    line=dict(width=2, shape="linear"),
-                    hovertemplate=(
-                        "%{x|%d/%m/%Y}<br>"
-                        + FIELD_LABELS.get(field, field)
-                        + ": %{y:.2f}<extra></extra>"
-                    ),
-                )
-            )
+            values = pd.to_numeric(plot_df[field], errors="coerce")
+            series.append({
+                "name": FIELD_LABELS.get(field, field),
+                "type": "line",
+                "showSymbol": False,
+                "connectNulls": True,
+                "lineStyle": {"width": 2},
+                "data": [[_iso(x), _clean(y)] for x, y in zip(plot_df["date"], values)],
+            })
         if trend_field and trend_field in available:
             trend = _trend_trace(plot_df, trend_field)
             if trend is not None:
-                fig.add_trace(trend)
-        x_start, x_end = _data_date_range(plot_df, available)
-        pad_days = 1
-        vline_date = selected_date
+                series.append({
+                    "name": trend.name,
+                    "type": "line",
+                    "showSymbol": False,
+                    "silent": True,
+                    "lineStyle": {"width": 2, "type": "dashed", "color": TREND_COLOR},
+                    "itemStyle": {"color": TREND_COLOR},
+                    "tooltip": {"show": False},
+                    "data": [[_iso(x), _clean(y)] for x, y in zip(trend.x, trend.y)],
+                })
+
+    if not series:
+        return None
+
+    mark_line = _mark_line(selected_date)
+    if mark_line:
+        series[0]["markLine"] = mark_line
 
     if show_form_zones and "form" in plot_df.columns:
         values = pd.to_numeric(plot_df["form"], errors="coerce").dropna()
         if not values.empty:
-            _add_form_zones(fig, float(values.min()), float(values.max()))
+            low = min(float(values.min()) - 3.0, -35.0)
+            high = max(float(values.max()) + 3.0, 15.0)
+            y_axis.update({"scale": False, "min": math.floor(low), "max": math.ceil(high)})
+            series[0]["markArea"] = _form_mark_area()
 
-    if title:
-        fig.update_layout(title=dict(text=title, x=0.01, xanchor="left"))
+    option = {
+        "title": _echart_title(title),
+        "legend": _echart_legend(),
+        "xAxis": {"type": "time", "splitLine": {"show": False}},
+        "yAxis": y_axis,
+        "series": series,
+    }
+    render_echart(option, height=380)
+    return None
 
-    fig = configure_time_chart(
-        fig,
-        vline_date,
-        x_start,
-        x_end,
-        interactive=interactive,
-        pad_days=pad_days,
-        uirevision=f"{key}|{choice}|{x_start}|{x_end}",
-    )
-    if load_bars:
-        fig.update_layout(hovermode="closest", bargap=0)
-    fig.update_layout(height=440, margin=dict(l=8, r=8, t=42, b=70))
 
-    config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
-
-    # Selectie via tikken/klikken alleen zinvol op ruwe dagdata.
-    if aggregated:
-        st.plotly_chart(fig, use_container_width=True, config=config, key=key)
-        return None
-    try:
-        return st.plotly_chart(
-            fig,
-            use_container_width=True,
-            config=config,
-            key=key,
-            on_select="rerun",
-            selection_mode="points",
-        )
-    except TypeError:
-        st.plotly_chart(fig, use_container_width=True, config=config, key=key)
-        return None
+def render_stream_echart(x_values, y_values, label, color, x_title, height=260):
+    """Streamgrafiek van een activiteit (hartslag, tempo, ...) met pinch-zoom."""
+    data = [[_clean(x), _clean(y)] for x, y in zip(x_values, y_values)]
+    data = [point for point in data if point[0] is not None]
+    option = {
+        "title": _echart_title(label),
+        "grid": {"left": 44, "right": 14, "top": 36, "bottom": 36},
+        "xAxis": {"type": "value", "name": x_title, "nameLocation": "middle", "nameGap": 24,
+                  "min": "dataMin", "max": "dataMax"},
+        "yAxis": {"type": "value", "scale": True, "splitLine": {"lineStyle": {"opacity": 0.3}}},
+        "series": [{
+            "name": label,
+            "type": "line",
+            "showSymbol": False,
+            "connectNulls": True,
+            "sampling": "lttb",
+            "lineStyle": {"width": 2, "color": color},
+            "itemStyle": {"color": color},
+            "data": data,
+        }],
+    }
+    render_echart(option, height=height)
