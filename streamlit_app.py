@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Gecombineerde hoofdingang: mAICoach (gezondheid) + Padel Analysis.
+"""Gecombineerde hoofdingang: mAICoach (gezondheid) + Padel Analysis + Crypto.
 
 Dit is het ENIGE bestand dat st.set_page_config aanroept. Het toont een
-navigatie waarmee je wisselt tussen de twee apps. Deploy met dit bestand als
+navigatie waarmee je wisselt tussen de apps. Deploy met dit bestand als
 'Main file path' op Streamlit Community Cloud.
 
 --------------------------------------------------------------------------
@@ -14,12 +14,13 @@ de timing hier EEN keer:
   - perf.begin_run()  : wist de metingen van de vorige run en start de klok;
   - perf.step(...)    : meet de volledige pagina (navigation.run());
   - perf.end_run()    : tekent het paneel "Laadtijd-analyse (debug)" onderaan
-                        de pagina - voor mAICoach EN PadelAnalysis.
+                        de pagina - voor mAICoach, PadelAnalysis en Crypto.
 Pagina's die zelf nog perf.reset()/perf.render_panel() aanroepen (bv.
 page_lineup_lab.py) worden daardoor automatisch no-ops - zie
 perf_timing.py. Het verschil tussen "pagina: ..." en de som van de stappen
 eronder is tijd die (nog) niet gemeten wordt - daar zoeken we in de
 volgende ronde verder.
+
 Uitschakelen: PERF_ENABLED = False bovenaan perf_timing.py.
 
 --------------------------------------------------------------------------
@@ -30,7 +31,16 @@ usage_tracker.track() welke app/pagina deze sessie bekijkt, in de verborgen
 Firestore-collecties _admin_sessions en _admin_usage_logs. Niets hiervan is
 zichtbaar in de UI. Voor Padel Analysis wordt de gekozen subpagina uit
 st.session_state["page"] gelezen (gezet door PadelAnalysis/dashboard.py).
+
 Uitschakelen: USAGE_TRACKING_ENABLED = False bovenaan usage_tracker.py.
+
+--------------------------------------------------------------------------
+CRYPTO_PAGE_2026-10-16 (op verzoek van Kim: Crypto-analyse in dezelfde app)
+--------------------------------------------------------------------------
+Derde pagina 'Crypto' (Crypto/crypto_page.py). Koersdata komt van Coinbase en
+wordt bewaard in Firestore (crypto_candles); de berekende dip-tabel in
+crypto_results. Een nachtelijke GitHub Action (.github/workflows/
+crypto-refresh.yml) ververst beide, zodat de pagina meteen een tabel toont.
 """
 from pathlib import Path
 import sys
@@ -73,8 +83,13 @@ padel_page = st.Page(
     title="Padel Analysis",
     icon="🎾",
 )
+crypto_page = st.Page(
+    "Crypto/crypto_page.py",
+    title="Crypto",
+    icon="🪙",
+)
 
-navigation = st.navigation({"Apps": [health_page, padel_page]})
+navigation = st.navigation({"Apps": [health_page, padel_page, crypto_page]})
 
 
 def _track_usage() -> None:
@@ -86,7 +101,7 @@ def _track_usage() -> None:
         if app_title == "Padel Analysis":
             sub = str(st.session_state.get("page") or "start")
         else:
-            sub = "start"  # mAICoach heeft 1 pagina; verfijn later indien gewenst
+            sub = "start"  # mAICoach en Crypto: 1 pagina; verfijn later indien gewenst
         usage_tracker.track(app_title, sub)
     except Exception:  # noqa: BLE001
         pass

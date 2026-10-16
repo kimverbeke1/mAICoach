@@ -1,0 +1,50 @@
+# .github/workflows/crypto-refresh.yml
+#
+# Nachtelijke update voor de Crypto-pagina (mAICoach-app):
+#   1. haalt per Coinbase-topmunt enkel de NIEUWE dagkoersen op en bewaart ze in Firestore
+#      (collectie crypto_candles);
+#   2. rekent de dip-tabel met de standaardinstellingen van de app en bewaart die in Firestore
+#      (collectie crypto_results), zodat de app bij het openen meteen een tabel toont.
+#
+# Vereist repo secret: FIREBASE_SERVICE_ACCOUNT_JSON (dezelfde als scrape-padel.yml).
+#
+# Let op (zelfde als bij scrape-padel.yml): GitHub kan schedule-triggers bij piekbelasting
+# overslaan. Wil je zekerheid, laat dan je GCP Cloud Scheduler ook deze workflow via
+# workflow_dispatch starten (en verwijder eventueel het schedule-blok).
+
+name: Crypto Refresh
+
+on:
+  schedule:
+    - cron: "15 3 * * *"        # elke nacht om 03:15 UTC (05:15 Belgische zomertijd)
+  workflow_dispatch:
+
+concurrency:
+  group: crypto-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Crypto
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Dependencies installeren
+        run: pip install "pandas>=2.2" "numpy>=1.26" "requests>=2.32" firebase-admin
+
+      - name: Crypto-data verversen
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          CRYPTO_REQUIRE_CLOUD: "1"
+        run: python crypto_refresh.py
