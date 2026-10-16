@@ -1,7 +1,11 @@
 """Streamlit-pagina Crypto.
 - In de hoofdapp (streamlit_app.py) via Crypto/crypto_page.py.
 - Lokaal los te draaien via:  streamlit run crypto_app.py
-Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py)."""
+Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py).
+
+De dip-resultaten worden standaard getoond als een lijst van OPENKLAPBARE munten: één regel per munt met
+de kern (oordeel, koopzone, test, eindwaarde) en, opengeklapt, alle cijfers gegroepeerd in kleine tabellen
+(kenmerk · waarde · uitleg). De brede tabel blijft beschikbaar via 'Weergave'."""
 from __future__ import annotations
 
 import sys
@@ -34,6 +38,180 @@ VERDICT_LABELS = ["🟢 Interessant", "🟡 Twijfel", "⚪ Niets bewezen", "⚪ 
                   "🟠 Onder water", "🔴 Niet interessant"]
 VERDICT_COLORS = {"🟢": "#d4f4dd", "🟡": "#fff1b8", "⚪": "#e9ecef", "🟠": "#ffe0b8", "🔴": "#f8d7da"}
 DEFAULT_COINS = ["BTC-USD", "ETH-USD", "SOL-USD"]
+VIEW_OPTIONS = ["Per munt (openklapbaar)", "Brede tabel"]
+
+# --------------------------------------------------------------------------- weergave per munt
+# Korte uitleg per kenmerk (één regel) voor de openklapbare kaarten. De volledige uitleg blijft in de
+# tooltips van de brede tabel en in 'ℹ️ Uitleg kolommen'.
+SHORT = {
+    "coinbase": "Markten waarin je de munt op Coinbase kan kopen.",
+    "source": "Optimaal = historisch beste; Vast = jouw algemene waarden; Opgeslagen = door jou bewaard.",
+    "dip_pct": "Koop als de slotkoers zoveel onder de top (hoogste koers referentieperiode) staat.",
+    "target_pct": "Verkoop zodra de koers zoveel boven je aankoopprijs staat.",
+    "current_dd_pct": "Hoeveel de koers nu onder de top staat.",
+    "to_zone_pct": "Hoeveel de koers nog moet zakken tot de koopzone (0 = nu in de koopzone).",
+    "wf_params": "Koopdrempel / winstdoel die blind getest werden.",
+    "train_period": "Startmaand en duur van de training (hierop werd gezocht).",
+    "train_annual_txt": "Rendement per jaar in de training: altijd mooi, want hierop gekozen.",
+    "test_period": "Startmaand en duur van de test (loopt tot vandaag, niet gebruikt om te zoeken).",
+    "test_status": "Afgerond = gekocht en verkocht; Positie open = nog niet verkocht; Geen koopkans = nooit gekocht.",
+    "test_trades": "Afgeronde koop+verkoop-rondes in de test.",
+    "test_pct": "Resultaat over de hele test, na kosten: het eerlijkste cijfer.",
+    "test_annual_txt": "Testresultaat per jaar (⚠️ bij een test korter dan een half jaar onbetrouwbaar).",
+    "test_eur": "Wat je bedrag aan het einde van de test waard is.",
+    "test_bh_pct": "Gewoon kopen en houden in dezelfde testperiode: de lat.",
+    "history_days": "Aantal dagen koersgeschiedenis.",
+    "episodes": "Afzonderlijke keren dat de munt in de koopzone kwam (5+ zegt iets).",
+    "ep_text": "Hoe vaak het winstdoel daarna gehaald werd binnen de max. wachttijd.",
+    "episode_hit_pct": "Hetzelfde in %: de eerlijkste kans.",
+    "hit_rate_pct": "Kans gerekend over alle koopzone-dagen.",
+    "median_days": "Typische wachttijd tot het winstdoel (statistiek, niet de backtest).",
+    "median_further_pct": "Hoeveel de koers na aankoop meestal nog verder zakte.",
+    "worst_further_pct": "De slechtste keer: je stresstest.",
+    "still_open": "Koopzone-dagen die nog te recent zijn om te beoordelen.",
+    "bt_start": "Vanaf deze datum lopen alle €-bedragen.",
+    "bt_years": "Duur van de backtest.",
+    "dip_round_trips": "Afgeronde koop+verkoop-rondes in de hele backtest.",
+    "avg_hold_days": "Gemiddelde looptijd van een afgeronde trade.",
+    "capital": "Ingezet bedrag (standaard één schijf).",
+    "final_eur": "Waarde vandaag, open positie inbegrepen (bij Optimaal achteraf afgesteld).",
+    "profit_eur": "Eindwaarde min inzet.",
+    "dip_annual_pct": "Eindwaarde omgerekend naar rendement per jaar.",
+    "buy_hold_eur": "Alles kopen op de startdag en niets doen.",
+    "invested_pct": "Hoe vaak er geld in de munt zat; de rest lag stil.",
+    "lowest_eur": "Je slechtste moment tijdens de backtest.",
+    "open_cost_eur": "Wat je betaalde voor de nog niet verkochte aankoop.",
+    "open_value_eur": "Wat die open aankoop vandaag waard is (zit al in de eindwaarde).",
+    "open_result_eur": "Papieren winst of verlies op de open aankoop.",
+    "open_result_pct": "Hetzelfde in %.",
+}
+
+# (titel, [(label, kolom, formaat), ...])
+SECTIONS = [
+    ("🎯 Instelling en nu", [
+        ("Bron", "source", "txt"), ("Koopdrempel", "dip_pct", "neg"), ("Winstdoel", "target_pct", "pos"),
+        ("Nu onder top", "current_dd_pct", "pct"), ("Nog te zakken", "to_zone_pct", "pct"),
+        ("Coinbase", "coinbase", "txt"),
+    ]),
+    ("🧪 Betrouwbaarheidstest", [
+        ("Instelling in test", "wf_params", "txt"), ("Training: periode", "train_period", "txt"),
+        ("Training %/jaar", "train_annual_txt", "txt"), ("Test: periode", "test_period", "txt"),
+        ("Test: status", "test_status", "txt"), ("Test trades", "test_trades", "int"),
+        ("Test totaal", "test_pct", "sign"), ("Test %/jaar", "test_annual_txt", "txt"),
+        ("Test eindwaarde", "test_eur", "eur"), ("Test kopen&houden", "test_bh_pct", "sign"),
+    ]),
+    ("📊 Bewijs en herstel", [
+        ("Dagen data", "history_days", "int"), ("Keren in zone", "episodes", "int"),
+        ("Hersteld (keren)", "ep_text", "txt"), ("Kans per keer", "episode_hit_pct", "pct"),
+        ("Kans per dag", "hit_rate_pct", "pct"), ("Mediaan dagen", "median_days", "int"),
+        ("Typ. verdere daling", "median_further_pct", "pct"), ("Ergste verdere daling", "worst_further_pct", "pct"),
+        ("Te recent", "still_open", "int"),
+    ]),
+    ("💶 Backtest met jouw bedrag", [
+        ("Start backtest", "bt_start", "date"), ("Periode", "bt_years", "years"),
+        ("Trades", "dip_round_trips", "int"), ("Gem. dagen/trade", "avg_hold_days", "int"),
+        ("Inzet", "capital", "eur"), ("Eindwaarde", "final_eur", "eur"), ("Winst", "profit_eur", "eursign"),
+        ("%/jaar", "dip_annual_pct", "pct1"), ("Kopen&houden", "buy_hold_eur", "eur"),
+        ("Tijd belegd", "invested_pct", "pct"), ("Laagste waarde", "lowest_eur", "eur"),
+        ("Open: vast", "open_cost_eur", "eur"), ("Open: waarde", "open_value_eur", "eur"),
+        ("Open: resultaat", "open_result_eur", "eursign"), ("Open: resultaat %", "open_result_pct", "sign"),
+    ]),
+]
+
+
+def _isna(v) -> bool:
+    try:
+        return v is None or bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fmt(v, kind: str) -> str:
+    """Waarde leesbaar voor de kaart. Leeg/NaN = '–'."""
+    if _isna(v) or (isinstance(v, str) and not v.strip()):
+        return "–"
+    try:
+        if kind == "txt":
+            return str(v)
+        if kind == "int":
+            return f"{float(v):,.0f}".replace(",", ".")
+        if kind == "pct":
+            return f"{float(v):.0f}%"
+        if kind == "pct1":
+            return f"{float(v):.1f}%"
+        if kind == "sign":
+            return f"{float(v):+.0f}%"
+        if kind == "neg":
+            return f"−{float(v):.0f}%"
+        if kind == "pos":
+            return f"+{float(v):.0f}%"
+        if kind == "eur":
+            return "€ " + f"{float(v):,.0f}".replace(",", ".")
+        if kind == "eursign":
+            s = f"{float(v):+,.0f}".replace(",", ".")
+            return f"{s[0]}€ {s[1:]}"
+        if kind == "years":
+            return f"{float(v):.1f} jaar".replace(".", ",")
+        if kind == "date":
+            return pd.Timestamp(v).strftime("%d/%m/%Y")
+    except (TypeError, ValueError):
+        return str(v)
+    return str(v)
+
+
+def _md_table(r: pd.Series, items, show_help: bool) -> str:
+    esc = lambda s: str(s).replace("|", "\\|").replace("\n", " ")
+    head = "| Kenmerk | Waarde |" + (" Uitleg |" if show_help else "")
+    sep = "|---|---|" + ("---|" if show_help else "")
+    lines = [head, sep]
+    for label, col, kind in items:
+        if col not in r.index:
+            continue
+        row = f"| {esc(label)} | **{esc(_fmt(r[col], kind))}** |"
+        if show_help:
+            row += f" {esc(SHORT.get(col, ''))} |"
+        lines.append(row)
+    return "\n".join(lines)
+
+
+def _card_label(r: pd.Series) -> str:
+    """Eén regel per munt: oordeel · munt · koopzone · test · eindwaarde."""
+    parts = [str(r.get("verdict", "")), f"**{r['symbol']}**", str(r.get("now", "–"))]
+    if not _isna(r.get("test_pct")):
+        parts.append(f"test {float(r['test_pct']):+.0f}%")
+    if not _isna(r.get("capital")) and not _isna(r.get("final_eur")):
+        parts.append(f"€ {float(r['capital']):,.0f} → € {float(r['final_eur']):,.0f}".replace(",", "."))
+    if not _isna(r.get("dip_pct")) and not _isna(r.get("target_pct")):
+        parts.append(f"koop −{float(r['dip_pct']):.0f}% / verkoop +{float(r['target_pct']):.0f}%")
+    return "  ·  ".join(parts)
+
+
+def _render_cards(t: pd.DataFrame, cfg: dict) -> None:
+    """Lijst van openklapbare munten. De grafiek van een munt verschijnt direct onder die munt."""
+    show_help = st.toggle("Toon uitleg per kenmerk", value=True, key=K + "card_help")
+    st.caption("👇 Klap een munt open voor alle cijfers. Met **📈 Grafiek en details** verschijnt de grafiek "
+               "direct onder die munt.")
+    sel = st.session_state.get(K + "card_sel")
+    for idx, (_, r) in enumerate(t.iterrows()):
+        sym = r["symbol"]
+        with st.expander(_card_label(r), expanded=(sel == sym)):
+            if isinstance(r.get("why"), str) and r["why"]:
+                st.markdown(f"**Waarom dit oordeel:** {r['why']}")
+            sections = [s for s in SECTIONS if not (s[0].startswith("🧪") and cfg["test_frac"] <= 0)]
+            left, right = st.columns(2)
+            for i, (title, items) in enumerate(sections):
+                with (left if i % 2 == 0 else right):
+                    st.markdown(f"**{title}**")
+                    st.markdown(_md_table(r, items, show_help))
+            is_open = sel == sym
+            if st.button("✖️ Grafiek sluiten" if is_open else "📈 Grafiek en details",
+                         key=K + f"card_btn_{idx}_{sym}"):
+                st.session_state[K + "card_sel"] = None if is_open else sym
+                st.rerun()
+        if sel == sym:
+            with st.container(border=True):
+                st.subheader(f"📈 {sym}: historiek en nu")
+                _detail_dip(sym, cfg, kp="card_")
 
 
 def _num(label, fmt, key):
@@ -342,6 +520,17 @@ def _dip_tab(cfg: dict) -> None:
                      expanded=False):
         st.markdown(DIP_EXAMPLES)
 
+    view_mode = st.radio("Weergave", VIEW_OPTIONS, horizontal=True, key=K + "dip_view",
+                         help="Per munt: één regel per munt, openklapbaar met alle cijfers in kleine tabellen. "
+                              "Brede tabel: alle kolommen naast elkaar (handig om te sorteren en te vergelijken).")
+    if view_mode == VIEW_OPTIONS[0]:
+        _render_cards(t, cfg)
+        st.caption("⚠️ Verleden ≠ toekomst; survivorship bias maakt kansen te optimistisch.")
+        return
+    _render_wide(t, cfg)
+
+
+def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
     t = t.copy()
     cols = ["symbol", "coinbase", "verdict", "now", "why", "source", "dip_pct", "target_pct", "current_dd_pct",
             "to_zone_pct"]
