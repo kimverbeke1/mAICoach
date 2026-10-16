@@ -2,7 +2,7 @@
 """Dagelijkse update voor mAICoach.
 
 Bekijkt de recentste wellness- en trainingsdata en signaleert wat er de voorbije
-periode opvalt: rusthartslag, HRV, slaap, readiness en de trend in Form, Fitness
+periode opvalt: rusthartslag, HRV, slaap en de trend in Form, Fitness
 en Fatigue. Voorzichtig geformuleerd en gericht op wat je er praktisch mee kunt.
 
 Belangrijk: Form/Fitness/Fatigue komen uit load_history() (dagelijkse waarden op
@@ -54,6 +54,13 @@ FIX: elke wellness-meting wordt nu getoetst aan haar ouderdom t.o.v. vandaag.
   - ouder dan MAX_SIGNAL_AGE_DAYS: NIET meer als actuele waarde getoond, maar
     als "geen recente data (laatste: X op dd/mm/jjjj)" - en er worden geen
     trend-conclusies meer aan verbonden.
+
+--------------------------------------------------------------------------
+MATCHFITAI_HIDE_READINESS_2026-10-16 (op verzoek van Kim: "hide readiness")
+--------------------------------------------------------------------------
+Intervals.icu toont readiness als "?" - Garmin levert die waarde niet aan.
+De readiness-regel is uit de dagelijkse update verwijderd en readiness is
+uit de AI-prompt gehaald, zodat de AI er ook geen conclusies uit trekt.
 """
 from __future__ import annotations
 
@@ -180,14 +187,9 @@ def compute_daily_signals() -> list[str]:
                 line += " — kort. Houd hier rekening mee bij een zware sessie vandaag."
             signals.append(line)
 
-    # Readiness (MATCHFITAI_STALE_SIGNAL_FIX_2026-10-16: hier zat de "altijd 9"-bug)
-    latest, _, _ = _latest_and_previous(wellness, "readiness")
-    if latest is not None:
-        current = float(latest["readiness"])
-        if _is_stale(latest):
-            signals.append(_stale_line("Readiness", f"{current:.0f}", latest))
-        else:
-            signals.append(f"Readiness: {current:.0f}{_date_note(latest)}")
+    # MATCHFITAI_HIDE_READINESS_2026-10-16: readiness wordt niet meer getoond.
+    # Garmin stuurt geen readiness naar Intervals.icu (daar staat "?"), dus er
+    # is geen betrouwbare bron. Bewust weggelaten i.p.v. een oude waarde te tonen.
 
     # Form/Fitness/Fatigue uit de dagelijkse historiek (inclusief vandaag).
     for column, label in (("form", "Form"), ("fitness", "Fitness"), ("fatigue", "Fatigue")):
@@ -212,7 +214,7 @@ def compute_daily_signals() -> list[str]:
 def _ai_period_prompt() -> str:
     return (
         "Bekijk uitsluitend mijn recentste periode (laatste 7 tot 14 dagen). "
-        "Wat valt op in rusthartslag, HRV, slaap, readiness, Form, Fitness en Fatigue? "
+        "Wat valt op in rusthartslag, HRV, slaap, Form, Fitness en Fatigue? "
         "Negeer metingen die ouder zijn dan die periode. "
         "Noem alleen inzichten die mij praktisch helpen: wanneer ben ik goed hersteld, "
         "wanneer moet ik voorzichtig zijn, en welke signalen verdienen aandacht als ze aanhouden. "

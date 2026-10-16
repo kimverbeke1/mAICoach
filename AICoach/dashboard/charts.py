@@ -1,37 +1,99 @@
 # -*- coding: utf-8 -*-
+# charts.py
+"""Tijdsgrafieken voor mAICoach.
 
+--------------------------------------------------------------------------
+MATCHFITAI_CHARTS_MOBILE_2026-10-16 (op verzoek van Kim: "zoom in/out /
+pinching werkt niet goed op mobiel", "training load toont rare positionering
+van de bars", "trendlijn voor fitness" en "zones voor form")
+--------------------------------------------------------------------------
+1. MOBIEL ZOOMEN
+   ROOT CAUSE: elke grafiek stond standaard op dragmode="pan" + scrollZoom.
+   Op een touchscreen vangt Plotly daardoor elke veeg op: de pagina scrollt
+   niet meer zodra je vinger op een grafiek staat, en pinch-zoom van Plotly
+   zelf is op mobiel onbetrouwbaar.
+   FIX: grafieken zijn standaard STATISCH (geen pan/zoom, pagina scrollt
+   gewoon, tikken toont nog steeds waarden en selecteert een dag). Per
+   grafiek staat een schakelaar "Zoom": aan = pannen met 1 vinger plus
+   knoppen voor inzoomen / uitzoomen / reset (die werken wel betrouwbaar op
+   mobiel). De periode kies je zoals voorheen via "Periode" op het dashboard.
+   Daarnaast hing uirevision vast op 1 constante waarde, waardoor een
+   eerder ingezoomd venster bleef "plakken" na het wisselen van Dag/Week/
+   Maand of periode. uirevision hangt nu af van grafiek + weergave + bereik.
+
+2. TRAINING LOAD-BARS
+   ROOT CAUSE: bij Week/Maand kreeg elke bar als x-positie de LAATSTE datum
+   met data in die periode (bv. de 27e, of vandaag in de lopende maand).
+   De bars stonden daardoor onregelmatig verschoven en hadden wisselende
+   breedtes. Bovendien betekende "W-MON" in pandas weken die op MAANDAG
+   EINDIGEN (dinsdag t.e.m. maandag) i.p.v. maandag t.e.m. zondag.
+   FIX: training load wordt nu altijd als bars getoond (ook per dag en per
+   week), gecentreerd in het midden van hun periode en met een vaste
+   breedte van 80% van die periode. Weken lopen maandag t.e.m. zondag.
+
+3. FITNESS-TRENDLIJN en FORM-ZONES
+   - trend_field="fitness": voegt een gestippelde lineaire trendlijn toe
+     over de getoonde periode, met de helling per week in de legende.
+   - show_form_zones=True: kleurbanden volgens Kim:
+       > 5          Fris
+       -10 tot 5    Grijze zone
+       -30 tot -10  Optimaal
+       < -30        Hoog risico
+     De y-as toont altijd minstens -35 tot +15, zodat de zones zichtbaar zijn.
+"""
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from AICoach.dashboard.ui_helpers import FIELD_LABELS, has_data
 
-
+# Standaard: statisch -> de pagina scrollt normaal op mobiel.
 PLOT_CONFIG = {
     "displaylogo": False,
     "displayModeBar": False,
-    "scrollZoom": True,
-    "doubleClick": "reset",
+    "scrollZoom": False,
+    "doubleClick": False,
     "responsive": True,
 }
 
-# Weergavekeuze per grafiek. None = ruwe dagdata, anders een pandas-resampleregel.
+# Met de schakelaar "Zoom" aan: pannen + betrouwbare zoomknoppen.
+PLOT_CONFIG_INTERACTIVE = {
+    "displaylogo": False,
+    "displayModeBar": True,
+    "scrollZoom": True,
+    "doubleClick": "reset",
+    "responsive": True,
+    "modeBarButtonsToRemove": [
+        "select2d",
+        "lasso2d",
+        "toImage",
+        "autoScale2d",
+        "hoverClosestCartesian",
+        "hoverCompareCartesian",
+        "toggleSpikelines",
+    ],
+}
+
+# Weergavekeuze per grafiek. None = ruwe dagdata, "W" = week (ma-zo), "M" = maand.
 GRANULARITY_RULES = {
     "Dag": None,
-    "Week": "W-MON",
-    "Maand": "MS",
+    "Week": "W",
+    "Maand": "M",
 }
 
 # Velden die bij aggregatie opgeteld worden (belasting), niet gemiddeld.
 AGG_SUM_FIELDS = {"training_load"}
 
-# Form-zones volgens Intervals.icu (TSB = Fitness - Fatigue).
+LOAD_COLOR = "#1f77b4"
+TREND_COLOR = "#444444"
+
+# Form-zones (Form = Fitness - Fatigue), grenzen volgens Kim.
 FORM_ZONES = [
     {"name": "Hoog risico", "y0": -1000.0, "y1": -30.0, "band": "rgba(214,39,40,0.13)", "solid": "#d62728"},
     {"name": "Optimaal", "y0": -30.0, "y1": -10.0, "band": "rgba(44,160,44,0.16)", "solid": "#2ca02c"},
     {"name": "Grijze zone", "y0": -10.0, "y1": 5.0, "band": "rgba(128,128,128,0.14)", "solid": "#7f7f7f"},
-    {"name": "Fris", "y0": 5.0, "y1": 20.0, "band": "rgba(31,119,180,0.14)", "solid": "#1f77b4"},
-    {"name": "Overgang", "y0": 20.0, "y1": 1000.0, "band": "rgba(230,167,0,0.16)", "solid": "#e6a700"},
+    {"name": "Fris", "y0": 5.0, "y1": 1000.0, "band": "rgba(31,119,180,0.14)", "solid": "#1f77b4"},
 ]
 
 
@@ -76,39 +138,117 @@ def _data_date_range(df, fields):
     return dated.min(), dated.max()
 
 
+def _period_code(rule):
+    """Vertaalt zowel de nieuwe ("W"/"M") als de oude ("W-MON"/"MS") regels."""
+    if rule in ("W", "W-MON", "W-SUN"):
+        return "W"
+    if rule in ("M", "MS"):
+        return "M"
+    return None
+
+
+def _period_start(dates, code):
+    # "W-SUN" = periodes van maandag t.e.m. zondag.
+    return dates.dt.to_period("W-SUN" if code == "W" else "M").dt.start_time
+
+
 def aggregate_frame(df, fields, rule):
-    """Aggregeer per week/maand.
+    """Aggregeer per week (ma-zo) of maand.
 
     - training_load wordt opgeteld (periodetotaal), andere velden gemiddeld.
-    - De x-waarde is de LAATSTE datum met data binnen de periode, zodat de
-      huidige (onvolledige) maand tot en met vandaag meeloopt.
+    - "date" is de LAATSTE datum met data binnen de periode (voor lijnen, zodat
+      de lopende periode tot en met vandaag meeloopt).
+    - "period_start"/"period_end" geven de echte periodegrenzen (voor bars).
     """
     present = [field for field in fields if field in df.columns]
-    if rule is None or df.empty or not present:
+    code = _period_code(rule)
+    if code is None or df.empty or not present:
         return df
-
     frame = df[["date"] + present].copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).set_index("date")
+    frame = frame.dropna(subset=["date"])
+    for field in present:
+        frame[field] = pd.to_numeric(frame[field], errors="coerce")
+    frame = frame.dropna(subset=present, how="all")
     if frame.empty:
-        return frame.reset_index()
-
+        return frame
+    frame["period_start"] = _period_start(frame["date"], code)
     aggregation = {
         field: ("sum" if field in AGG_SUM_FIELDS else "mean")
         for field in present
     }
-    resampled = frame.resample(rule).agg(aggregation)
-    last_dates = frame.resample(rule).apply(lambda block: block.dropna(how="all").index.max())
-    if isinstance(last_dates, pd.DataFrame):
-        last_dates = last_dates.iloc[:, 0]
-    resampled["date"] = last_dates.values
-    resampled = resampled.dropna(subset=["date"]).reset_index(drop=True)
-    return resampled
+    aggregation["date"] = "max"
+    result = frame.groupby("period_start", as_index=False).agg(aggregation)
+    step = pd.DateOffset(weeks=1) if code == "W" else pd.DateOffset(months=1)
+    result["period_end"] = result["period_start"] + step
+    return result.sort_values("period_start").reset_index(drop=True)
+
+
+def _load_bar_trace(plot_df, code):
+    """Training load als bars, gecentreerd in hun periode met vaste breedte."""
+    frame = plot_df.copy()
+    frame["training_load"] = pd.to_numeric(frame["training_load"], errors="coerce")
+    frame = frame.dropna(subset=["training_load"])
+    if frame.empty:
+        return None, None, None
+    if code is None:
+        starts = pd.to_datetime(frame["date"]).dt.normalize()
+        ends = starts + pd.Timedelta(days=1)
+        labels = starts.dt.strftime("%d/%m/%Y")
+        name = "Training load (per dag)"
+    else:
+        starts = pd.to_datetime(frame["period_start"])
+        ends = pd.to_datetime(frame["period_end"])
+        if code == "W":
+            labels = "Week van " + starts.dt.strftime("%d/%m/%Y")
+            name = "Training load (weektotaal)"
+        else:
+            labels = starts.dt.strftime("%m/%Y")
+            name = "Training load (maandtotaal)"
+    spans = ends - starts
+    middles = starts + spans / 2
+    widths = (spans.dt.total_seconds() * 1000 * 0.8).tolist()
+    trace = go.Bar(
+        x=middles,
+        y=frame["training_load"],
+        width=widths,
+        name=name,
+        marker_color=LOAD_COLOR,
+        customdata=labels,
+        hovertemplate="%{customdata}<br>Load: %{y:.0f}<extra></extra>",
+    )
+    return trace, starts.min(), ends.max()
+
+
+def _trend_trace(plot_df, field):
+    """Lineaire trendlijn over de getoonde periode, helling per week in de naam."""
+    if field not in plot_df.columns:
+        return None
+    series = plot_df[["date", field]].copy()
+    series["date"] = pd.to_datetime(series["date"], errors="coerce")
+    series[field] = pd.to_numeric(series[field], errors="coerce")
+    series = series.dropna()
+    if len(series) < 3:
+        return None
+    days = (series["date"] - series["date"].min()).dt.total_seconds() / 86400.0
+    if days.max() <= 0:
+        return None
+    slope, intercept = np.polyfit(days.to_numpy(), series[field].to_numpy(), 1)
+    per_week = f"{slope * 7:+.1f}".replace(".", ",")
+    label = FIELD_LABELS.get(field, field)
+    return go.Scatter(
+        x=[series["date"].min(), series["date"].max()],
+        y=[intercept, intercept + slope * days.max()],
+        mode="lines",
+        name=f"Trend {label} ({per_week} per week)",
+        line=dict(width=2, dash="dash", color=TREND_COLOR),
+        hoverinfo="skip",
+    )
 
 
 def _add_form_zones(fig, y_min, y_max):
-    low = min(y_min, -35.0)
-    high = max(y_max, 25.0)
+    low = min(y_min - 3.0, -35.0)
+    high = max(y_max + 3.0, 15.0)
     for zone in FORM_ZONES:
         y0 = max(zone["y0"], low)
         y1 = min(zone["y1"], high)
@@ -121,26 +261,33 @@ def _add_form_zones(fig, y_min, y_max):
             fillcolor=zone["band"],
             layer="below",
             annotation_text=zone["name"],
-            annotation_position="right",
-            annotation=dict(font_size=10, font_color="#666"),
+            annotation_position="top left",
+            annotation=dict(font_size=10, font_color="#555"),
         )
+    fig.update_yaxes(range=[low, high], autorange=False)
 
 
-def configure_time_chart(fig, selected_date=None, x_start=None, x_end=None):
+def configure_time_chart(
+    fig,
+    selected_date=None,
+    x_start=None,
+    x_end=None,
+    interactive=False,
+    pad_days=1,
+    uirevision="keep-time-window",
+):
     fig.update_layout(
         hovermode="x unified",
-        dragmode="pan",
-        legend_title_text="",
+        dragmode="pan" if interactive else False,
+        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0, title_text=""),
         margin=dict(l=8, r=8, t=42, b=8),
-        uirevision="keep-time-window",
+        uirevision=uirevision,
     )
-    fig.update_yaxes(fixedrange=True, autorange=True)
+    fig.update_yaxes(fixedrange=True)
+    fig.update_xaxes(fixedrange=not interactive)
     if x_start is not None and x_end is not None:
-        pad = pd.Timedelta(days=1)
-        fig.update_xaxes(fixedrange=False, range=[x_start - pad, x_end + pad])
-    else:
-        fig.update_xaxes(fixedrange=False)
-
+        pad = pd.Timedelta(days=pad_days)
+        fig.update_xaxes(range=[x_start - pad, x_end + pad])
     if selected_date is not None:
         fig.add_vline(
             x=selected_date,
@@ -149,6 +296,16 @@ def configure_time_chart(fig, selected_date=None, x_start=None, x_end=None):
             line_color="#d62728",
         )
     return fig
+
+
+def _zoom_switch(key):
+    switch = getattr(st, "toggle", None) or st.checkbox
+    return switch(
+        "Zoom",
+        value=False,
+        key=f"{key}_interactive",
+        help="Aan: pannen en zoomknoppen. Uit: de pagina scrollt normaal op mobiel.",
+    )
 
 
 def render_time_chart(
@@ -160,49 +317,50 @@ def render_time_chart(
     allow_granularity=True,
     default_granularity="Dag",
     show_form_zones=False,
+    trend_field=None,
 ):
     available = [field for field in fields if has_data(df, field)]
     if not available:
         return None
 
-    plot_df = df
-    aggregated = False
-    rule = None
-
+    choice = default_granularity
     if allow_granularity:
         options = list(GRANULARITY_RULES.keys())
         default_index = options.index(default_granularity) if default_granularity in options else 0
-        choice = st.radio(
-            "Weergave",
-            options,
-            index=default_index,
-            horizontal=True,
-            key=f"{key}_granularity",
-            label_visibility="collapsed",
-        )
-        rule = GRANULARITY_RULES.get(choice)
-        if rule is not None:
-            plot_df = aggregate_frame(df, available, rule)
-            aggregated = True
-            selected_date = None  # dagselectie is zinloos op geaggregeerde data
+        left, right = st.columns([3, 1])
+        with left:
+            choice = st.radio(
+                "Weergave",
+                options,
+                index=default_index,
+                horizontal=True,
+                key=f"{key}_granularity",
+                label_visibility="collapsed",
+            )
+        with right:
+            interactive = _zoom_switch(key)
+    else:
+        interactive = _zoom_switch(key)
 
+    code = GRANULARITY_RULES.get(choice) if allow_granularity else None
+    plot_df = df
+    aggregated = False
+    if code is not None:
+        plot_df = aggregate_frame(df, available, code)
+        aggregated = True
+        selected_date = None  # dagselectie is zinloos op geaggregeerde data
     if plot_df is None or plot_df.empty:
         return None
 
-    # Maandweergave van belasting: bar chart met periodetotaal.
-    monthly_load = rule == "MS" and available == ["training_load"]
-
     fig = go.Figure()
-    if monthly_load:
-        fig.add_trace(
-            go.Bar(
-                x=plot_df["date"],
-                y=plot_df["training_load"],
-                name="Training load (maandtotaal)",
-                marker_color="#1f77b4",
-                hovertemplate="%{x|%m/%Y}<br>Totaal load: %{y:.0f}<extra></extra>",
-            )
-        )
+    load_bars = available == ["training_load"]
+    if load_bars:
+        trace, x_start, x_end = _load_bar_trace(plot_df, code)
+        if trace is None:
+            return None
+        fig.add_trace(trace)
+        pad_days = 0
+        vline_date = selected_date + pd.Timedelta(hours=12) if selected_date is not None else None
     else:
         for field in available:
             if field not in plot_df.columns:
@@ -223,6 +381,13 @@ def render_time_chart(
                     ),
                 )
             )
+        if trend_field and trend_field in available:
+            trend = _trend_trace(plot_df, trend_field)
+            if trend is not None:
+                fig.add_trace(trend)
+        x_start, x_end = _data_date_range(plot_df, available)
+        pad_days = 1
+        vline_date = selected_date
 
     if show_form_zones and "form" in plot_df.columns:
         values = pd.to_numeric(plot_df["form"], errors="coerce").dropna()
@@ -232,23 +397,34 @@ def render_time_chart(
     if title:
         fig.update_layout(title=dict(text=title, x=0.01, xanchor="left"))
 
-    x_start, x_end = _data_date_range(plot_df, available)
-    fig = configure_time_chart(fig, selected_date, x_start, x_end)
+    fig = configure_time_chart(
+        fig,
+        vline_date,
+        x_start,
+        x_end,
+        interactive=interactive,
+        pad_days=pad_days,
+        uirevision=f"{key}|{choice}|{x_start}|{x_end}",
+    )
+    if load_bars:
+        fig.update_layout(hovermode="closest", bargap=0)
+    fig.update_layout(height=380)
 
-    # Selectie via klikken alleen zinvol op ruwe dagdata.
+    config = PLOT_CONFIG_INTERACTIVE if interactive else PLOT_CONFIG
+
+    # Selectie via tikken/klikken alleen zinvol op ruwe dagdata.
     if aggregated:
-        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG, key=key)
+        st.plotly_chart(fig, use_container_width=True, config=config, key=key)
         return None
-
     try:
         return st.plotly_chart(
             fig,
             use_container_width=True,
-            config=PLOT_CONFIG,
+            config=config,
             key=key,
             on_select="rerun",
             selection_mode="points",
         )
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG, key=key)
+        st.plotly_chart(fig, use_container_width=True, config=config, key=key)
         return None

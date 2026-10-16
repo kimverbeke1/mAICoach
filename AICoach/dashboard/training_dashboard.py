@@ -2,10 +2,13 @@
 #training_dashboard.py
 from pathlib import Path
 import sys
+
 import streamlit as st
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
 from AICoach.chat.ai_message_handler import handle_message
 from AICoach.context_builder import build_context
 from AICoach.dashboard.activities_tab import render_activities
@@ -37,9 +40,7 @@ from AICoach.saved_insights import render_saved_insights, save_insight
 # BELANGRIJK om de cijfers te lezen: render_health_app() gebruikt st.tabs.
 # Streamlit voert de inhoud van ELKE tab uit bij elke run - ook van tabs die
 # je niet bekijkt. Elke tab heeft hieronder dus een eigen stap
-# ("AICoach tab: ..."): zo zie je precies wat onzichtbare tabs kosten. Dat is
-# hetzelfde patroon dat bij PadelAnalysis (Opstelling-analyse) een groot
-# deel van de laadtijd bleek te zijn.
+# ("AICoach tab: ..."): zo zie je precies wat onzichtbare tabs kosten.
 #
 # build_context() wordt zowel in render_health_app() als in
 # render_dashboard() aangeroepen, onder DEZELFDE stapnaam - de tabel
@@ -63,6 +64,8 @@ except Exception:  # noqa: BLE001  pragma: no cover
             return nullcontext()
 
     perf = _PerfNoop()
+
+
 def _inject_css() -> None:
     st.markdown(
         """
@@ -106,6 +109,8 @@ def _inject_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
 # --------------------------------------------------------------------------- #
 # DATA-VERVERSING - VOORGESCHIEDENIS EN HUIDIGE AANPAK
 #
@@ -114,52 +119,23 @@ def _inject_css() -> None:
 # eerste render tot de volledige intervals.icu-sync klaar was (traag).
 # v2 (MATCHFITAI_AUTOSTART_FIRST_SYNC): sync in een achtergrond-thread, met
 # een begrensde wacht-lus. Op Streamlit Community Cloud onbetrouwbaar
-# gebleken: spinner verscheen wel, data niet - ook niet na handmatig
-# verversen.
+# gebleken.
 # v3 (MATCHFITAI_DROP_LIVE_SYNC_FROM_APP_2026-09-14): de app doet ZELF geen
 # live intervals.icu-aanroep meer. Een aparte, uur-gebaseerde GitHub
 # Actions-workflow (.github/workflows/sync-mAIcoach.yml) synchroniseert en
 # schrijft naar GCS; de app leest enkel terug.
 # v3.1 (MATCHFITAI_CACHE_MIRROR_HISTORY_2026-09-14): de terugleesoperatie
-# gebeurde bij ELKE Streamlit-rerun (dus bij elke tab-klik) -> gecachet tot
-# maximaal 1x per 5 minuten per sessie.
+# gebeurde bij ELKE Streamlit-rerun -> gecachet tot maximaal 1x per 5 minuten.
 #
-# MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15 (kritieke bugfix, dit blok):
-# BUG (opgelost, gemeld door Kim): op de cloud toonde Dashboard wel data,
-# maar Recovery en Activiteiten bleven LEEG. Oorzaak lag NIET hier maar in
-# persistent_data.py: alleen history/ werd naar GCS gespiegeld, terwijl
-# wellness.json (bron voor HRV/slaap in Recovery) en activities.json (bron
-# voor de Activiteiten-tab) uitsluitend lokaal bestonden - en dus achterbleven
-# op de GitHub Actions-runner die na de sync vernietigd wordt.
-# Aanpassing hier: _refresh_local_history_from_storage() roept nu
-# mirror_all_to_local() aan in plaats van mirror_history_to_local(), zodat
-# alle drie de bronnen worden teruggezet. Zie persistent_data.py voor de
-# volledige toelichting en de nieuwe save_wellness()/save_activities().
+# MATCHFITAI_PERSIST_WELLNESS_ACTIVITIES_2026-09-15: _refresh_local_data_
+# from_storage() roept mirror_all_to_local() aan, zodat history, wellness en
+# activities alle drie worden teruggezet. Zie persistent_data.py.
 #
-# MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24 (op verzoek van Kim, na een
-# concreet incident: Cloud Storage-facturering stond uit, waardoor GCS
-# wekenlang onbereikbaar was)
-# --------------------------------------------------------------------------
-# BUG (opgelost): _refresh_local_data_from_storage() ving een falende
-# mirror_all_to_local() enkel op als die een EXCEPTIE gooide. Maar bij
-# onbereikbare GCS (bv. door uitgeschakelde facturering) gooit die functie
-# nergens een fout - ze geeft gewoon overal 0 terug (zie
-# persistent_data.mirror_*_to_local()). Gevolg: geen enkele foutmelding in de
-# UI, enkel een dashboard dat stilzwijgend de oude, lokaal reeds aanwezige
-# data bleef tonen. Precies dat patroon maakte het incident weken lang
-# onopgemerkt.
-#
-# FIX: na een mirror-poging die overal 0 teruggeeft, wordt nu actief
-# gcs_status() geraadpleegd. Is GCS effectief onbereikbaar, dan verschijnt
-# een duidelijke waarschuwing MET de concrete oorzaak (bv. "billing not
-# enabled") in dezelfde expander die eerder al voor exceptions bestond -
-# in plaats van enkel stilzwijgend niets te doen.
-#
-# De "Nu verversen"-knop roept bovendien clear_bucket_cache() aan: de
-# GCS-verbinding wordt procesbreed gecached (zie gcs_store.get_bucket()),
-# dus na het herstellen van bv. facturering zou de lopende Streamlit-sessie
-# dat zonder deze reset nooit oppikken - enkel een volledige herstart van de
-# app zou geholpen hebben.
+# MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een mirror die overal 0
+# teruggeeft (zonder exceptie) wordt actief onderzocht via gcs_status() en
+# toont dan een waarschuwing MET de concrete oorzaak. De "Nu verversen"-knop
+# roept clear_bucket_cache() aan, zodat een herstelde GCS-storing zonder
+# herstart van de app opgepikt wordt.
 # --------------------------------------------------------------------------- #
 _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-sync-workflow
 
@@ -168,23 +144,13 @@ _MIRROR_CACHE_SECONDS = 300  # 5 minuten - ruim vers genoeg t.o.v. de 1x/uur-syn
 # MEETSESSIE met perf_timing.py: mAICoach 7.52s, waarvan 5.92s (79%) in
 # _refresh_local_data_from_storage)
 #
-# ROOT CAUSE: de 5-minuten-beperking (v3.1 hierboven) stond in
-# st.session_state. Elke F5, elke nieuwe browser-tab en elk wissel naar de
-# app vanaf een andere pagina-URL start in Streamlit een NIEUWE sessie - met
-# een lege session_state. De beperking gold dus nooit bij een verse
-# page-load, net het moment waarop Kim wacht. Gevolg: elke F5 kostte ~6s
-# GCS-downloads, terwijl de lokale bestanden er al stonden.
+# ROOT CAUSE: de 5-minuten-beperking stond in st.session_state; elke F5 start
+# een NIEUWE sessie met een lege session_state, dus de beperking gold nooit
+# bij een verse page-load.
 #
 # FIX: de beperking staat nu op PROCES-niveau (_MIRROR_STATE hieronder,
-# gedeeld door alle sessies in hetzelfde Streamlit-proces, beschermd met
-# een lock zodat twee gelijktijdige sessies niet dubbel spiegelen). Na een
-# herstart van de app betaalt enkel de allereerste page-load de spiegeling;
-# daarna maximaal 1x per 5 minuten, ongeacht hoeveel sessies/F5's.
-# Het laatste resultaat en een eventuele GCS-waarschuwing worden ook op
-# proces-niveau bewaard en naar elke nieuwe sessie gekopieerd, zodat de
-# bestaande meldingen (fout/waarschuwing/"laatst teruggezet") in elke sessie
-# zichtbaar blijven. "Nu verversen" forceert nog steeds een echte
-# spiegeling (reset van de proces-tijdstempel).
+# gedeeld door alle sessies, beschermd met een lock). "Nu verversen"
+# forceert nog steeds een echte spiegeling.
 # --------------------------------------------------------------------------- #
 import threading as _threading
 
@@ -217,24 +183,14 @@ def _copy_mirror_state_to_session() -> None:
         st.session_state["data_refresh_warning"] = _MIRROR_STATE["warning"]
     else:
         st.session_state.pop("data_refresh_warning", None)
+
+
 def _refresh_local_data_from_storage() -> None:
     """Spiegelt history, wellness en activities van GCS terug naar lokale
-    bestanden. GEEN intervals.icu-aanroep - enkel een lezing van reeds
-    bestaande, door de uur-gebaseerde GitHub Actions-workflow bijgewerkte
-    opslag.
-    Doet dit maximaal 1x per _MIRROR_CACHE_SECONDS per PROCES (sinds
-    MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29; voorheen per sessie, wat
-    bij elke F5 opnieuw ~6s kostte), in plaats van bij elke rerun - dat verklaarde eerder de
-    trage paginawissels. Faalt de lezing (bv. GCS onbereikbaar), dan wordt dat
-    opgevangen en blijft de app de reeds lokaal aanwezige data tonen; de
-    volgende poging gebeurt bij het verstrijken van de cache-termijn.
-    MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een mirror die overal 0
-    teruggeeft (zonder exceptie) wordt nu ALSNOG als mogelijk probleem
-    onderzocht via gcs_status() - zie het uitgebreide commentaarblok
-    hierboven voor waarom dat nodig bleek."""
+    bestanden. GEEN intervals.icu-aanroep. Maximaal 1x per
+    _MIRROR_CACHE_SECONDS per PROCES."""
     import time
-    # MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29: beperking op PROCES-
-    # niveau i.p.v. per sessie - zie het commentaarblok bij _MIRROR_STATE.
+
     now = time.monotonic()
     with _MIRROR_LOCK:
         last_refreshed = _MIRROR_STATE["last_at"]
@@ -248,10 +204,6 @@ def _refresh_local_data_from_storage() -> None:
         else:
             _MIRROR_STATE["error"] = None
             _MIRROR_STATE["result"] = result
-            # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: geen exceptie, maar
-            # ook helemaal niets teruggekregen? Dan is een stille GCS-storing
-            # minstens even waarschijnlijk als "gewoon nog geen nieuwe data" -
-            # dus actief nagaan i.p.v. te zwijgen.
             if not any(result.values()):
                 status = gcs_status()
                 if status["bucket_name"] and not status["available"]:
@@ -262,6 +214,16 @@ def _refresh_local_data_from_storage() -> None:
                 _MIRROR_STATE["warning"] = None
         _MIRROR_STATE["last_at"] = now
         _copy_mirror_state_to_session()
+
+
+def _apply_chart_selection(event, selected_date) -> None:
+    """Een getikte/geklikte dag in een grafiek wordt de geselecteerde dag."""
+    event_date = selected_date_from_event(event)
+    if event_date is not None and event_date != selected_date:
+        st.session_state.dashboard_selected_date = event_date
+        st.rerun()
+
+
 def render_dashboard():
     with perf.step("AICoach: load_history"):
         df = load_history()
@@ -287,22 +249,37 @@ def render_dashboard():
         st.session_state.dashboard_selected_date = latest_date
     selected_row = nearest_row(view, selected_date)
     render_selected_values(selected_row, ["fitness", "fatigue", "form", "training_load", "resting_hr"])
-    with perf.step("AICoach: grafiek fitness/fatigue/form"):
+
+    # MATCHFITAI_CHARTS_MOBILE_2026-10-16: Fitness/Fatigue en Form staan nu in
+    # aparte grafieken. Form heeft een andere schaal (rond 0) en krijgt de
+    # zonebanden; Fitness krijgt een trendlijn. Zie charts.py.
+    with perf.step("AICoach: grafiek fitness/fatigue"):
         event = render_time_chart(
             view,
-            ["fitness", "fatigue", "form"],
+            ["fitness", "fatigue"],
             key="dashboard_fitness_chart",
             selected_date=selected_date,
-            title="Fitness, Fatigue en Form",
+            title="Fitness en Fatigue",
             default_granularity="Dag",
+            trend_field="fitness",
         )
-    event_date = selected_date_from_event(event)
-    if event_date is not None and event_date != selected_date:
-        st.session_state.dashboard_selected_date = event_date
-        st.rerun()
+    _apply_chart_selection(event, selected_date)
+
+    with perf.step("AICoach: grafiek form"):
+        form_event = render_time_chart(
+            view,
+            ["form"],
+            key="dashboard_form_chart",
+            selected_date=selected_date,
+            title="Form",
+            default_granularity="Dag",
+            show_form_zones=True,
+        )
+    _apply_chart_selection(form_event, selected_date)
+
     if has_data(view, "training_load"):
         with perf.step("AICoach: grafiek training load"):
-            render_time_chart(
+            load_event = render_time_chart(
                 view,
                 ["training_load"],
                 key="dashboard_load_chart",
@@ -310,6 +287,9 @@ def render_dashboard():
                 title="Training load",
                 default_granularity="Maand",
             )
+        _apply_chart_selection(load_event, selected_date)
+
+
 def render_chat():
     st.subheader("mAICoach")
     if "chat_history" not in st.session_state:
@@ -340,22 +320,19 @@ def render_chat():
             render_assistant_answer(answer)
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
+
+
 def render_health_app() -> None:
     """Bouwt de volledige mAICoach-pagina (titel, data-verversing, tabs).
-    Dit is de ENIGE plek waar de UI-structuur van de gezondheidsmodule wordt
-    opgebouwd. Zowel de standalone uitvoering (streamlit run
-    training_dashboard.py) als de gecombineerde app (via
-    AICoach/dashboard/app.py -> health_page.py) roepen exact deze functie aan.
+
+    Zowel de standalone uitvoering (streamlit run training_dashboard.py) als
+    de gecombineerde app (via AICoach/dashboard/app.py -> health_page.py)
+    roepen exact deze functie aan.
+
     MATCHFITAI_DAILY_BUTTON_KEY_FIX_2026-09-27: reset_widget_key_counters()
-    wordt hier, als EERSTE actie, exact 1x per script-run aangeroepen - dit is
-    de enige echte top-level entry point (zie hierboven), dus dit garandeert
-    dat de widget-keys in daily_update.py weer stabiel zijn over reruns heen.
-    Zie de uitgebreide root-cause-analyse in daily_update.py's moduledocstring
-    voor waarom dit nodig was ("Laat AI meedenken..."-knop deed voorheen
-    niets)."""
+    wordt hier, als EERSTE actie, exact 1x per script-run aangeroepen. Zie
+    daily_update.py voor de root-cause-analyse."""
     reset_widget_key_counters()
-    # PERF_TIMING_ROLLOUT_2026-09-29: no-op via streamlit_app.py (daar wordt
-    # centraal gereset); actief bij standalone `streamlit run`.
     perf.reset()
     try:
         st.set_page_config(page_title="mAICoach", page_icon="\U0001F3C3", layout="wide")
@@ -378,9 +355,6 @@ def render_health_app() -> None:
     if st.session_state.get("data_refresh_error"):
         with st.expander("\u26A0\uFE0F Kon de opslag niet verversen (details)"):
             st.code(st.session_state["data_refresh_error"])
-    # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: een stille (niet-
-    # exceptie-gebaseerde) GCS-storing krijgt hier dezelfde zichtbaarheid als
-    # een harde fout hierboven, met de concrete oorzaak erbij.
     if st.session_state.get("data_refresh_warning"):
         status = st.session_state["data_refresh_warning"]
         with st.expander("\u26A0\uFE0F Cloud-opslag lijkt onbereikbaar (details)", expanded=True):
@@ -407,10 +381,6 @@ def render_health_app() -> None:
                 f"{last_result.get('activities', 0)} activiteiten."
             )
         if st.button("Nu verversen"):
-            # MATCHFITAI_GCS_SILENT_FAILURE_FIX_2026-09-24: de GCS-verbinding
-            # wordt procesbreed gecached (@lru_cache in gcs_store.get_bucket()).
-            # Zonder deze reset zou het herstellen van bv. facturering pas na
-            # een volledige herstart van de Streamlit-app effect hebben.
             try:
                 from AICoach.gcs_store import clear_bucket_cache
                 clear_bucket_cache()
@@ -420,11 +390,7 @@ def render_health_app() -> None:
             st.cache_data.clear()
             st.session_state.pop("dashboard_selected_date", None)
             st.session_state.pop("data_refresh_warning", None)
-            # Forceert een nieuwe GCS-lezing, ook al is de 5-minuten-termijn
-            # nog niet verstreken.
             st.session_state.pop("_data_mirror_last_refreshed_at", None)
-            # MATCHFITAI_MIRROR_PROCESS_THROTTLE_2026-09-29: de beperking
-            # staat nu op proces-niveau - daar ook resetten.
             _reset_mirror_throttle()
             st.rerun()
     tab_labels = ["Dashboard", "AI Coach", "Recovery", "Athlete Knowledge", "Beste resultaten", "Activiteiten"]
@@ -456,14 +422,10 @@ def render_health_app() -> None:
         with tabs[6]:
             with perf.step("AICoach tab: Vergelijking"):
                 render_comparison_tab()
-
-    # PERF_TIMING_ROLLOUT_2026-09-29: no-op via streamlit_app.py (daar wordt
-    # het paneel centraal getekend); actief bij standalone `streamlit run`.
     perf.render_panel()
-# Bouwt de pagina ALLEEN op wanneer dit bestand rechtstreeks wordt uitgevoerd
-# (bv. `streamlit run AICoach/dashboard/training_dashboard.py`). Bij een
-# `import` vanuit app.py (de gecombineerde app) blijft __name__ gelijk aan de
-# modulenaam, niet "__main__", waardoor dit blok dan correct wordt
-# overgeslagen en render_health_app() niet ongewild al bij import draait.
+
+
+# Bouwt de pagina ALLEEN op wanneer dit bestand rechtstreeks wordt uitgevoerd.
+# Bij een import vanuit app.py blijft __name__ gelijk aan de modulenaam.
 if __name__ == "__main__":
     render_health_app()
