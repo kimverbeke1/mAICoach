@@ -1,19 +1,19 @@
 """Opslag voor het Crypto-project: Firestore als die beschikbaar is, anders lokaal (CSV/JSON).
 
 Firestore-collecties:
-  crypto_candles/{SYMBOL}_1d   dagcandles als kolom-arrays (t, o, h, l, c, v, q) + checked_from
-  crypto_results/{key}         laatst berekende dip-tabel per combinatie van instellingen (JSON)
-  crypto_settings/coins        per munt opgeslagen schijven/winstdoel
+  crypto_candles/{SYMBOL}_1d     dagcandles als kolom-arrays (t, o, h, l, c, v, q) + checked_from
+  crypto_results/{key}           laatst berekende dip-tabel per combinatie van instellingen (JSON)
+  crypto_settings/coins          per munt opgeslagen schijven/winstdoel
+  crypto_settings/app_defaults   jouw standaardinstellingen (knop '💾 Bewaar als standaard'); de app start
+                                 hiermee en de nachtelijke update rekent ermee
 
 Welke Firestore-verbinding (eerste die werkt):
-  1. PadelAnalysis/firebase_service.py -> `db`: EXACT dezelfde verbinding (project + database) als
-     PadelAnalysis. Zo schrijft Crypto gegarandeerd in dezelfde, bestaande Firestore-database.
-  2. Service account uit st.secrets of env (FIREBASE_SERVICE_ACCOUNT_JSON eerst; daarna een
-     secrets-sectie met 'private_key' + 'client_email'), zoals in de GitHub Actions.
+  1. PadelAnalysis/firebase_service.py -> `db`: EXACT dezelfde verbinding (project + database) als PadelAnalysis.
+  2. Service account uit st.secrets of env (FIREBASE_SERVICE_ACCOUNT_JSON eerst; daarna een secrets-sectie met
+     'private_key' + 'client_email'), zoals in de GitHub Actions.
   3. env GOOGLE_APPLICATION_CREDENTIALS.
-Bij de EERSTE toegang wordt de verbinding getest met één leesopdracht. Mislukt die (bv. NotFound =
-database bestaat niet in dat project, of geen rechten), dan schakelt de module over op LOKAAL en toont
-status() de reden. De pagina crasht dus nooit meer door Firestore.
+Bij de EERSTE toegang wordt de verbinding getest met één leesopdracht. Mislukt die, dan schakelt de module over
+op LOKAAL en toont status() de reden. De pagina crasht dus nooit door Firestore.
 CRYPTO_NO_CLOUD=1 schakelt Firestore volledig uit.
 """
 from __future__ import annotations
@@ -28,12 +28,15 @@ import pandas as pd
 COLL_CANDLES = "crypto_candles"
 COLL_RESULTS = "crypto_results"
 COLL_SETTINGS = "crypto_settings"
-CLOUD_INTERVALS = {"1d"}          # enkel dagdata in Firestore (uur/kwartier is te groot voor één document)
+DOC_DEFAULTS = "app_defaults"
+CLOUD_INTERVALS = {"1d"}
 ENV_JSON_KEYS = ("FIREBASE_SERVICE_ACCOUNT_JSON", "FIREBASE_SERVICE_ACCOUNT", "FIREBASE_CREDENTIALS")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
-_LOCAL_RESULTS = os.path.join(os.environ.get("CRYPTO_CACHE_DIR") or os.path.join(_HERE, "data_cache"), "results")
+_CACHE = os.environ.get("CRYPTO_CACHE_DIR") or os.path.join(_HERE, "data_cache")
+_LOCAL_RESULTS = os.path.join(_CACHE, "results")
+_LOCAL_DEFAULTS = os.path.join(_CACHE, "app_defaults.json")
 
 _db = None
 _err: str | None = None
@@ -58,8 +61,6 @@ def _from_padel():
 
 
 def _service_account() -> dict | None:
-    """Service-account-dict uit st.secrets of omgevingsvariabelen. FIREBASE_SERVICE_ACCOUNT_JSON krijgt
-    voorrang op andere secties (er kan ook een sleutel voor een ander Google-project in staan)."""
     try:
         import streamlit as st
         sec = st.secrets
@@ -74,7 +75,7 @@ def _service_account() -> dict | None:
             v = sec[k]
             if hasattr(v, "keys") and "private_key" in v and "client_email" in v:
                 return dict(v)
-    except Exception:  # noqa: BLE001 - geen streamlit, geen secrets.toml
+    except Exception:  # noqa: BLE001
         pass
     for k in ENV_JSON_KEYS:
         v = os.environ.get(k)
@@ -114,7 +115,7 @@ def get_db():
             continue
         if db is None:
             continue
-        try:                                   # verbindingstest: één leesopdracht
+        try:
             db.collection(COLL_SETTINGS).document("coins").get()
         except Exception as e:  # noqa: BLE001
             errors.append(f"{name}: {_short(e)}")
@@ -135,14 +136,12 @@ def is_cloud() -> bool:
 
 
 def _disable(e: Exception) -> None:
-    """Fout tijdens gebruik: verder lokaal werken i.p.v. de pagina te laten crashen."""
     global _db, _err
     _db, _err = None, f"uitgevallen tijdens gebruik: {_short(e)}"
 
 
 # --------------------------------------------------------------------------- candles
 def load_candles(symbol: str, interval: str) -> tuple[pd.DataFrame | None, dict]:
-    """(df, meta) uit Firestore, of (None, {}) als Firestore niet beschikbaar is."""
     db = get_db() if interval in CLOUD_INTERVALS else None
     if db is None:
         return None, {}
@@ -187,7 +186,6 @@ def _local_result_path(key: str) -> str:
 
 
 def load_result(key: str) -> dict | None:
-    """{'json': <tabel als JSON>, 'ts': epoch, 'source': 'app'|'github'} of None."""
     db = get_db()
     if db is not None:
         try:
@@ -218,7 +216,6 @@ def save_result(key: str, table_json: str, source: str = "app") -> None:
 
 # --------------------------------------------------------------------------- instellingen per munt
 def load_settings() -> dict | None:
-    """Dict uit Firestore, of None als er geen (werkende) Firestore is: dan het lokale bestand gebruiken."""
     db = get_db()
     if db is None:
         return None
@@ -240,3 +237,37 @@ def save_settings(data: dict) -> bool:
     except Exception as e:  # noqa: BLE001
         _disable(e)
         return False
+
+
+# --------------------------------------------------------------------------- jouw standaardinstellingen
+def load_app_defaults() -> dict:
+    """Bewaarde standaardinstellingen (leeg dict als er nog geen zijn)."""
+    db = get_db()
+    if db is not None:
+        try:
+            snap = db.collection(COLL_SETTINGS).document(DOC_DEFAULTS).get()
+            return (snap.to_dict() or {}) if snap.exists else {}
+        except Exception as e:  # noqa: BLE001
+            _disable(e)
+    if os.path.exists(_LOCAL_DEFAULTS):
+        try:
+            with open(_LOCAL_DEFAULTS, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def save_app_defaults(data: dict) -> str:
+    """Bewaar de standaardinstellingen. Geeft 'cloud' of 'lokaal' terug."""
+    db = get_db()
+    if db is not None:
+        try:
+            db.collection(COLL_SETTINGS).document(DOC_DEFAULTS).set(data)
+            return "cloud"
+        except Exception as e:  # noqa: BLE001
+            _disable(e)
+    os.makedirs(_CACHE, exist_ok=True)
+    with open(_LOCAL_DEFAULTS, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    return "lokaal"

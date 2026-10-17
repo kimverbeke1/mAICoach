@@ -1,8 +1,7 @@
 """Nachtelijke update (GitHub Actions):
-  1. koersdata bijwerken in Firestore voor de Coinbase-top REFRESH_TOP_N (standaard 150) munten;
-  2. de dip-tabel met de standaardinstellingen (DEFAULT_CFG) voor AL die munten berekenen en bewaren,
-     zodat de app bij het openen meteen een tabel heeft. Munten met te weinig historiek komen er ook in,
-     als '⚪ Te weinig data'.
+  1. koersdata bijwerken in Firestore voor de Coinbase-top (minstens REFRESH_TOP_N = 150 munten);
+  2. de dip-tabel berekenen met JOUW standaardinstellingen (bewaard via '💾 Bewaar als standaard' in de app,
+     anders de ingebouwde standaard) voor al die munten, en bewaren, zodat de app meteen een tabel heeft.
 
 Lokaal testen:  python crypto_refresh.py            (vanuit de map Crypto)
 Omgeving:       FIREBASE_SERVICE_ACCOUNT_JSON  (JSON-tekst van de service account)
@@ -24,8 +23,8 @@ if str(HERE) not in sys.path:
 import crypto_settings as cs  # noqa: E402
 import crypto_store as store  # noqa: E402
 from crypto_data import get_klines, get_top_symbols  # noqa: E402
-from crypto_dip import optimize_dip, walk_forward  # noqa: E402
-from crypto_scan import DEFAULT_CFG, REFRESH_TOP_N, cfg_key, finalize, scan_coin, table_to_json  # noqa: E402
+from crypto_dip import optimize_dip, walk_forward_multi  # noqa: E402
+from crypto_scan import REFRESH_TOP_N, cfg_key, effective_defaults, finalize, scan_coin, table_to_json  # noqa: E402
 
 
 def _refresh_n(table_n: int) -> int:
@@ -34,7 +33,7 @@ def _refresh_n(table_n: int) -> int:
         n = int(raw) if raw else REFRESH_TOP_N
     except ValueError:
         n = REFRESH_TOP_N
-    return max(n, table_n)          # nooit minder data dan de tabel nodig heeft
+    return max(n, table_n)
 
 
 def main() -> int:
@@ -43,11 +42,14 @@ def main() -> int:
     if os.environ.get("CRYPTO_REQUIRE_CLOUD") == "1" and not store.is_cloud():
         print("FOUT: Firestore niet bereikbaar (controleer de secret FIREBASE_SERVICE_ACCOUNT_JSON).")
         return 1
-    cfg = dict(DEFAULT_CFG)
+    stored = store.load_app_defaults()
+    cfg, vcfg = effective_defaults(stored)
+    print("Standaardinstellingen:", "bewaard in de app" if stored else "ingebouwd", "->",
+          {k: cfg[k] for k in ("days", "lookback", "amount", "optimal", "n_windows", "top_n")}, vcfg)
     settings = cs.load_all()
-    n_data = _refresh_n(cfg["top_n"])
-    tops = get_top_symbols(n_data)                    # gesorteerd op 24u-volume
-    table_syms = set(tops["symbol"].head(cfg["top_n"]))
+    n_data = _refresh_n(int(cfg["top_n"]))
+    tops = get_top_symbols(n_data)
+    table_syms = set(tops["symbol"].head(int(cfg["top_n"])))
     print(f"Koersdata voor {len(tops)} munten, tabel voor {len(table_syms)} munten.")
 
     @lru_cache(maxsize=None)
@@ -59,7 +61,8 @@ def main() -> int:
 
     def wf_fn(sym, tr, tg):
         fixed = None if tr is None else {"tranches": list(tr), "target": tg}
-        return walk_forward(klines(sym), cfg["lookback"], cfg["fee"], cfg["min_trades"], cfg["test_frac"], fixed)
+        return walk_forward_multi(klines(sym), cfg["lookback"], cfg["fee"], cfg["min_trades"],
+                                  int(cfg["n_windows"]), cfg["amount"], fixed)
 
     rows, errors, short = [], 0, 0
     t_data = t_calc = 0.0
@@ -92,7 +95,7 @@ def main() -> int:
     if not rows:
         print("Geen enkele munt berekend.")
         return 1
-    t = finalize(rows)
+    t = finalize(rows, vcfg)
     key = cfg_key(cfg, settings)
     store.save_result(key, table_to_json(t), source="github")
     print(f"Tabel bewaard onder {key}: {len(t)} munten ({short} met te weinig data), {errors} fouten. "

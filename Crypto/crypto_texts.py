@@ -1,5 +1,5 @@
 """Alle uitlegteksten van de Crypto-pagina (tooltips, kolomuitleg, voorbeelden, oordeelregels)."""
-from crypto_dip import EPISODE_GAP_DAYS
+from crypto_dip import EPISODE_GAP_DAYS, MIN_TRAIN_DAYS, MIN_WINDOW_DAYS, STABLE_DIP_SPREAD, STABLE_TARGET_RATIO
 
 # --------------------------------------------------------------------------- uitleg instellingen
 H = {
@@ -22,47 +22,55 @@ H = {
             "het weer dit % gestegen is. Moet ruim boven 2× de kost per transactie liggen.",
     "levels": "Aantal koopniveaus onder de startprijs. Kapitaal wordt gelijk verdeeld. "
               "10 levels × 2% = grid dekt ±18% daling; zakt de koers dieper, dan zit je vast.",
-    "dip_hist": "Hoeveel jaar dagdata gebruikt wordt (5 jaar = 1.830 dagen). De BACKTEST is korter: de eerste "
+    "dip_hist": "Hoeveel jaar dagdata gebruikt wordt (8 jaar = ±2.925 dagen). De BACKTEST is korter: de eerste "
                 "'referentie'-dagen (bv. 365) kunnen niet gebruikt worden omdat er dan nog geen top bekend is. "
-                "Voorbeeld: 1.830 − 364 = 1.466 dagen backtest (±4 jaar). Jonge munten hebben minder data. "
-                "Zie 'Dagen data', 'Start backtest' en 'Periode (jaar)' in de tabel.",
+                "Meer historiek = meer crashes en herstellen = meer bewijs, en ruimte voor meerdere testvensters. "
+                "Jonge munten hebben vanzelf minder data (zie 'Dagen data').",
     "lookback": "REFERENTIE HOOGSTE PUNT = hoe ver de app terugkijkt om de 'top' te bepalen. Alle dalingen "
                 "worden daaraan gemeten. Het is een MEEBEWEGEND venster: een oude piek valt na zoveel dagen weg.\n\n"
                 "Voorbeeld: een munt piekte 6 maanden geleden op €100 en staat nu op €40.\n"
                 "• Referentie 365 dagen → top €100 → daling −60% → bij koopdrempel −50%: in de koopzone.\n"
                 "• Referentie 90 dagen → top van de laatste 90 dagen bv. €55 → daling −27% → niet in de koopzone.\n\n"
-                "ADVIES: begin met 365 dagen (de 'jaarhoogte', een gangbare maat). 180 = meer signalen, maar de top "
-                "verdwijnt snel na een crash. 730 = enkel zinvol met 8 jaar historiek (de backtest wordt korter en "
-                "jonge munten vallen af). Kies niet de waarde met het mooiste resultaat (dat is bijsturen op het "
-                "verleden), maar kijk of het Oordeel per munt stabiel blijft bij 180, 365 en 730. "
-                "Opgeslagen instellingen gelden enkel bij de referentie waarmee ze bewaard werden.",
+                "ADVIES: begin met 365 dagen (de 'jaarhoogte'). 180 = meer signalen, maar de top verdwijnt snel na "
+                "een crash. 730 = enkel zinvol met 8 jaar historiek. Kies niet de waarde met het mooiste resultaat, "
+                "maar kijk of het Oordeel per munt stabiel blijft bij 180, 365 en 730.",
     "amount": "Bedrag dat je per munt wil inzetten, standaard in één schijf. Alle €-kolommen rekenen hiermee. "
               "Koersdata komt van Coinbase (USD-markt; bestaat die niet: USDC of EUR). "
               "Wisselkoerseffecten €/$ worden genegeerd.",
     "mode": "OPTIMAAL PER MUNT: de app test per munt alle combinaties koopdrempel (30–85%) × winstdoel "
-            "(10–100%) en kiest wat historisch het beste (en stabielste) rendement per jaar gaf.\n\n"
-            "VASTE WAARDEN: dezelfde koopdrempel en hetzelfde winstdoel voor alle munten.\n\n"
+            "(10–100%) en kiest wat historisch het beste (en stabielste) rendement per jaar gaf. In elk testvenster "
+            "wordt die zoektocht opnieuw gedaan op enkel de data vóór dat venster.\n\n"
+            "VASTE WAARDEN: dezelfde koopdrempel en hetzelfde winstdoel voor alle munten (en in elk venster).\n\n"
             "Munten waarvoor je in 'Detail munt' eigen instellingen opsloeg, gebruiken altijd die.",
     "dip": "KOOPDREMPEL: koop pas als de slotkoers minstens dit % onder de top staat.",
     "target": "WINSTDOEL: verkoop zodra de koers dit % boven je aankoopprijs komt (vóór kosten).",
     "maxwait": "MAX. WACHTTIJD VOOR 'KANS' geldt ENKEL voor de kolommen Hersteld, Kans per keer, Kans per dag en "
-               "Te recent. Niet voor backtest, test, %/jaar of eindwaarde (die wachten onbeperkt).\n\n"
-               "Voorbeeld: je koopt op −50%, winstdoel +30%, en het doel wordt pas na 400 dagen gehaald.\n"
-               "• Wachttijd 365 → telt als NIET hersteld ❌\n"
-               "• Wachttijd 730 → telt als hersteld ✅",
+               "Te recent. Niet voor backtest, testvensters, %/jaar of eindwaarde (die wachten onbeperkt).",
     "min_trades": "Optimalisatie negeert combinaties met minder afgeronde trades dan dit. "
                   "Voorkomt dat één toevallige gelukstreffer als 'beste' gekozen wordt.",
-    "test_frac": "BETROUWBAARHEIDSTEST: het laatste deel van de BACKTEST wordt achtergehouden. De beste "
-                 "koopdrempel en het beste winstdoel worden enkel op het eerste deel (TRAINING) gezocht en daarna "
-                 "blind getest op het laatste deel (TEST).\n\n"
-                 "Voorbeeld: backtest 1.466 dagen, test 30% → test = laatste 440 dagen (±1,2 jaar), "
-                 "training = eerste 1.026 dagen (±2,8 jaar). 0% = test uit (sneller).\n\n"
-                 "Werk je met 'Vaste waarden' of een opgeslagen instelling, dan wordt precies díe instelling "
-                 "blind getest (er wordt dan niets opnieuw gezocht).",
+    "n_windows": "TESTVENSTERS: hoeveel opeenvolgende jaren (achteraan de historiek, het laatste eindigt vandaag) "
+                 "blind getest worden. Per venster zoekt de app de beste instelling op ALLE data vóór dat jaar en "
+                 "past ze dan toe op dat jaar zelf, met vers kapitaal.\n\n"
+                 "Voorbeeld met 3: zoeken t/m 2023 → test 2024; zoeken t/m 2024 → test 2025; zoeken t/m 2025 → "
+                 "test 2026. Meer vensters = meer trades en meer marktfases als bewijs, maar minder training voor "
+                 f"het eerste venster. Een venster vraagt minstens {MIN_TRAIN_DAYS} dagen backtest ervoor en "
+                 f"minstens {MIN_WINDOW_DAYS} dagen lengte; jonge munten krijgen dus minder of kortere vensters. "
+                 "0 = test uit (dan geen oordeel).",
+    "min_annual": "OORDEEL – minimum GEREALISEERD rendement per jaar over de testvensters om 🟢 te krijgen. "
+                  "Ter vergelijking: sparen 2–3%, aandelen-ETF ±7–8% gemiddeld. Wijzigen herberekent niets: "
+                  "het oordeel past zich meteen aan.",
+    "min_real_trades": "OORDEEL – minimum aantal AFGERONDE (gekocht én verkocht) trades over alle testvensters "
+                       "om 🟢 te krijgen. Eén of twee trades is een anekdote; 3+ begint te overtuigen.",
+    "max_open_dd": "OORDEEL – hoe diep de laatste, nog open positie maximaal onder haar aankoopprijs mag staan "
+                   "voor 🟢. Een open positie in de plus is geen probleem; dieper dan dit wordt 🟡 of 🟠.",
+    "live_n": "Met je standaardinstellingen toont de app de nachtelijke tabel (meteen klaar). Wijzig je een "
+              "reken-instelling, dan rekent de app zelf, voor de top van dit aantal munten (op 24u-volume).",
+    "save_defaults": "Bewaart je huidige instellingen (behalve de kosten) als standaard in de database. De app start "
+                     "voortaan daarmee, en de nachtelijke update rekent er ook mee, zodat de tabel met jouw "
+                     "instellingen elke ochtend klaarstaat.",
     "ladder": "SCHIJVEN: standaard zit je hele bedrag in één schijf. Je kan rijen toevoegen om het te verdelen, "
-              "bv. €500 bij −50% en €500 bij −65%. Zakt de koers dieper, dan koop je bij en wordt je gemiddelde "
-              "aankoopprijs lager. Elke schijf verkoopt apart bij het winstdoel. Meer schijven = een andere "
-              "strategie dan in de tabel (zie de ⚠️ vergelijking onder '4. Resultaat').",
+              "bv. €2.500 bij −50% en €2.500 bij −65%. Elke schijf verkoopt apart bij het winstdoel. Meer schijven "
+              "= een andere strategie dan in de tabel (zie de ⚠️ vergelijking onder '5. Resultaat').",
 }
 
 # --------------------------------------------------------------------------- uitleg kolommen (tooltip)
@@ -79,368 +87,187 @@ C_HELP = {
     "max_drawdown_pct": "Grootste daling vanaf een top in de periode.",
     "quote_vol_day_musd": "Gemiddeld handelsvolume per dag in miljoen (USD). Hoger = kleinere spread.",
     # dip
-    "coinbase": "In welke markten je deze munt op Coinbase kan kopen (bv. EUR/USD/USDC). Alle munten in de lijst "
-                "komen van Coinbase; ⏸️ = handel staat tijdelijk uit. Controleer altijd in je eigen Coinbase-app.",
-    "verdict": "OORDEEL OVER DE STRATEGIE, enkel gebaseerd op de 🧪 TEST (data die de instelling niet zag). "
-               "Het zegt NIET of je nu moet kopen (daarvoor is er de kolom 'Koopzone nu?') en het kijkt NIET naar "
-               "de Eindwaarde van de hele historiek (die is achteraf geoptimaliseerd).\n"
-               "🟢 Interessant – test positief, verslaat kopen&houden, minstens 1 afgeronde trade, ≥3 keren in zone.\n"
-               "🟡 Twijfel – test positief, maar met een addertje (zie 'Waarom').\n"
-               "⚪ Niets bewezen – in de test nooit gekocht, of geen test mogelijk.\n"
-               "🟠 Onder water – in de test gekocht en nog niet hersteld: papieren verlies, geen bewijs van falen.\n"
-               "🔴 Niet interessant – training al zonder winst, of test negatief zonder open positie.\n"
-               "De tabel is op dit oordeel gesorteerd (beste bovenaan).",
+    "coinbase": "In welke markten je deze munt op Coinbase kan kopen (bv. EUR/USD/USDC). ⏸️ = handel staat "
+                "tijdelijk uit. Controleer altijd in je eigen Coinbase-app.",
+    "verdict": "OORDEEL OVER DE WERKWIJZE, gebaseerd op de 🧪 TESTVENSTERS (blind getest) en vooral op GEREALISEERDE "
+               "winst. Het zegt NIET of je nu moet kopen (zie 'Koopzone nu?').\n"
+               "🟢 Interessant – genoeg afgeronde trades, gerealiseerd rendement ≥ jouw minimum, stabiele instelling, "
+               "meerderheid van de vensters positief, open positie niet te diep.\n"
+               "🟡 Twijfel – iets ontbreekt (zie 'Waarom').\n"
+               "⚪ Niets bewezen / Niet getest / Te weinig data.\n"
+               "🟠 Onder water – laatste positie staat diep in het rood en er is te weinig gerealiseerde winst.\n"
+               "🔴 Niet interessant – gerealiseerd én inclusief open positie verlies.\n"
+               "De drempels stel je in bij ⚙️ Instellingen → Oordeel.",
     "why": "Korte reden achter het oordeel, met de cijfers erbij.",
     "now": "KOOPZONE NU? Puur mechanisch: staat de munt vandaag onder je koopdrempel?\n"
            "🛒 In koopzone = de regel zegt nu: koop.\n"
-           "👀 Nog X% zakken = de munt moet eerst nog X% dalen (in % van de koers van vandaag).\n"
-           "Een goede kandidaat om NU te kopen = 🛒 én een oordeel 🟢/🟡.",
-    "source": "Waar de instellingen vandaan komen: OPGESLAGEN (door jou in Detail munt), OPTIMAAL "
-              "(automatisch historisch beste) of VAST (jouw algemene instellingen). "
+           "👀 Nog X% zakken = de munt moet eerst nog X% dalen.\n"
+           "Een goede kandidaat om NU te kopen = 🛒 én een oordeel 🟢 (of 🟡).",
+    "source": "Waar de instelling van vandaag vandaan komt: OPGESLAGEN (door jou in Detail munt), OPTIMAAL "
+              "(historisch beste over de hele historiek) of VAST (jouw algemene instellingen). "
               "'Vast*' = optimalisatie vond te weinig trades, daarom vaste waarden gebruikt.",
-    "dip_pct": "Gebruikte koopdrempel: koop als de koers zoveel % onder de top staat. Bij meerdere schijven: de eerste (minst diepe).",
-    "target_pct": "Gebruikt winstdoel: verkoop bij zoveel % boven de aankoopprijs (vóór kosten).",
-    "current_dd_pct": "Hoe ver de koers NU onder de top staat. Bv. −62% = 62% goedkoper dan het hoogste punt "
-                      "van de referentieperiode. Let op: ook een korte piek telt als top.",
-    "to_zone_pct": "Hoeveel de koers vanaf nu nog moet zakken tot de (eerste) koopdrempel. "
-                   "0 = zit nu in de koopzone.",
-    "history_days": "Dagen koersgeschiedenis. De eerste dagen (lengte referentieperiode) leveren geen signalen: "
-                    "er is dan nog geen top om mee te vergelijken.",
-    "episodes": f"Aantal AFZONDERLIJKE crashes: keren dat de munt in de koopzone kwam. Een nieuwe keer telt pas "
-                f"als de koers eerst ≥10 procentpunt boven de koopdrempel hersteld is (drempel −50% → tot −40% of "
-                f"beter) óf {EPISODE_GAP_DAYS} dagen buiten de zone bleef. Schommelen rond de drempel (−51%, −48%, "
-                "−52%…) is dus dezelfde keer. 1–2 = te weinig bewijs, 5+ zegt iets.",
-    "ep_text": "Bv. '12 van 19': van de keren in de zone waarvan de afloop al gekend is (19), werd het winstdoel "
-               "12 keer gehaald binnen de max. wachttijd, als je kocht op de EERSTE dag in de zone. "
-               "Verschil met 'Keren in zone' (bv. 23) = keren die te recent zijn om te beoordelen.",
-    "episode_hit_pct": "Zelfde als 'Hersteld' in %. Eerlijker dan 'Kans per dag' omdat elke keer even zwaar weegt.",
-    "hit_rate_pct": "Kans per DAG: op hoeveel % van alle koopzone-dagen werd het doel gehaald binnen de max. "
-                    "wachttijd. Lange periodes in de zone wegen zwaarder; altijd samen bekijken met 'Keren in zone'.",
-    "median_days": "STATISTIEK, niet de backtest: als je op een willekeurige koopzone-dag kocht, hoe lang duurde "
-                   "het typisch tot het winstdoel (mediaan; enkel geslaagde keren). "
-                   "Voor de echte looptijd van de backtest-trades: zie 'Gem. dagen/trade'.",
-    "median_further_pct": "Hoeveel de koers ná aankoop typisch nog verder zakte vóór het herstel. "
-                          "−20% = je stond eerst nog 20% in het rood.",
-    "worst_further_pct": "De SLECHTSTE keer: hoe diep je ná aankoop in het rood stond. −78% = €1.000 was tijdelijk "
-                         "€220 waard. Je stresstest: kan je dit uitzitten zonder te verkopen?",
-    "still_open": "Koopzone-dagen die te recent zijn om te beoordelen (doel nog niet gehaald, wachttijd nog niet "
-                  "om). Tellen niet mee in de kans-kolommen.",
-    "dip_round_trips": "Aantal afgeronde koop+verkoop-cycli in de backtest (alle schijven samen).",
-    "bt_start": "Startdatum van de backtest = eerste dag waarop er een 'top' gekend is "
-                "(begin data + referentieperiode). Alle €-bedragen lopen van deze datum tot vandaag.",
-    "bt_years": "Duur van de backtest in jaren (startdatum → vandaag). Eindwaarde, Winst en %/jaar slaan op deze periode. "
-                "Verschillen die tussen munten? Dan zijn eindwaardes niet vergelijkbaar: gebruik %/jaar.",
-    "avg_hold_days": "Gemiddeld aantal dagen tussen aankoop en verkoop van de afgeronde backtest-trades. "
-                     "Het geld zit niet altijd vast: tussen trades staat het stil (zie Tijd belegd).",
+    "dip_pct": "Koopdrempel VANDAAG: koop als de koers zoveel % onder de top staat. Dit is de instelling voor je "
+               "echte orders.",
+    "target_pct": "Winstdoel VANDAAG: verkoop bij zoveel % boven je aankoopprijs (vóór kosten).",
+    "buy_level": "KOOP ONDER: de koers waaronder de regel vandaag koopt (top × (1 − koopdrempel)). Daalt de top "
+                 "(oude piek valt uit het venster), dan schuift dit mee omlaag.",
+    "sell_level": "VERKOOP BIJ: verkoopdoel als je op het koopniveau koopt (koopniveau × (1 + winstdoel)). "
+                  "Koop je lager, dan ligt je verkoopdoel ook lager: altijd aankoopprijs + winstdoel.",
+    "price_now": "Laatste slotkoers (dagcandle).",
+    "current_dd_pct": "Hoe ver de koers NU onder de top staat.",
+    "to_zone_pct": "Hoeveel de koers vanaf nu nog moet zakken tot de koopdrempel. 0 = zit nu in de koopzone.",
+    "history_days": "Dagen koersgeschiedenis.",
+    "episodes": f"Aantal AFZONDERLIJKE crashes (nieuwe keer pas na ≥10 procentpunt herstel boven de drempel of "
+                f"{EPISODE_GAP_DAYS} dagen buiten de zone). 1–2 = te weinig bewijs, 5+ zegt iets.",
+    "ep_text": "Bv. '12 van 19': van de keren in de zone met gekende afloop werd het winstdoel 12 keer gehaald "
+               "binnen de max. wachttijd, als je kocht op de eerste dag in de zone.",
+    "episode_hit_pct": "Zelfde als 'Hersteld' in %: elke keer weegt even zwaar.",
+    "hit_rate_pct": "Kans per DAG: over alle koopzone-dagen.",
+    "median_days": "Typische wachttijd tot het winstdoel (statistiek, niet de backtest).",
+    "median_further_pct": "Hoeveel de koers ná aankoop typisch nog verder zakte vóór het herstel.",
+    "worst_further_pct": "De SLECHTSTE keer: hoe diep je ná aankoop in het rood stond. Je stresstest.",
+    "still_open": "Koopzone-dagen die te recent zijn om te beoordelen.",
+    "dip_round_trips": "Afgeronde koop+verkoop-cycli in de backtest over de hele historiek.",
+    "bt_start": "Startdatum van de backtest over de hele historiek.",
+    "bt_years": "Duur van de backtest over de hele historiek.",
+    "avg_hold_days": "Gemiddeld aantal dagen tussen aankoop en verkoop van de afgeronde trades.",
     "capital": "Ingezet bedrag voor deze munt (standaard één schijf).",
-    "final_eur": "Wat je inzet vandaag waard zou zijn met de strategie, ná kosten. = vrij geld + open positie aan de "
-                 "koers van vandaag. De open positie zit hier DUS AL in; 'Open: vast' komt er niet bij.\n"
-                 "Let op: bij 'Optimaal' zijn koopdrempel en winstdoel gezocht op ÉNKEL DEZE data (ook de test-"
-                 "periode). Een hoge eindwaarde is dus deels achteraf geluk en bewijst niet dat het in de toekomst "
-                 "werkt. Daarom kijkt het Oordeel naar de test, niet naar dit bedrag.",
-    "profit_eur": "Eindwaarde min inzet.",
-    "dip_annual_pct": "Eindwaarde omgerekend naar gemiddeld % per jaar over de backtest-periode (samengesteld): "
-                      "Eindwaarde ≈ Inzet × (1 + %/jaar) ^ Periode in jaren. "
-                      "Bv. €1.000 → €5.926 in 4 jaar ≈ 56%/jaar. Inclusief de tijd dat het geld stillag. "
-                      "Gebruik dit om munten met een verschillende periode eerlijk te vergelijken.",
-    "buy_hold_eur": "Wat je inzet waard zou zijn als je op de startdag van de backtest alles kocht en hield. "
-                    "Dit is de lat: doet de strategie het slechter, dan was niets doen beter.",
-    "invested_pct": "Deel van de tijd dat er geld in de munt zat. De rest staat het stil (en kan elders renderen). "
-                    "Hoog kan ook betekenen: lang vastgezeten.",
-    "lowest_eur": "Laagste waarde van je inzet ooit tijdens de backtest. Wat je op je slechtste moment zag.",
-    "open_cost_eur": "Bedrag dat je betaalde voor de aankopen die nog niet verkocht zijn (herbelegde winst "
-                     "inbegrepen). Is dus geen extra winst. Leeg = geen open positie.",
-    "open_value_eur": "Wat die open aankopen vandaag waard zijn aan de huidige koers. Dit zit in de Eindwaarde.",
-    "open_result_eur": "Winst (+) of verlies (−) in € op de open aankopen: Open waarde − Open vast, "
-                       "aankoopkost inbegrepen (verkoopkost nog niet). Dit is NIET gerealiseerd: pas bij verkoop.",
-    "open_result_pct": "Hetzelfde in %: huidige waarde t.o.v. aankoopbedrag van de open positie.",
-    # betrouwbaarheidstest
-    "wf_params": "Koopdrempel / winstdoel die in de test gebruikt werden. Modus 'Optimaal': het optimum dat in de "
-                 "TRAININGSPERIODE alleen gevonden werd (kan verschillen van 'Koopdrempel %' en 'Winstdoel %', die "
-                 "zijn gezocht op de hele historiek). Modus 'Vast' of 'Opgeslagen': jouw eigen instelling "
-                 "(met vermelding 'jouw instelling').",
-    "train_period": "Trainingsperiode: startmaand en duur. Hierop werden de instellingen gezocht.",
-    "train_annual_pct": "Rendement per jaar in de TRAININGSPERIODE. Is altijd mooi, want de instellingen zijn juist "
-                        "hierop gekozen (achteraf bekeken). Op zich zegt dit weinig.\n"
-                        "Is de periode korter dan 0,5 jaar, dan staat er ⚠️ 'korte periode' bij: omrekenen naar een "
-                        "jaar is dan niet betrouwbaar.",
-    "test_period": "Testperiode: startmaand en duur, loopt tot vandaag. = de laatste X% van de backtest "
-                   "(X instelbaar, standaard 30%). Deze data werd NIET gebruikt om te zoeken.",
-    "test_status": "AFGEROND = in de test gekocht én verkocht. POSITIE OPEN = gekocht, winstdoel nog niet bereikt "
-                   "(resultaat op papier). GEEN KOOPKANS = nooit in de koopzone geweest → 0%, bewijst niets.",
-    "test_trades": "Afgeronde koop+verkoop-cycli in de testperiode.\n"
-                   "0 + 'Geen koopkans' = nooit gekocht: niets bewezen.\n"
-                   "0 + 'Positie open' = wel gekocht, doel nog niet bereikt: resultaat op papier.\n"
-                   "1 = één voorbeeld, geen bewijs. 3+ = begint te overtuigen.\n"
-                   "Veel (10+) = veel kleine rondes: let op kosten (2× fee per ronde).\n"
-                   "Bij dip-kopen is weinig trades normaal: wachten op een diepe val + groot doel duurt maanden.",
-    "test_pct": "Totaal resultaat over de HELE testperiode (niet per jaar) met de test-instelling, vers kapitaal, "
-                "ná kosten, open positie aan de koers van vandaag.\n"
-                "Voorbeeld: 39% → €1.000 werd in de testperiode €1.390. Bij 'Positie open' is een deel daarvan "
-                "nog papieren winst (of papieren verlies). Dit is de EERLIJKSTE maat van de tabel.",
-    "test_annual_pct": "Testresultaat omgerekend naar % per jaar (39% over 1,2 jaar ≈ 32%/jaar).\n"
-                       "⚠️ Is de testperiode korter dan 0,5 jaar, dan staat er 'korte periode' bij: omrekenen naar "
-                       "een jaar is dan niet betrouwbaar (39% over 0,4 jaar wordt ≈ 128%/jaar, terwijl er maar één "
-                       "trade kan zijn). Kijk dan naar 'Test totaal %'. In de sortering telt bij een korte periode "
-                       "het totaal, niet het omgerekende cijfer.",
-    "test_eur": "Wat jouw bedrag per munt op het einde van de testperiode (vandaag) waard zou zijn.",
-    "test_bh_pct": "Kopen&houden in dezelfde testperiode: de lat voor 'Test totaal %'.\n"
-                   "Test 39% vs K&H 150% → strategie positief maar kopen&houden was veel beter (🟡).\n"
-                   "Test 39% vs K&H −30% → strategie beschermde je tegen een daling (sterk 🟢).",
+    "final_eur": "HELE HISTORIEK met de instelling van vandaag: wat je inzet nu waard zou zijn. Let op: die "
+                 "instelling is gezocht op ditzelfde verleden, dus dit cijfer is te mooi. Geen verwachting voor de "
+                 "toekomst; gebruik de 🧪 testvensters.",
+    "profit_eur": "Eindwaarde min inzet (hele historiek).",
+    "dip_annual_pct": "Hele historiek omgerekend naar %/jaar (achteraf afgesteld: te optimistisch).",
+    "buy_hold_eur": "Alles kopen op de startdag en niets doen (hele historiek).",
+    "invested_pct": "Deel van de tijd dat er geld in de munt zat.",
+    "lowest_eur": "Laagste waarde van je inzet tijdens de backtest.",
+    "open_cost_eur": "Wat je betaalde voor de nog niet verkochte aankoop (hele historiek).",
+    "open_value_eur": "Wat die open aankoop vandaag waard is.",
+    "open_result_eur": "Papieren winst/verlies op de open aankoop (hele historiek).",
+    "open_result_pct": "Hetzelfde in %.",
+    # testvensters
+    "wf_settings": "Per testvenster de koopdrempel/winstdoel die gebruikt werd (bij 'Optimaal' telkens gezocht op "
+                   "de data vóór dat venster), bv. '−60/+50 · −65/+50 · −60/+75'.",
+    "stable_txt": f"STABIEL = de gevonden instellingen (per venster én vandaag) liggen dicht bij elkaar: koopdrempels "
+                  f"hoogstens {STABLE_DIP_SPREAD * 100:.0f} procentpunt uit elkaar en het hoogste winstdoel hoogstens "
+                  f"{STABLE_TARGET_RATIO:g}× het laagste. INSTABIEL = het optimum springt (bv. +100% → +10%): de "
+                  "exacte getallen zijn dan niet betrouwbaar; zet er minder geld op.",
+    "test_period": "Van het begin van het eerste tot het einde van het laatste testvenster (= vandaag).",
+    "win_text": "In hoeveel testvensters het resultaat (incl. open positie) positief was.",
+    "real_trades": "Afgeronde trades (gekocht én verkocht) over alle testvensters samen: het bewijs.",
+    "real_total_pct": "GEREALISEERD resultaat over alle testvensters samen (vensters na elkaar geschakeld, telkens "
+                      "vers kapitaal), ALSOF een open positie aan haar aankoopprijs verkocht werd. Enkel echte winst.",
+    "real_annual_pct": "Gerealiseerd resultaat omgerekend naar %/jaar over de totale testduur. Dit cijfer gebruikt "
+                       "het oordeel (bij een test korter dan een half jaar: het totaal).",
+    "open_now_pct": "Staat de laatste aankoop in het laatste venster nog open: huidige stand t.o.v. aankoopprijs. "
+                    "Leeg = geen open positie.",
+    "total_annual_pct": "Testresultaat per jaar INCLUSIEF de open positie aan de koers van vandaag.",
+    "bh_annual_pct": "Kopen&houden in dezelfde testvensters, per jaar: ter vergelijking.",
 }
 
 DIP_EXPLAIN = """
-**Bron en opslag** — Alle koersen komen van **Coinbase** (USD-markt; bestaat die niet: USDC of EUR). De dagkoersen
-worden bewaard (in de cloud: Firestore) en bij elke refresh komen enkel de nieuwe dagen erbij. Ook de berekende
-tabel wordt bewaard: open je de pagina, dan staat de laatste tabel er meteen, met de datum waarop ze berekend werd.
-Een nachtelijke update rekent de tabel met de standaardinstellingen elke nacht opnieuw.
+**Welke limieten gebruik je voor je echte orders?** De kolommen **Koopdrempel / Winstdoel** (en **Koop onder /
+Verkoop bij** in koers) = de instelling van **vandaag**, gezocht op alle data tot nu. De **🧪 testvensters** zeggen
+hoeveel je die werkwijze mag vertrouwen: ze tonen wat er gebeurde toen de app in het verleden telkens blind de beste
+instelling koos en die op het jaar erna toepaste.
 
-**Twee begrippen** — *Top*: hoogste koers van de laatste X dagen (bv. 365), een **meebewegend venster**: een oude
-piek valt na X dagen weg en dan wordt de top lager. *Koopzone*: een dag waarop de slotkoers minstens de koopdrempel
-onder die top staat. De top staat per munt in *Detail munt*, blok *3. De regel in cijfers*.
+**Bron en opslag** — Koersen van **Coinbase** (USD; anders USDC of EUR), bewaard in de database; bij elke refresh komen
+enkel de nieuwe dagen erbij. De berekende tabel wordt ook bewaard. Een nachtelijke update rekent de tabel met jouw
+standaardinstellingen (*💾 Bewaar als standaard*) elke nacht opnieuw.
 
-**Oordeel, Koopzone nu? en Waarom** — twee aparte vragen:
-- **Oordeel** = *is de strategie voor deze munt betrouwbaar?* Gebaseerd op de 🧪 test (data die de instelling nooit zag).
-- **Koopzone nu?** = *zegt de regel vandaag koop?* Puur mechanisch: staat de koers onder je koopdrempel?
-- Een goede kandidaat om **nu** te kopen = 🛒 in koopzone **én** oordeel 🟢/🟡.
+**Twee begrippen** — *Top*: hoogste koers van de laatste X dagen (meebewegend venster). *Koopzone*: slotkoers staat
+minstens de koopdrempel onder die top.
 
-De tabel staat gesorteerd: 🟢 bovenaan, 🔴 onderaan. Zie het blok *🧭 Hoe wordt het oordeel bepaald?*.
+**Oordeel en Koopzone nu?** — twee aparte vragen:
+- **Oordeel** = *is de werkwijze voor deze munt betrouwbaar?* Gebaseerd op de testvensters, vooral op **gerealiseerde** winst.
+- **Koopzone nu?** = *zegt de regel vandaag koop?*
+- Kandidaat om **nu** te kopen = 🛒 **én** 🟢.
 
-**Instellingen per munt**
-- **Coinbase** — in welke markten je de munt kan kopen (EUR/USD/USDC/USDT).
-- **Bron** — *Opgeslagen*: door jou bewaard in *Detail munt*. *Optimaal*: de app testte alle combinaties
-  koopdrempel × winstdoel en koos de historisch beste. *Vast*: jouw algemene instellingen.
-- **Koopdrempel % / Winstdoel %** — de waarden die voor deze munt gebruikt werden. Standaard zit het hele bedrag
-  in **één schijf**.
+**🧪 Testvensters** (bv. 3): per jaarvenster wordt de beste instelling gezocht op alle data vóór dat jaar en blind
+toegepast op dat jaar (vers kapitaal).
+- **Instellingen per venster** — bv. *−60/+50 · −65/+50 · −60/+75*.
+- **Stabiel?** — blijft de gevonden instelling dicht bij elkaar? Instabiel = de exacte getallen zijn niet betrouwbaar.
+- **Positieve vensters** — bv. *2 van 3*.
+- **Gerealiseerd trades / % / %/jaar** — enkel afgeronde trades: echte winst.
+- **Open nu %** — de laatste, nog open positie (papier).
+- **Totaal %/jaar** — inclusief open positie. **Kopen&houden %/jaar** — ter vergelijking.
 
-**🧪 Betrouwbaarheidstest (training / test)** — is de instelling echt goed of gewoon achteraf geluk?
-De BACKTEST wordt gesplitst, bv. 30% test:
-`|——— TRAINING ±2,8 jaar ———|—— TEST ±1,2 jaar ——| vandaag`
-1. Modus *Optimaal*: enkel in de **training** zoekt de app de beste koopdrempel en het beste winstdoel.
-   Modus *Vast/Opgeslagen*: jouw instelling wordt zonder opnieuw te zoeken getest.
-2. Die instelling wordt **blind** toegepast op de **test** (die data zag de zoektocht nooit), met vers kapitaal.
-- **Training: drempel/doel** — de instelling die in de test gebruikt werd.
-- **Training: periode / %/jaar** — wanneer en hoe goed. Altijd mooi, want hierop gekozen.
-- **Test: periode** — van wanneer tot vandaag.
-- **Test: status** — *Afgerond* (gekocht + verkocht), *Positie open* (gekocht, nog niet verkocht → op papier),
-  *Geen koopkans* (nooit diep genoeg gezakt → 0%, dat bewijst niets).
-- **Test trades** — aantal afgeronde koop+verkoop-rondes in de test (zie voorbeelden).
-- **Test totaal % / %/jaar / eindwaarde €** — het **eerlijkste** cijfer. Vergelijk met **Test kopen&houden %**.
-  Is de test korter dan 0,5 jaar, dan staat bij %/jaar **⚠️ korte periode**: omrekenen naar een jaar is dan niet
-  betrouwbaar, kijk naar het totaal.
+**Hoeveel bewijs?** — *Dagen data*, *Keren in zone* (afzonderlijke crashes), *Hersteld (keren)*, *Mediaan dagen*,
+*Typ./Ergste verdere daling* (je stresstest).
 
-**Huidige toestand**
-- **Nu onder top %** — hoeveel goedkoper dan het hoogste punt. −62% = 62% onder de top.
-- **Nog te zakken %** — hoeveel de koers nog moet dalen tot de koopzone. 0 = nu kopen volgens de regel.
+**Hele historiek** (*Eindwaarde, %/jaar, Kopen&houden €, Laagste waarde, Open: …*) — met de instelling van vandaag
+over het hele verleden. Die instelling is op dit verleden afgesteld: mooi, maar **geen verwachting**.
 
-**Hoeveel bewijs?**
-- **Dagen data** — lengte geschiedenis. De eerste *referentieperiode* dagen leveren geen signaal.
-- **Keren in zone** — aantal afzonderlijke crashes. Een nieuwe keer telt pas als de koers eerst ≥10 procentpunt
-  boven de koopdrempel hersteld is (drempel −50% → tot −40% of beter) of 30 dagen buiten de zone bleef.
-  Schommelen rond de drempel (−51%, −48%, −52%…) is dezelfde keer. 1–2 = te weinig bewijs, 5+ begint iets te zeggen.
-- **Te recent** — koopzone-dagen waarvan we de afloop nog niet kennen.
-
-**Herstel na aankoop** *(wat gebeurde er als je op zo'n dag kocht?)*
-- **Hersteld (keren)** — bv. *12 van 19*: van de 19 keren waarvan de afloop gekend is, werd het winstdoel 12 keer
-  gehaald binnen de max. wachttijd. Keren in zone (bv. 23) min 19 = 4 keren die nog te recent zijn.
-- **Kans per keer %** — hetzelfde in %. Elke keer weegt even zwaar → de eerlijkste kans.
-- **Kans per dag %** — over alle koopzone-dagen. Een lange periode in de zone weegt hier zwaar.
-- **Mediaan dagen** — *statistiek*: als je op een willekeurige koopzone-dag kocht, typische wachttijd tot het doel.
-  Dit is **niet** de looptijd van de backtest-trades (zie *Gem. dagen/trade*).
-- **Typ. verdere daling %** — hoeveel je ná aankoop meestal nog in het rood ging. Je koopt zelden de bodem.
-- **Ergste verdere daling %** — de slechtste keer. Je **stresstest**: kan je dat uitzitten?
-
-**Backtest met jouw bedrag** *(over de hele historiek: koop met het hele bedrag op de eerste koopzone-dag,
-verkoop bij het winstdoel, opnieuw kopen als de koers nog in de zone staat, geen stop-loss, winst wordt
-herbelegd, kosten inbegrepen)*
-- **Start backtest / Periode (jaar)** — over welke periode alle €-bedragen gaan (start = begin data + referentieperiode).
-- **Trades / Gem. dagen/trade** — afgeronde koop+verkoop-cycli en hun gemiddelde looptijd.
-- **Inzet €** — totaal bedrag. *Detail munt* start met **dezelfde instelling als de tabelrij**, dus dezelfde
-  Eindwaarde. Voeg je daar schijven toe of wijzig je ze, dan is het een andere strategie en toont de pagina een
-  ⚠️ vergelijking met de tabel.
-- **Eindwaarde € / Winst €** — wat het vandaag waard zou zijn, open positie aan de huidige koers.
-  Bij *Optimaal* is dit achteraf geoptimaliseerd op dezelfde data: mooi, maar geen bewijs.
-- **%/jaar** — eindwaarde omgerekend naar gemiddeld rendement per jaar over de *Periode*.
-  Eindwaarde ≈ Inzet × (1 + %/jaar)^Periode.
-- **Kopen&houden €** — alles kopen op de startdag en niets doen. **De lat** die de strategie moet halen.
-- **Tijd belegd %** — hoe vaak er geld in de munt zat. De rest ligt stil.
-- **Laagste waarde €** — je slechtste moment. Vergelijk met de laagste waarde van kopen&houden (Detail munt).
-- **Open: vast €** — wat je betaalde voor de aankoop die nog niet verkocht is.
-- **Open: waarde €** — wat dat vandaag waard is (zit al in de eindwaarde).
-- **Open: resultaat € / %** — papieren winst of verlies op die open aankoop (nog niet gerealiseerd).
-
-⚠️ **Survivorship bias**: munten die naar nul gingen zitten niet in de data → kansen zijn te optimistisch.
-⚠️ **Optimaal = achteraf bekeken.** Daarom: kijk naar het Oordeel en de 🧪 test-kolommen, niet enkel naar %/jaar.
+⚠️ **Survivorship bias**: munten die naar nul gingen zitten niet in de data. ⚠️ Verleden ≠ toekomst.
 """
 
 DIP_EXAMPLES = """
-### 1. Hoe lang is de backtest en hoe wordt de testperiode bepaald?
-- **Historiek** (instelling, bv. 5 jaar) = hoeveel dagdata de app gebruikt. Jonge munten hebben minder (zie *Dagen data*).
-- De eerste **referentie**-dagen (bv. 365) kunnen niet gebruikt worden: er is nog geen "top" om mee te vergelijken.
-  **Backtest = data − referentie.**
-- Voorbeeld: 5 jaar = 1.830 dagen − 364 = **1.466 dagen backtest** (±4 jaar).
-- **Testperiode = laatste 30% daarvan** = 440 dagen (±1,2 jaar). Training = eerste 1.026 dagen (±2,8 jaar).
-- Jongere munt: 913 dagen data → 549 dagen backtest (±1,5 jaar) → test van maar 165 dagen (±5,5 maand).
-  Hoe korter de test, hoe kleiner de kans dat de munt in die periode ooit de koopzone bereikt.
+### 1. Welke limieten kies ik: die van de test of die van vandaag?
+Die van **vandaag** (kolommen *Koopdrempel / Winstdoel*, of in koers *Koop onder / Verkoop bij*). De testvensters
+controleren de **werkwijze** "zoek de beste instelling op het verleden en gebruik ze daarna", niet één vast getal.
+Voorbeeld TRAC: in 08/2025 koos de werkwijze −65% / +100% en dat werkte daarna (+486%). Vandaag kiest dezelfde
+werkwijze −55% / +10%: dat zijn je orders. Springt de instelling zo sterk, dan krijg je **⚠️ instabiel**: de getallen
+zijn dan minder betrouwbaar, zet er minder geld op.
 
-### 2. Referentie hoogste punt
-Een munt piekte 6 maanden geleden op €100 en staat nu op €40. Koopdrempel: −50%.
+### 2. Meerdere testvensters
+Munt met 8 jaar data, referentie 365 dagen, 3 vensters (cijfers ter illustratie):
 
-| Referentie | Top | Daling nu | In koopzone? |
-|---|---|---|---|
-| 365 dagen | €100 | −60% | ✅ ja |
-| 90 dagen | bv. €55 | −27% | ❌ nee |
+| Venster | Gezocht op | Blind getest op | Instelling | Resultaat |
+|---|---|---|---|---|
+| 1 | 2019–2023 | 2024 | −60% / +50% | +40% gerealiseerd (2 trades) |
+| 2 | 2019–2024 | 2025 | −65% / +50% | −10% (positie open) |
+| 3 | 2019–2025 | 2026 → vandaag | −60% / +75% | +60% gerealiseerd (3 trades) |
+| **Vandaag** | 2019–nu | – | **−60% / +50%** | → jouw limieten |
 
-Langer = diepere "dips", minder signalen, kortere backtest (730 dagen laat van 5 jaar data nog ±3 jaar over).
-Korter = vaker een signaal, maar de "val" is dan minder diep.
+Positief in 2 van 3, 5 gerealiseerde trades, instelling stabiel rond −60% / +50%. Meer bewijs dan één testperiode.
 
-### 3. Max. wachttijd voor kans
-Telt **enkel** voor *Hersteld, Kans per keer, Kans per dag, Te recent*. Niet voor backtest, test, %/jaar en eindwaarde.
-Je koopt op −50%, doel +30%, en het doel wordt na 400 dagen gehaald:
-wachttijd 365 → ❌ niet hersteld; wachttijd 730 → ✅ hersteld.
+### 3. Gerealiseerd versus open
+5.000 € in een venster: trade 1 → 9.950 €, trade 2 → 19.800 €, daarna opnieuw gekocht en die positie staat +48%.
+- **Gerealiseerd** = 19.800 € (alsof de open positie aan haar aankoopprijs verkocht werd): +296%.
+- **Totaal** = 19.800 € × 1,48 ≈ 29.300 €: +486%, waarvan een deel op papier.
+- Het oordeel kijkt naar **gerealiseerd**. Een open positie in de plus is geen minpunt; een open positie dieper dan je
+  limiet (standaard −20%) wel.
 
-### 4. Test trades (aantal afgeronde koop+verkoop-rondes in de test)
+### 4. Hoe lang is de backtest en waar liggen de vensters?
+- Backtest = data − referentie. 8 jaar (±2.925 dagen) − 364 = ±2.560 dagen (±7 jaar).
+- 3 vensters = de laatste 3 jaar; het eerste venster heeft ±4 jaar training.
+- Jonge munt (bv. 900 dagen data): backtest ±535 dagen → na minstens 365 dagen training blijft er één kort venster
+  (±170 dagen) over. Korter dan 90 dagen → niet getest.
 
-| Test trades | Status | Betekenis |
-|---|---|---|
-| 0 | Geen koopkans | Nooit in de koopzone: er gebeurde niets. **Niets bewezen**, goed noch slecht. |
-| 0 | Positie open | Wel gekocht, doel nog niet bereikt. Resultaat staat enkel op papier. |
-| 1 | Afgerond | Eén geslaagde ronde: een voorbeeld, geen bewijs. |
-| 3 | Afgerond | Drie keer gekocht én met winst verkocht: begint te overtuigen. |
-| 15 | Afgerond | Veel kleine rondes (laag winstdoel). Let op de kosten: elke ronde kost 2× fee. |
+### 5. Weinig trades: normaal?
+Ja. Met een diepe koopdrempel en een groot winstdoel (bv. −65% / +100%) zijn 1–2 trades per jaar al veel. Kleine
+winstdoelen (+10%) geven meer rondes, maar elke ronde kost 2× fee.
 
-Bij dip-kopen is een laag aantal normaal (wachten op een diepe val + groot doel duurt maanden). Laag = weinig
-bewijs, niet per se slecht.
+### 6. Referentie hoogste punt
+Munt piekte 6 maanden geleden op €100, staat nu op €40, koopdrempel −50%: referentie 365 → top €100 → −60% →
+koopzone ✅. Referentie 90 → top bv. €55 → −27% → ❌.
 
-### 5. Test totaal (bv. 39%) en Test %/jaar
-Je start de testperiode met vers kapitaal: €1.000. Op het einde (vandaag) is dat €1.390, na kosten.
-Het is het totaal over de **hele testperiode**, niet per jaar: bij 1,2 jaar is dat ±32%/jaar (*Test %/jaar*).
-Staat de status op *Positie open*, dan is een deel van die 39% nog papieren winst.
+### 7. Koop bij −85% van de top, verkoop bij +20%: wanneer koop je opnieuw?
+Top 100 → koop als de slotkoers ≤ 15 (bv. aan 14) → verkoop aan 14 × 1,20 = 16,8 → pas opnieuw kopen als de koers
+weer ≤ 15 zakt terwijl de top nog 100 is. Valt de piek uit het venster, dan zakt de top en het koopniveau mee.
 
-**Korte test (minder dan 0,5 jaar)?** Dan toont *Test %/jaar* het omgerekende cijfer mét **⚠️ korte periode**.
-Voorbeeld: +39% over 0,49 jaar wordt omgerekend ±96%/jaar, over 0,40 jaar ±128%/jaar. Zo'n cijfer suggereert een
-jaarrendement dat er niet is, zeker met één trade: gebruik het **totaal** (+39%). In de sortering telt bij een korte
-test ook het totaal, zodat een korte test niet hoger eindigt dan een lange test met hetzelfde resultaat.
-
-### 6. Test totaal vs. Test kopen&houden
-
-| Test totaal | Kopen&houden | Lezing |
-|---|---|---|
-| +39% | +150% | Strategie won wel, maar doen niets deed veel beter → 🟡 |
-| +39% | −30% | Strategie beschermde je tegen een daling → sterk 🟢 |
-| +39% | +35% | Licht beter dan niets doen → 🟢 (bij genoeg bewijs) |
-| −10% | +20% | Positie nog onder water (papieren verlies) → 🟠 |
-
-Is kopen&houden veel hoger, dan **voegde de strategie in die periode niets toe** (maar ze verloor ook geen geld).
-Drie nuances:
-1. Kopen&houden weet je pas **achteraf**: je kon niet vooraf weten welke munt zou stijgen.
-2. Kopen&houden zit altijd volledig in de munt en kan diep zakken. Vergelijk *Laagste waarde* van de strategie met die
-   van kopen&houden (Detail munt).
-3. De strategie koopt pas na een diepe val en mist dus per definitie stijgingen zonder val.
-
-### 7. Eindwaarde, open vast, open waarde, open resultaat
-Inzet €1.000 in één schijf (kosten weggelaten voor de eenvoud).
-- Gekocht, +30% verkocht → €1.300 vrij → opnieuw gekocht en nog niet verkocht = **open positie**.
-- Sinds de herkoop is de koers +10% gestegen.
-
-| Kolom | Bedrag | Uitleg |
-|---|---|---|
-| Open: vast | €1.300 | Wat je betaalde voor de open positie |
-| Open: waarde | €1.430 | Wat die vandaag waard is |
-| Open: resultaat | +€130 (+10%) | Papieren winst = waarde − vast |
-| **Eindwaarde** | **€1.430** | = vrij geld 0 + open waarde 1.430 |
-| **Winst** | **€430** | = eindwaarde − inzet |
-
-**Open: vast** moet je dus **niet** bij de winst optellen: de eindwaarde bevat de open positie al aan de koers van vandaag.
-
-### 8. %/jaar versus eindwaarde: waarom hoger eindbedrag bij lager %/jaar?
-**Eindwaarde ≈ Inzet × (1 + %/jaar)^Periode.** Een lager %/jaar over een langere periode geeft een hoger bedrag.
-
-| Munt | Periode | %/jaar | Eindwaarde van €1.000 |
-|---|---|---|---|
-| A | 4,0 jaar | 40% | €3.842 |
-| B | 1,5 jaar | 60% | €2.024 |
-
-B heeft het hoogste %/jaar, A het hoogste eindbedrag: A liep gewoon langer. Vergelijk munten met een verschillende
-*Periode (jaar)* daarom op **%/jaar**; eindwaardes zijn enkel vergelijkbaar bij dezelfde periode.
-
-### 9. Eindwaarde €7.000 en toch 🟠 of 🔴: hoe kan dat?
-De eindwaarde en het oordeel meten **niet hetzelfde**:
-
-| | Eindwaarde (hele historiek) | Oordeel |
-|---|---|---|
-| Periode | alle ±4 jaar | enkel de **test** (laatste ±1,2 jaar) |
-| Instelling | gezocht op **alle** data, ook de test | gezocht op de training, blind op de test |
-| Open verlies | zit erin, maar is klein t.o.v. eerdere winsten | telt voluit mee |
-
-Voorbeeld: €1.000 → €7.000 over 4 jaar, vooral dankzij trades in jaar 1 tot 3. In de test kocht de strategie 8 maanden
-geleden op −50%, daarna zakte de koers nog 30% en er is geen herstel gekomen:
-test = −30%, status *Positie open* → **🟠 Onder water**. De hele historiek was dus prima, maar de recentste periode
-bevestigt het (nog) niet. Vergelijk de dagen dat de positie open staat met *Mediaan dagen* (typische wachttijd).
-
-### 10. Koop bij −85% van de top, verkoop bij +20%: wanneer koop je opnieuw?
-De **top** is de hoogste koers van de **laatste 365 dagen** (meebewegend venster). Hij hangt **niet** aan je laatste
-verkoop. Neem top = 100, koopdrempel −85%, winstdoel +20%.
-
-| Stap | Gebeurt | Uitleg |
-|---|---|---|
-| 1 | Koers zakt tot ≤ 15 (100 × 0,15) | Slotkoers staat ≥ 85% onder de top → **koop** (bv. aan 14) |
-| 2 | Koers stijgt tot 14 × 1,20 = 16,8 | **Verkoop** aan de aankoopprijs + 20%, niet aan "15 + 20%" |
-| 3 | Koers staat op 16,8 = 83% onder de top 100 | Nog **niet** ≤ 15 → **niet** opnieuw kopen |
-| 4a | Koers zakt opnieuw tot ≤ 15 terwijl de top nog 100 is | **Opnieuw kopen**: dezelfde top, hetzelfde koopniveau |
-| 4b | De piek van 100 is ouder dan 365 dagen | Die valt weg: top wordt bv. 40 → nieuw koopniveau 6 (40 × 0,15) |
-| 4c | Koers klimt naar een nieuwe top van 200 | Koopniveau stijgt naar 30 (200 × 0,15) |
-
-- **Een schijf is nooit dubbel belegd.** Na de verkoop kan er pas opnieuw gekocht worden op een volgende dag, als er weer aan de voorwaarde voldaan is.
-- **Ja, je kan veel kopen en verkopen** als de koers lang rond het koopniveau schommelt: elke ronde levert ±20% min kosten.
-- De aankoop gebeurt aan de **slotkoers van de dag** waarop de voorwaarde klopt: dat kan dus lager zijn dan het koopniveau.
-- Het **koopniveau en de top van vandaag** staan per munt in *Detail munt* → *3. De regel in cijfers*, en als lijn in de grafiek.
-
-### 11. Welke referentieperiode ("hoogste punt") kies je?
-De referentie is een **meebewegend venster**: een piek telt maar zoveel dagen mee. Voorbeeld: koopdrempel −50%, een munt
-piekte op €100, zakte naar €30 en blijft sindsdien rond €30–35 hangen.
-
-| Referentie | Wat gebeurt er met de top | Koopzone? |
-|---|---|---|
-| 90 dagen | Na 3 maanden valt de €100-piek weg, top wordt ±€40 → daling nog maar −25% | Nauwelijks: je kocht vooral vroeg in de val |
-| 365 dagen | Piek blijft een jaar de top → daling blijft ±−68% | Een jaar lang |
-| 730 dagen | Piek blijft twee jaar de top | Twee jaar lang: veel dagen in de zone, maar ook lang "bijkopen" in een dalende munt |
-
-**Advies:** begin met **365 dagen** (de "jaarhoogte"). Kies **180** voor meer signalen, **730** enkel met 8 jaar historiek.
-Kies niet de waarde met het mooiste resultaat: dat is bijsturen op het verleden. Draai de analyse met 180, 365 en 730 en
-vertrouw vooral de munten waarvan het **Oordeel stabiel** blijft. Opgeslagen instellingen gelden enkel bij de referentie
-waarmee je ze bewaarde.
-
-### 12. Eindwaarde in de tabel ≠ Eindwaarde in Detail: hoe kan dat?
-*Detail munt* start altijd met **dezelfde instelling als de tabelrij** (één schijf), dus dezelfde Eindwaarde. Voeg je
-schijven toe of wijzig je de drempel of het doel, dan is het een **andere strategie**: diepere schijven kopen zelden en
-liggen lang stil. Dat spreidt het risico, maar geeft in goede periodes minder winst. Onder *4. Resultaat* staat dan een
-⚠️ vergelijking met beide Eindwaardes; met **↩️ Zoals in de tabel** ga je terug.
+### 8. Eindwaarde in de tabel ≠ in Detail
+Detail start met dezelfde instelling als de tabelrij (één schijf). Voeg je schijven toe of wijzig je drempel/doel, dan
+is het een andere strategie; onder *5. Resultaat* staat dan een ⚠️ vergelijking.
 """
 
 VERDICT_RULES = """
-Het oordeel kijkt **enkel naar de 🧪 test** (data die de instelling nooit zag) en **niet naar de Eindwaarde** van de
-hele historiek: die is bij *Optimaal* achteraf geoptimaliseerd op dezelfde data. Eerste regel die klopt wint:
+Het oordeel kijkt naar de **🧪 testvensters** (blind getest) en vooral naar **gerealiseerde** winst. De drie drempels
+stel je zelf in (⚙️ Instellingen → *Oordeel*); wijzigen herberekent niets. Eerste regel die klopt wint:
 
 | Oordeel | Voorwaarden |
 |---|---|
-| 🔴 **Niet interessant** | Training zelf al zonder winst (terwijl er wel gekocht werd), **of** test ≤ 0% terwijl er geen positie meer openstaat |
-| ⚪ **Niets bewezen** | De munt bereikte in de test (of al in de training) nooit de koopdrempel: er werd nooit gekocht |
-| ⚪ **Niet getest** | Test uit, of te weinig historiek om te splitsen (reden staat in *Waarom*) |
-| 🟠 **Onder water** | Test ≤ 0% **en** positie nog open: de strategie kocht tijdens de val en de munt is nog niet hersteld (papieren verlies) |
-| 🟡 **Twijfel** | Test positief, maar minstens één addertje: positie nog open (winst op papier), **of** kopen&houden deed beter, **of** minder dan 3 keer in de zone |
-| 🟢 **Interessant** | Test positief, afgeronde trade(s), test ≥ kopen&houden, en ≥ 3 keer in de zone |
+| ⚪ **Te weinig data** | Minder dagen data dan referentie + 60 |
+| ⚪ **Niet getest** | Geen testvenster mogelijk (reden in *Waarom*) |
+| ⚪ **Niets bewezen** | In de testvensters nooit gekocht |
+| 🟢 **Interessant** | ≥ *min. trades* afgeronde trades **én** gerealiseerd ≥ *min. %/jaar* **én** instelling niet instabiel **én** minstens de helft van de vensters positief **én** open positie niet dieper dan *max. diepte* |
+| 🟠 **Onder water** | Laatste positie dieper dan *max. diepte* **en** te weinig gerealiseerde winst of trades |
+| 🔴 **Niet interessant** | Gerealiseerd verlies **en** ook inclusief open positie geen winst |
+| 🟡 **Twijfel** | Al de rest: de reden(en) staan in *Waarom* |
 
-**Sortering:** 🟢 → 🟡 → ⚪ → 🟠 → 🔴, binnen elk niveau op *Test %/jaar* (hoogste eerst). Is de testperiode korter
-dan 0,5 jaar (⚠️ korte periode), dan telt in plaats daarvan het *Test totaal %*.
+**Sortering:** 🟢 → 🟡 → ⚪ → 🟠 → 🔴, binnen elk niveau op gerealiseerd %/jaar.
 
-**Waarom 🟠 en niet 🔴?** Een dip-strategie heeft geen stop-loss. Een negatieve test betekent dan bijna altijd: gekocht
-tijdens de val en nog niet hersteld. Dat is geen bewijs dat de strategie faalt, maar wel een reëel risico.
-
-**Koopzone nu?** is een aparte kolom: 🛒 = de munt staat vandaag onder je koopdrempel, 👀 = nog X% te zakken.
-Een goede kandidaat om nu te kopen = 🛒 én oordeel 🟢 of 🟡. Een 🟢/🟡 die nog 👀 is, volg je op.
-
-Een 🟢 blijft een historische aanwijzing, geen garantie. Klik een rij aan om de grafiek te bekijken.
+**Koopzone nu?** is een aparte kolom. Kandidaat om nu te kopen = 🛒 én 🟢. Een 🟢 die nog 👀 is, volg je op.
+Een 🟢 blijft een historische aanwijzing, geen garantie.
 """
 
 GENERAL = """

@@ -3,12 +3,14 @@
 - Lokaal los te draaien via:  streamlit run crypto_app.py
 Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py).
 
-De dip-resultaten worden standaard getoond als een COMPACTE, SORTEERBARE tabel (±12 kerncijfers). Klik een
-rij aan: daaronder verschijnen alle cijfers van die munt in kleine tabellen (kenmerk · waarde · uitleg) en een
-knop voor de grafiek. Filters: enkel in koopzone, per oordeel. De brede tabel blijft beschikbaar.
+Dip-resultaten: COMPACTE, SORTEERBARE tabel; klik een rij voor alle cijfers en de grafiek. Filters: enkel in
+koopzone, per oordeel. De brede tabel blijft beschikbaar.
 
-Standaardinstellingen -> de app toont de nachtelijke tabel (alle 150 munten, meteen klaar).
-Gewijzigde instellingen -> de app rekent zelf, voor de top 'Aantal munten bij herberekening' (standaard 75)."""
+Betrouwbaarheid: MEERDERE TESTVENSTERS (walk_forward_multi). Oordeel op GEREALISEERDE winst met instelbare
+drempels (min. %/jaar, min. trades, max. diepte open positie); drempels wijzigen = meteen nieuw oordeel.
+
+Standaardinstellingen (ingebouwd of bewaard met '💾 Bewaar als standaard') -> de app toont de nachtelijke tabel.
+Gewijzigde reken-instellingen -> de app rekent zelf, voor 'Aantal munten bij herberekening' (standaard 150)."""
 from __future__ import annotations
 
 import sys
@@ -28,10 +30,11 @@ import crypto_settings as cs
 import crypto_store as store
 from crypto_backtest import grid_backtest
 from crypto_data import base_of, coinbase_label, get_coinbase_products, get_klines, get_top_symbols, quote_of
-from crypto_dip import dip_stats, drawdown_series, ladder_backtest, optimize_dip, top_info, walk_forward
+from crypto_dip import dip_stats, drawdown_series, ladder_backtest, optimize_dip, top_info, walk_forward_multi
 from crypto_metrics import add_score, compute_metrics, zigzag_pivots
-from crypto_scan import (DEFAULT_CFG, LIVE_TOP_N, TEST_COLS, cfg_key, coin_params, finalize, fmt_annual,
-                         is_default, scan_coin, setup_text, table_from_json, table_to_json, wf_for)
+from crypto_scan import (LIVE_TOP_N, SAVABLE_CALC, TEST_COLS, apply_verdicts, cfg_key, coin_params,
+                         effective_defaults, is_default, scan_coin, setup_text, table_from_json, table_to_json,
+                         wf_for, windows_from_json)
 from crypto_texts import C_HELP, DIP_EXAMPLES, DIP_EXPLAIN, GENERAL, H, VERDICT_RULES
 
 K = "crypto_"  # prefix voor session_state-keys (geen botsing met mAICoach/PadelAnalysis)
@@ -43,81 +46,74 @@ VERDICT_COLORS = {"🟢": "#d4f4dd", "🟡": "#fff1b8", "⚪": "#e9ecef", "🟠"
 DEFAULT_COINS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 VIEW_OPTIONS = ["Compacte tabel (sorteerbaar)", "Brede tabel (alle kolommen)"]
 
-# --------------------------------------------------------------------------- weergave per munt
-# Korte uitleg per kenmerk (één regel) voor de detail-tabellen per munt. De volledige uitleg blijft in de
-# tooltips van de brede tabel en in 'ℹ️ Uitleg kolommen'.
+# --------------------------------------------------------------------------- detail-tabellen per munt
 SHORT = {
     "coinbase": "Markten waarin je de munt op Coinbase kan kopen.",
     "source": "Optimaal = historisch beste; Vast = jouw algemene waarden; Opgeslagen = door jou bewaard.",
-    "dip_pct": "Koop als de slotkoers zoveel onder de top (hoogste koers referentieperiode) staat.",
+    "dip_pct": "Koop als de slotkoers zoveel onder de top staat (instelling van vandaag).",
     "target_pct": "Verkoop zodra de koers zoveel boven je aankoopprijs staat.",
+    "price_now": "Laatste slotkoers.",
+    "buy_level": "De regel koopt vandaag als de slotkoers hieronder komt.",
+    "sell_level": "Verkoopdoel bij aankoop op het koopniveau (altijd: aankoopprijs + winstdoel).",
     "current_dd_pct": "Hoeveel de koers nu onder de top staat.",
     "to_zone_pct": "Hoeveel de koers nog moet zakken tot de koopzone (0 = nu in de koopzone).",
-    "wf_params": "Koopdrempel / winstdoel die blind getest werden.",
-    "train_period": "Startmaand en duur van de training (hierop werd gezocht).",
-    "train_annual_txt": "Rendement per jaar in de training: altijd mooi, want hierop gekozen.",
-    "test_period": "Startmaand en duur van de test (loopt tot vandaag, niet gebruikt om te zoeken).",
-    "test_status": "Afgerond = gekocht en verkocht; Positie open = nog niet verkocht; Geen koopkans = nooit gekocht.",
-    "test_trades": "Afgeronde koop+verkoop-rondes in de test.",
-    "test_pct": "Resultaat over de hele test, na kosten: het eerlijkste cijfer.",
-    "test_annual_txt": "Testresultaat per jaar (⚠️ bij een test korter dan een half jaar onbetrouwbaar).",
-    "test_eur": "Wat je bedrag aan het einde van de test waard is.",
-    "test_bh_pct": "Gewoon kopen en houden in dezelfde testperiode: de lat.",
+    "wf_settings": "Instelling per testvenster (telkens gezocht op de data ervóór).",
+    "stable_txt": "Blijft de gevonden instelling dicht bij elkaar? Instabiel = getallen minder betrouwbaar.",
+    "test_period": "Totale periode van de testvensters (eindigt vandaag).",
+    "win_text": "Aantal vensters met winst (incl. open positie).",
+    "real_trades": "Afgeronde trades in alle vensters samen: het bewijs.",
+    "real_total_pct": "Enkel echte winst (open positie aan aankoopprijs).",
+    "real_annual_pct": "Gerealiseerd per jaar: dit gebruikt het oordeel.",
+    "open_now_pct": "Laatste, nog open positie t.o.v. aankoop (papier).",
+    "total_annual_pct": "Per jaar inclusief open positie.",
+    "bh_annual_pct": "Kopen en houden in dezelfde vensters, per jaar.",
     "history_days": "Aantal dagen koersgeschiedenis.",
-    "episodes": "Afzonderlijke keren dat de munt in de koopzone kwam (5+ zegt iets).",
+    "episodes": "Afzonderlijke keren in de koopzone (5+ zegt iets).",
     "ep_text": "Hoe vaak het winstdoel daarna gehaald werd binnen de max. wachttijd.",
     "episode_hit_pct": "Hetzelfde in %: de eerlijkste kans.",
-    "hit_rate_pct": "Kans gerekend over alle koopzone-dagen.",
-    "median_days": "Typische wachttijd tot het winstdoel (statistiek, niet de backtest).",
+    "median_days": "Typische wachttijd tot het winstdoel.",
     "median_further_pct": "Hoeveel de koers na aankoop meestal nog verder zakte.",
     "worst_further_pct": "De slechtste keer: je stresstest.",
-    "still_open": "Koopzone-dagen die nog te recent zijn om te beoordelen.",
-    "bt_start": "Vanaf deze datum lopen alle €-bedragen.",
-    "bt_years": "Duur van de backtest.",
-    "dip_round_trips": "Afgeronde koop+verkoop-rondes in de hele backtest.",
+    "bt_start": "Start van de backtest over de hele historiek.",
+    "bt_years": "Duur van die backtest.",
+    "dip_round_trips": "Afgeronde trades over de hele historiek.",
     "avg_hold_days": "Gemiddelde looptijd van een afgeronde trade.",
     "capital": "Ingezet bedrag (standaard één schijf).",
-    "final_eur": "Waarde vandaag, open positie inbegrepen (bij Optimaal achteraf afgesteld).",
-    "profit_eur": "Eindwaarde min inzet.",
-    "dip_annual_pct": "Eindwaarde omgerekend naar rendement per jaar.",
+    "final_eur": "Hele historiek met de instelling van vandaag: achteraf afgesteld, te mooi.",
+    "dip_annual_pct": "Hetzelfde per jaar.",
     "buy_hold_eur": "Alles kopen op de startdag en niets doen.",
-    "invested_pct": "Hoe vaak er geld in de munt zat; de rest lag stil.",
+    "invested_pct": "Hoe vaak er geld in de munt zat.",
     "lowest_eur": "Je slechtste moment tijdens de backtest.",
-    "open_cost_eur": "Wat je betaalde voor de nog niet verkochte aankoop.",
-    "open_value_eur": "Wat die open aankoop vandaag waard is (zit al in de eindwaarde).",
-    "open_result_eur": "Papieren winst of verlies op de open aankoop.",
-    "open_result_pct": "Hetzelfde in %.",
+    "open_result_pct": "Open positie (hele historiek) t.o.v. aankoop.",
 }
 
-# (titel, [(label, kolom, formaat), ...])
 SECTIONS = [
-    ("🎯 Instelling en nu", [
+    ("🎯 Jouw limieten vandaag", [
         ("Bron", "source", "txt"), ("Koopdrempel", "dip_pct", "neg"), ("Winstdoel", "target_pct", "pos"),
+        ("Koers nu", "price_now", "px"), ("Koop onder", "buy_level", "px"), ("Verkoop bij", "sell_level", "px"),
         ("Nu onder top", "current_dd_pct", "pct"), ("Nog te zakken", "to_zone_pct", "pct"),
         ("Coinbase", "coinbase", "txt"),
     ]),
-    ("🧪 Betrouwbaarheidstest", [
-        ("Instelling in test", "wf_params", "txt"), ("Training: periode", "train_period", "txt"),
-        ("Training %/jaar", "train_annual_txt", "txt"), ("Test: periode", "test_period", "txt"),
-        ("Test: status", "test_status", "txt"), ("Test trades", "test_trades", "int"),
-        ("Test totaal", "test_pct", "sign"), ("Test %/jaar", "test_annual_txt", "txt"),
-        ("Test eindwaarde", "test_eur", "eur"), ("Test kopen&houden", "test_bh_pct", "sign"),
+    ("🧪 Testvensters (blind getest)", [
+        ("Instelling per venster", "wf_settings", "txt"), ("Stabiel?", "stable_txt", "txt"),
+        ("Periode", "test_period", "txt"), ("Positieve vensters", "win_text", "txt"),
+        ("Gerealiseerde trades", "real_trades", "int"), ("Gerealiseerd totaal", "real_total_pct", "sign"),
+        ("Gerealiseerd %/jaar", "real_annual_pct", "sign1"), ("Open nu", "open_now_pct", "sign"),
+        ("Totaal %/jaar (incl. open)", "total_annual_pct", "sign1"),
+        ("Kopen&houden %/jaar", "bh_annual_pct", "sign1"),
     ]),
     ("📊 Bewijs en herstel", [
         ("Dagen data", "history_days", "int"), ("Keren in zone", "episodes", "int"),
         ("Hersteld (keren)", "ep_text", "txt"), ("Kans per keer", "episode_hit_pct", "pct"),
-        ("Kans per dag", "hit_rate_pct", "pct"), ("Mediaan dagen", "median_days", "int"),
-        ("Typ. verdere daling", "median_further_pct", "pct"), ("Ergste verdere daling", "worst_further_pct", "pct"),
-        ("Te recent", "still_open", "int"),
+        ("Mediaan dagen", "median_days", "int"), ("Typ. verdere daling", "median_further_pct", "pct"),
+        ("Ergste verdere daling", "worst_further_pct", "pct"),
     ]),
-    ("💶 Backtest met jouw bedrag", [
+    ("💶 Hele historiek (achteraf afgesteld)", [
         ("Start backtest", "bt_start", "date"), ("Periode", "bt_years", "years"),
         ("Trades", "dip_round_trips", "int"), ("Gem. dagen/trade", "avg_hold_days", "int"),
-        ("Inzet", "capital", "eur"), ("Eindwaarde", "final_eur", "eur"), ("Winst", "profit_eur", "eursign"),
-        ("%/jaar", "dip_annual_pct", "pct1"), ("Kopen&houden", "buy_hold_eur", "eur"),
-        ("Tijd belegd", "invested_pct", "pct"), ("Laagste waarde", "lowest_eur", "eur"),
-        ("Open: vast", "open_cost_eur", "eur"), ("Open: waarde", "open_value_eur", "eur"),
-        ("Open: resultaat", "open_result_eur", "eursign"), ("Open: resultaat %", "open_result_pct", "sign"),
+        ("Inzet", "capital", "eur"), ("Eindwaarde", "final_eur", "eur"), ("%/jaar", "dip_annual_pct", "pct1"),
+        ("Kopen&houden", "buy_hold_eur", "eur"), ("Tijd belegd", "invested_pct", "pct"),
+        ("Laagste waarde", "lowest_eur", "eur"), ("Open positie", "open_result_pct", "sign"),
     ]),
 ]
 
@@ -129,8 +125,19 @@ def _isna(v) -> bool:
         return False
 
 
+def _px(v) -> str:
+    """Koers leesbaar: veel decimalen voor kleine munten, weinig voor grote."""
+    if _isna(v):
+        return "–"
+    v = float(v)
+    if v >= 1000:
+        return f"{v:,.0f}"
+    if v >= 1:
+        return f"{v:,.2f}"
+    return f"{v:.6f}".rstrip("0")
+
+
 def _fmt(v, kind: str) -> str:
-    """Waarde leesbaar voor de detail-tabellen. Leeg/NaN = '–'."""
     if _isna(v) or (isinstance(v, str) and not v.strip()):
         return "–"
     try:
@@ -144,15 +151,16 @@ def _fmt(v, kind: str) -> str:
             return f"{float(v):.1f}%"
         if kind == "sign":
             return f"{float(v):+.0f}%"
+        if kind == "sign1":
+            return f"{float(v):+.1f}%"
         if kind == "neg":
             return f"−{float(v):.0f}%"
         if kind == "pos":
             return f"+{float(v):.0f}%"
+        if kind == "px":
+            return _px(v)
         if kind == "eur":
             return "€ " + f"{float(v):,.0f}".replace(",", ".")
-        if kind == "eursign":
-            s = f"{float(v):+,.0f}".replace(",", ".")
-            return f"{s[0]}€ {s[1:]}"
         if kind == "years":
             return f"{float(v):.1f} jaar".replace(".", ",")
         if kind == "date":
@@ -178,10 +186,9 @@ def _md_table(r: pd.Series, items, show_help: bool) -> str:
 
 
 def _render_coin_sections(r: pd.Series, cfg: dict, show_help: bool) -> None:
-    """Alle cijfers van één munt in kleine tabellen (kenmerk · waarde · uitleg), twee kolommen naast elkaar."""
     if isinstance(r.get("why"), str) and r["why"]:
         st.markdown(f"**{r.get('verdict', '')} – waarom:** {r['why']}")
-    sections = [s for s in SECTIONS if not (s[0].startswith("🧪") and cfg["test_frac"] <= 0)]
+    sections = [s for s in SECTIONS if not (s[0].startswith("🧪") and cfg.get("n_windows", 0) <= 0)]
     left, right = st.columns(2)
     for i, (title, items) in enumerate(sections):
         with (left if i % 2 == 0 else right):
@@ -190,32 +197,33 @@ def _render_coin_sections(r: pd.Series, cfg: dict, show_help: bool) -> None:
 
 
 def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
-    """Smalle tabel met de kerncijfers, numerieke kolommen numeriek (zodat sorteren klopt)."""
     def num(c):
         return pd.to_numeric(t[c], errors="coerce").values if c in t.columns else [float("nan")] * len(t)
 
-    short = t["test_short"] if "test_short" in t.columns else [False] * len(t)
+    def txt(c):
+        return [("" if _isna(x) else str(x)) for x in t[c]] if c in t.columns else [""] * len(t)
+
     return pd.DataFrame({
         "nr": range(1, len(t) + 1),
         "symbol": t["symbol"].values,
         "verdict": t["verdict"].values,
         "now": t["now"].values,
-        "to_zone_pct": num("to_zone_pct"),
         "rule": [f"−{d:.0f}% / +{g:.0f}%" if not (_isna(d) or _isna(g)) else "–"
                  for d, g in zip(t["dip_pct"], t["target_pct"])],
-        "test_pct": num("test_pct"),
-        "test_annual_pct": num("test_annual_pct"),
-        "test_short": [bool(x) if not _isna(x) else False for x in short],
-        "final_eur": num("final_eur"),
-        "dip_annual_pct": num("dip_annual_pct"),
-        "episodes": num("episodes"),
-        "worst_further_pct": num("worst_further_pct"),
+        "buy_level": [_px(x) for x in t["buy_level"]] if "buy_level" in t else ["–"] * len(t),
+        "to_zone_pct": num("to_zone_pct"),
+        "real_annual_pct": num("real_annual_pct"),
+        "real_trades": num("real_trades"),
+        "win_text": txt("win_text"),
+        "stable_txt": txt("stable_txt"),
+        "open_now_pct": num("open_now_pct"),
+        "total_annual_pct": num("total_annual_pct"),
+        "bh_annual_pct": num("bh_annual_pct"),
         "history_days": num("history_days"),
     })
 
 
-def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
-    """Compacte, sorteerbare tabel. Klik een rij aan voor alle cijfers en de grafiek van die munt."""
+def _render_compact(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
     view = _compact_view(t)
     st.caption("↕️ Klik op een kolomkop om te sorteren (kolom **#** = standaardvolgorde, beste oordeel bovenaan). "
                "👆 Klik een rij aan voor alle cijfers en de grafiek van die munt.")
@@ -225,23 +233,22 @@ def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
         key=K + f"cmp_df_{st.session_state.get(K + 'dip_ver', 0)}_{len(view)}",
         column_config={
             "nr": st.column_config.NumberColumn("#", format="%d", width="small",
-                                                help="Standaardvolgorde: op oordeel, dan op testresultaat. "
-                                                     "Klik hier om terug te sorteren."),
+                                                help="Standaardvolgorde: op oordeel, dan op gerealiseerd %/jaar."),
             "symbol": st.column_config.TextColumn("Munt"),
             "verdict": st.column_config.TextColumn("Oordeel", help=C_HELP["verdict"]),
             "now": st.column_config.TextColumn("Koopzone nu?", help=C_HELP["now"]),
+            "rule": st.column_config.TextColumn("Koop / verkoop (vandaag)",
+                                                help="Koopdrempel onder de top / winstdoel boven je aankoopprijs: "
+                                                     "de instelling van vandaag, voor je echte orders."),
+            "buy_level": st.column_config.TextColumn("Koop onder", help=C_HELP["buy_level"]),
             "to_zone_pct": _num("Nog te zakken %", "%.0f", "to_zone_pct"),
-            "rule": st.column_config.TextColumn("Koop / verkoop", help="Koopdrempel (onder de top) / winstdoel "
-                                                "(boven de aankoopprijs) die voor deze munt gebruikt worden."),
-            "test_pct": _num("🧪 Test totaal %", "%.0f", "test_pct"),
-            "test_annual_pct": _num("🧪 Test %/jaar", "%.0f", "test_annual_pct"),
-            "test_short": st.column_config.CheckboxColumn(
-                "⚠️ Korte test", help="Testperiode korter dan een half jaar: 'Test %/jaar' is dan omgerekend en "
-                                     "onbetrouwbaar. Kijk naar 'Test totaal %'."),
-            "final_eur": st.column_config.NumberColumn("Eindwaarde €", format="€ %.0f", help=C_HELP["final_eur"]),
-            "dip_annual_pct": _num("%/jaar", "%.1f", "dip_annual_pct"),
-            "episodes": _num("Keren in zone", "%d", "episodes"),
-            "worst_further_pct": _num("Ergste verdere daling %", "%.0f", "worst_further_pct"),
+            "real_annual_pct": _num("🧪 Gerealiseerd %/jaar", "%.1f", "real_annual_pct"),
+            "real_trades": _num("🧪 Trades", "%d", "real_trades"),
+            "win_text": st.column_config.TextColumn("🧪 Positief", help=C_HELP["win_text"]),
+            "stable_txt": st.column_config.TextColumn("🧪 Stabiel?", help=C_HELP["stable_txt"]),
+            "open_now_pct": _num("🧪 Open nu %", "%.0f", "open_now_pct"),
+            "total_annual_pct": _num("🧪 Totaal %/jaar", "%.1f", "total_annual_pct"),
+            "bh_annual_pct": _num("🧪 Kopen&houden %/jaar", "%.1f", "bh_annual_pct"),
             "history_days": _num("Dagen data", "%d", "history_days"),
         })
     rows_sel = []
@@ -258,22 +265,21 @@ def _render_compact(t: pd.DataFrame, cfg: dict) -> None:
         show_help = st.toggle("Toon uitleg per kenmerk", value=True, key=K + "card_help")
         _render_coin_sections(r, cfg, show_help)
         graph_open = st.session_state.get(K + "card_sel") == sym
-        if st.button("✖️ Grafiek sluiten" if graph_open else "📈 Grafiek en details (schijven, top, koopniveau)",
+        if st.button("✖️ Details sluiten" if graph_open else "📈 Testvensters, grafiek en details",
                      key=K + f"cmp_btn_{sym}"):
             st.session_state[K + "card_sel"] = None if graph_open else sym
             st.rerun()
         if graph_open:
             st.divider()
-            _detail_dip(sym, cfg, kp="card_")
+            _detail_dip(sym, cfg, vcfg, kp="card_")
 
 
 def _filter_table(t: pd.DataFrame) -> pd.DataFrame:
-    """Snelle filters boven de tabel: enkel in koopzone, en per oordeel."""
     present = [lbl for lbl in VERDICT_LABELS if lbl in set(t["verdict"])]
     c1, c2 = st.columns([1, 3])
     only_zone = c1.toggle("🛒 Enkel in koopzone", value=False, key=K + "f_zone",
                           help="Toon enkel munten die vandaag onder hun koopdrempel staan.")
-    chosen = c2.multiselect("Oordeel", present, default=present, key=K + "f_verdict",
+    chosen = c2.multiselect("Oordeel", present, default=present, key=K + f"f_verdict_{'|'.join(present)}",
                             help="Toon enkel munten met deze oordelen (bv. enkel 🟢 en 🟡).")
     out = t[t["verdict"].isin(chosen)] if chosen else t.iloc[0:0]
     if only_zone:
@@ -290,7 +296,7 @@ def _num(label, fmt, key):
 # --------------------------------------------------------------------------- data (gecached)
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _coinbase_cached() -> dict:
-    return get_coinbase_products()  # raise bij mislukking => wordt niet gecached
+    return get_coinbase_products()
 
 
 def _cb_products() -> dict | None:
@@ -321,11 +327,11 @@ def _optimize(symbol: str, days: int, lookback: int, fee: float, min_trades: int
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _walk_forward(symbol: str, days: int, lookback: int, fee: float, min_trades: int, test_frac: float,
-                  fixed_tr: tuple | None = None, fixed_target: float | None = None) -> dict:
-    """fixed_tr/fixed_target = None: optimum in de training zoeken. Anders: precies die instelling blind testen."""
+def _walk_multi(symbol: str, days: int, lookback: int, fee: float, min_trades: int, n_windows: int,
+                amount: float, fixed_tr: tuple | None = None, fixed_target: float | None = None) -> dict:
+    """fixed_tr = None: per venster de beste instelling zoeken. Anders: precies die instelling testen."""
     fixed = None if fixed_tr is None else {"tranches": list(fixed_tr), "target": fixed_target}
-    return walk_forward(_klines(symbol, "1d", days), lookback, fee, min_trades, test_frac, fixed)
+    return walk_forward_multi(_klines(symbol, "1d", days), lookback, fee, min_trades, n_windows, amount, fixed)
 
 
 def _opt_fn(cfg: dict):
@@ -333,8 +339,20 @@ def _opt_fn(cfg: dict):
 
 
 def _wf_fn(cfg: dict):
-    return lambda s, tr, tg: _walk_forward(s, cfg["days"], cfg["lookback"], cfg["fee"], cfg["min_trades"],
-                                           cfg["test_frac"], tr, tg)
+    return lambda s, tr, tg: _walk_multi(s, cfg["days"], cfg["lookback"], cfg["fee"], cfg["min_trades"],
+                                         int(cfg["n_windows"]), float(cfg["amount"]), tr, tg)
+
+
+def _defaults() -> tuple[dict, dict, dict]:
+    """(reken-standaard, oordeel-standaard, wat er bewaard is). Eén keer per sessie gelezen."""
+    if K + "app_defaults" not in st.session_state:
+        try:
+            st.session_state[K + "app_defaults"] = store.load_app_defaults() or {}
+        except Exception:  # noqa: BLE001
+            st.session_state[K + "app_defaults"] = {}
+    stored = st.session_state[K + "app_defaults"]
+    calc, verd = effective_defaults(stored)
+    return calc, verd, stored
 
 
 # --------------------------------------------------------------------------- kosten + bron
@@ -442,18 +460,26 @@ def _grid_tab(cfg: dict) -> None:
 
 
 # --------------------------------------------------------------------------- dip: instellingen
-def _dip_settings(fee: float) -> dict:
-    """Standaardwaarden komen uit DEFAULT_CFG (crypto_scan.py), zodat ze altijd overeenkomen met de nachtelijke
-    tabel. Zijn alle instellingen standaard, dan gebruikt de app die tabel (alle munten); anders rekent hij zelf
-    voor de top 'Aantal munten bij herberekening'."""
-    d = DEFAULT_CFG
+def _opt_index(opts: list, value, fallback: int) -> int:
+    try:
+        return opts.index(value)
+    except ValueError:
+        return fallback
+
+
+def _dip_settings(fee: float) -> tuple[dict, dict]:
+    """(reken-cfg, oordeel-cfg). Startwaarden = jouw bewaarde standaard (of de ingebouwde)."""
+    d, vd, stored = _defaults()
     with st.expander("⚙️ Instellingen dip-kopen", expanded=False):
+        st.markdown("**Berekening**")
         c1, c2, c3 = st.columns(3)
         years_opts = [2, 3, 5, 8]
-        years = c1.selectbox("Historiek (jaar)", years_opts, index=years_opts.index(round(d["days"] / 365)),
+        years = c1.selectbox("Historiek (jaar)", years_opts,
+                             index=_opt_index(years_opts, round(d["days"] / 365), 3),
                              key=K + "dip_years", help=H["dip_hist"])
         lb_opts = [90, 180, 365, 730]
-        lookback = c2.selectbox("Referentie 'hoogste punt' (dagen)", lb_opts, index=lb_opts.index(d["lookback"]),
+        lookback = c2.selectbox("Referentie 'hoogste punt' (dagen)", lb_opts,
+                                index=_opt_index(lb_opts, int(d["lookback"]), 2),
                                 key=K + "dip_lookback", help=H["lookback"])
         amount = c3.number_input("Bedrag per munt (€)", 50.0, 1_000_000.0, float(d["amount"]), 500.0,
                                  key=K + "dip_amount", help=H["amount"])
@@ -466,29 +492,49 @@ def _dip_settings(fee: float) -> dict:
         target = c5.number_input("Winstdoel %", 2.0, 300.0, float(d["target"] * 100), 5.0, key=K + "dip_target",
                                  help=H["target"], disabled=not fixed) / 100
         mw_opts = [30, 90, 180, 365, 730]
-        maxwait = c6.selectbox("Max. wachttijd voor 'kans' (dagen)", mw_opts, index=mw_opts.index(d["maxwait"]),
+        maxwait = c6.selectbox("Max. wachttijd voor 'kans' (dagen)", mw_opts,
+                               index=_opt_index(mw_opts, int(d["maxwait"]), 3),
                                key=K + "dip_maxwait", help=H["maxwait"])
         min_trades = c7.number_input("Min. trades (optimalisatie)", 1, 20, int(d["min_trades"]), 1,
                                      key=K + "dip_mintrades", help=H["min_trades"])
-        tf_opts = [0, 20, 25, 30, 40, 50]
-        test_frac = st.select_slider("🧪 Betrouwbaarheidstest: testperiode = laatste … van de backtest",
-                                     options=tf_opts, value=int(round(d["test_frac"] * 100)),
-                                     format_func=lambda v: f"{v}%", key=K + "dip_testfrac",
-                                     help=H["test_frac"]) / 100
-        live_n = st.slider(
-            "Aantal munten bij herberekening (gewijzigde instellingen)", 10, int(d["top_n"]), LIVE_TOP_N, 5,
-            key=K + "dip_live_n",
-            help=f"Met de standaardinstellingen toont de app de nachtelijke tabel met alle {d['top_n']} munten "
-                 "(meteen klaar). Wijzig je een instelling hierboven, dan rekent de app zelf, voor de top van dit "
-                 "aantal munten (op 24u-volume).")
-    cfg = dict(days=years * 365 + 5, lookback=lookback, amount=amount, optimal=not fixed, dip=dip,
-               target=target, maxwait=maxwait, min_trades=int(min_trades), fee=fee, top_n=d["top_n"],
-               test_frac=test_frac, only_cb=True)
-    std = is_default(cfg)
+        c8, c9 = st.columns(2)
+        n_windows = c8.select_slider("🧪 Aantal testvensters (jaren)", options=[0, 1, 2, 3, 4, 5],
+                                     value=int(d["n_windows"]), key=K + "dip_nwin", help=H["n_windows"])
+        live_n = c9.slider("Aantal munten bij herberekening (gewijzigde instellingen)", 10, 150,
+                           min(150, int(LIVE_TOP_N)), 5, key=K + "dip_live_n", help=H["live_n"])
+
+        st.markdown("**Oordeel** *(wijzigen herberekent niets)*")
+        c10, c11, c12 = st.columns(3)
+        min_annual = c10.number_input("Min. gerealiseerd rendement %/jaar voor 🟢", 0.0, 200.0,
+                                      float(vd["min_annual"]), 1.0, key=K + "v_min_annual", help=H["min_annual"])
+        min_real = c11.number_input("Min. afgeronde trades voor 🟢", 1, 30, int(vd["min_real_trades"]), 1,
+                                    key=K + "v_min_real", help=H["min_real_trades"])
+        max_open = c12.number_input("Max. diepte open positie voor 🟢 (%)", 0.0, 100.0, float(vd["max_open_dd"]),
+                                    5.0, key=K + "v_max_open", help=H["max_open_dd"])
+
+        cfg = dict(days=years * 365 + 5, lookback=lookback, amount=amount, optimal=not fixed, dip=dip,
+                   target=target, maxwait=maxwait, min_trades=int(min_trades), fee=fee, top_n=int(d["top_n"]),
+                   n_windows=int(n_windows), only_cb=True)
+        vcfg = dict(min_annual=float(min_annual), min_real_trades=int(min_real), max_open_dd=float(max_open))
+
+        b1, b2 = st.columns([1, 3])
+        if b1.button("💾 Bewaar als standaard", key=K + "save_defaults", help=H["save_defaults"]):
+            data = {k: cfg[k] for k in SAVABLE_CALC if k != "top_n"}
+            data["top_n"] = int(d["top_n"])
+            data.update(vcfg)
+            where = store.save_app_defaults(data)
+            st.session_state[K + "app_defaults"] = data
+            d, vd = effective_defaults(data)
+            st.success(f"Bewaard ({'in de database' if where == 'cloud' else 'lokaal'}). De nachtelijke update "
+                       "rekent voortaan hiermee; tot die gelopen heeft, druk je één keer op *Dip-analyse uitvoeren*.")
+        src = "jouw bewaarde standaard" if stored else "de ingebouwde standaard"
+        b2.caption(f"Startwaarden = {src}. Kosten worden niet mee bewaard (standaard Coinbase intro, limit).")
+
+    std = is_default(cfg, {**d, "fee": 0.25 / 100})
     if not std:
         cfg["top_n"] = int(live_n)
     st.session_state[K + "dip_is_default"] = std
-    return cfg
+    return cfg, vcfg
 
 
 def _coin_params(sym: str, cfg: dict) -> dict:
@@ -504,7 +550,7 @@ def _style_verdict(df: pd.DataFrame):
         return ""
     try:
         return df.style.map(_c, subset=[c for c in ("verdict", "why") if c in df.columns])
-    except Exception:  # oudere pandas/jinja2: gewoon zonder kleur tonen
+    except Exception:
         return df
 
 
@@ -515,7 +561,7 @@ def _set_table(t: pd.DataFrame, key: str, ts: float, source: str) -> None:
     st.session_state[K + "dip_ver"] = st.session_state.get(K + "dip_ver", 0) + 1
 
 
-def _compute_table(cfg: dict) -> pd.DataFrame | None:
+def _compute_table(cfg: dict, vcfg: dict) -> pd.DataFrame | None:
     try:
         tops = _top_symbols(cfg["top_n"])
     except Exception as e:
@@ -524,7 +570,7 @@ def _compute_table(cfg: dict) -> pd.DataFrame | None:
     settings = cs.load_all()
     rows = []
     t0 = time.time()
-    bar = st.progress(0.0, text="Dagdata bijwerken" + (" en optimaliseren…" if cfg["optimal"] else "…"))
+    bar = st.progress(0.0, text="Dagdata bijwerken en rekenen…")
     for i, (sym, cbt) in enumerate(zip(tops["symbol"], tops["coinbase"])):
         bar.progress((i + 1) / len(tops), text=f"{sym} ({i + 1}/{len(tops)}) · {time.time() - t0:.0f} s")
         try:
@@ -536,23 +582,20 @@ def _compute_table(cfg: dict) -> pd.DataFrame | None:
             st.warning(f"{sym}: {e}")
     bar.empty()
     st.session_state[K + "dip_calc_s"] = time.time() - t0
-    return finalize(rows) if rows else None
+    return apply_verdicts(pd.DataFrame(rows), vcfg) if rows else None
 
 
 # --------------------------------------------------------------------------- dip: tabel
-def _dip_tab(cfg: dict) -> None:
+def _dip_tab(cfg: dict, vcfg: dict) -> None:
     st.caption("Lange termijn: koop enkel na een diepe val, verkoop bij een winstdoel en wacht zo lang als nodig.")
-    std = st.session_state.get(K + "dip_is_default", True)
-    if std:
-        st.caption(f"⚙️ Standaardinstellingen: de tabel met alle **{cfg['top_n']} munten** wordt elke nacht "
+    if st.session_state.get(K + "dip_is_default", True):
+        st.caption(f"⚙️ Standaardinstellingen: de tabel met de top **{cfg['top_n']} munten** wordt elke nacht "
                    "berekend en staat meteen klaar.")
     else:
-        st.caption(f"⚙️ Aangepaste instellingen: de app rekent zelf, voor de top **{cfg['top_n']} munten** "
-                   "(instelbaar bij *Aantal munten bij herberekening*). Zet alles terug op de standaard om de "
-                   "nachtelijke tabel met alle munten te zien.")
+        st.caption(f"⚙️ Aangepaste instellingen: de app rekent zelf, voor de top **{cfg['top_n']} munten**. Bewaar "
+                   "ze met *💾 Bewaar als standaard* om ze ook 's nachts te laten berekenen.")
     key = cfg_key(cfg, cs.load_all())
 
-    # Bewaard resultaat voor deze instellingen? Eén keer per sleutel per sessie opzoeken.
     if st.session_state.get(K + "dip_key") != key and st.session_state.get(K + "dip_tried") != key:
         st.session_state[K + "dip_tried"] = key
         try:
@@ -571,7 +614,7 @@ def _dip_tab(cfg: dict) -> None:
     if st.button(label, key=K + "dip_run", type="primary",
                  help="Werkt de koersdata bij (enkel nieuwe dagen) en rekent de tabel opnieuw. "
                       "Het resultaat wordt bewaard, zodat het de volgende keer meteen klaarstaat."):
-        t_new = _compute_table(cfg)
+        t_new = _compute_table(cfg, vcfg)
         if t_new is not None:
             _set_table(t_new, key, time.time(), "app")
             try:
@@ -584,6 +627,11 @@ def _dip_tab(cfg: dict) -> None:
         st.info("Nog geen resultaat voor deze instellingen. Druk op **Dip-analyse uitvoeren**; het resultaat "
                 "wordt daarna bewaard.")
         return
+    if "real_annual_pct" not in t.columns:
+        st.warning("Deze bewaarde tabel komt van een oudere versie (zonder testvensters). Druk op "
+                   "**Opnieuw berekenen**.")
+        return
+    t = apply_verdicts(t, vcfg)                       # oordeel altijd met de huidige drempels
     meta = st.session_state.get(K + "dip_meta") or {}
     if meta.get("ts"):
         when = pd.Timestamp(meta["ts"], unit="s", tz="UTC").tz_convert("Europe/Brussels")
@@ -602,62 +650,56 @@ def _dip_tab(cfg: dict) -> None:
     counts = t["verdict"].value_counts()
     st.markdown("**Oordeel:** " + "  ·  ".join(f"{lbl} **{counts[lbl]}**" for lbl in VERDICT_LABELS
                                                   if lbl in counts.index)
-                + "  — gesorteerd van interessant naar niet interessant.")
-    if "⚪ Te weinig data" in counts.index:
-        st.caption("⚪ *Te weinig data* = jonge munt met minder historiek dan de referentieperiode + 60 dagen. "
-                   "Kies bij ⚙️ Instellingen een kortere referentie (bv. 90 of 180 dagen) om ze mee te rekenen.")
+                + f"  — 🟢 = ≥ {vcfg['min_real_trades']} afgeronde trades, gerealiseerd ≥ {vcfg['min_annual']:.0f}%/jaar, "
+                  f"open positie niet dieper dan −{vcfg['max_open_dd']:.0f}%.")
     in_zone = t[pd.to_numeric(t["to_zone_pct"], errors="coerce") <= 0]
     if in_zone.empty:
         st.caption("Geen enkele munt staat nu in haar koopzone.")
     else:
-        good = in_zone[in_zone["verdict"].str.startswith(("🟢", "🟡"))]
+        good = in_zone[in_zone["verdict"].str.startswith("🟢")]
         rest = in_zone.drop(good.index)
         if not good.empty:
-            st.success("🛒 Nu in de koopzone én met bruikbaar bewijs (🟢/🟡): "
-                       + ", ".join(f"{s} ({v.split()[0]})" for s, v in zip(good["symbol"], good["verdict"])))
+            st.success("🛒 Nu in de koopzone én 🟢: " + ", ".join(
+                f"{s} (koop onder {_px(b)})" for s, b in zip(good["symbol"], good["buy_level"])))
         if not rest.empty:
-            st.info("In de koopzone, maar zwak of geen bewijs: "
+            st.info("In de koopzone, maar (nog) niet 🟢: "
                     + ", ".join(f"{s} ({v.split()[0]})" for s, v in zip(rest["symbol"], rest["verdict"])))
     with st.expander("🧭 Hoe wordt het oordeel bepaald?", expanded=False):
         st.markdown(VERDICT_RULES)
     with st.expander("ℹ️ Uitleg kolommen", expanded=False):
         st.markdown(DIP_EXPLAIN)
-    with st.expander("📖 Concrete voorbeelden (testperiode, test trades, kopen&houden, eindwaarde, %/jaar…)",
-                     expanded=False):
+    with st.expander("📖 Concrete voorbeelden (welke limieten, testvensters, gerealiseerd vs open…)", expanded=False):
         st.markdown(DIP_EXAMPLES)
 
     view_mode = st.radio("Weergave", VIEW_OPTIONS, horizontal=True, key=K + "dip_view",
-                         help="Compact: ±12 kerncijfers, sorteerbaar; klik een rij voor alle cijfers en de grafiek. "
+                         help="Compact: kerncijfers, sorteerbaar; klik een rij voor alle cijfers en de grafiek. "
                               "Breed: alle kolommen naast elkaar.")
     t = _filter_table(t)
     if t.empty:
         st.info("Geen munten voor deze filters.")
         return
     if view_mode == VIEW_OPTIONS[0]:
-        _render_compact(t, cfg)
-        st.caption("⚠️ Verleden ≠ toekomst; survivorship bias maakt kansen te optimistisch.")
-        return
-    _render_wide(t, cfg)
+        _render_compact(t, cfg, vcfg)
+    else:
+        _render_wide(t, cfg, vcfg)
+    st.caption("⚠️ Verleden ≠ toekomst; survivorship bias maakt kansen te optimistisch.")
 
 
-def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
+def _render_wide(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
     t = t.copy()
-    cols = ["symbol", "coinbase", "verdict", "now", "why", "source", "dip_pct", "target_pct", "current_dd_pct",
-            "to_zone_pct"]
-    if cfg["test_frac"] > 0:
-        for c_ in TEST_COLS:
-            if c_ not in t:
-                t[c_] = None
+    t["buy_level_txt"] = [_px(x) for x in t["buy_level"]]
+    t["sell_level_txt"] = [_px(x) for x in t["sell_level"]]
+    cols = ["symbol", "coinbase", "verdict", "now", "why", "source", "dip_pct", "target_pct", "buy_level_txt",
+            "sell_level_txt", "current_dd_pct", "to_zone_pct"]
+    if cfg.get("n_windows", 0) > 0:
         cols += TEST_COLS
-    cols += ["history_days", "episodes", "ep_text", "episode_hit_pct", "hit_rate_pct", "median_days",
-             "median_further_pct", "worst_further_pct", "still_open",
-             "bt_start", "bt_years", "dip_round_trips", "avg_hold_days", "capital", "final_eur", "profit_eur",
-             "dip_annual_pct", "buy_hold_eur", "invested_pct", "lowest_eur", "open_cost_eur", "open_value_eur",
-             "open_result_eur", "open_result_pct"]
+    cols += ["history_days", "episodes", "ep_text", "episode_hit_pct", "median_days", "median_further_pct",
+             "worst_further_pct", "bt_start", "bt_years", "dip_round_trips", "avg_hold_days", "capital",
+             "final_eur", "dip_annual_pct", "buy_hold_eur", "invested_pct", "lowest_eur", "open_result_pct"]
     cols = [c for c in cols if c in t.columns]
     view = t[cols].reset_index(drop=True)
     eur = lambda lbl, key_: st.column_config.NumberColumn(lbl, format="€ %.0f", help=C_HELP[key_])
-    st.caption("👆 **Klik een rij aan** om de grafiek en details van die munt (historisch én nu) direct onder de tabel te zien.")
+    st.caption("👆 **Klik een rij aan** om de testvensters, grafiek en details van die munt te zien.")
     event = st.dataframe(
         _style_verdict(view), hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row",
@@ -671,46 +713,40 @@ def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
             "source": st.column_config.TextColumn("Bron", help=C_HELP["source"]),
             "dip_pct": _num("Koopdrempel %", "%.0f", "dip_pct"),
             "target_pct": _num("Winstdoel %", "%.0f", "target_pct"),
+            "buy_level_txt": st.column_config.TextColumn("Koop onder", help=C_HELP["buy_level"]),
+            "sell_level_txt": st.column_config.TextColumn("Verkoop bij", help=C_HELP["sell_level"]),
             "current_dd_pct": _num("Nu onder top %", "%.0f", "current_dd_pct"),
             "to_zone_pct": _num("Nog te zakken %", "%.0f", "to_zone_pct"),
-            "wf_params": st.column_config.TextColumn("🧪 Training: drempel/doel", help=C_HELP["wf_params"]),
-            "train_period": st.column_config.TextColumn("🧪 Training: periode", help=C_HELP["train_period"]),
-            "train_annual_txt": st.column_config.TextColumn("🧪 Training %/jaar", help=C_HELP["train_annual_pct"]),
-            "test_period": st.column_config.TextColumn("🧪 Test: periode", help=C_HELP["test_period"]),
-            "test_status": st.column_config.TextColumn("🧪 Test: status", help=C_HELP["test_status"]),
-            "test_trades": _num("🧪 Test trades", "%d", "test_trades"),
-            "test_pct": _num("🧪 Test totaal %", "%.0f", "test_pct"),
-            "test_annual_txt": st.column_config.TextColumn("🧪 Test %/jaar", help=C_HELP["test_annual_pct"]),
-            "test_eur": eur("🧪 Test eindwaarde €", "test_eur"),
-            "test_bh_pct": _num("🧪 Test kopen&houden %", "%.0f", "test_bh_pct"),
+            "wf_settings": st.column_config.TextColumn("🧪 Instelling per venster", help=C_HELP["wf_settings"]),
+            "stable_txt": st.column_config.TextColumn("🧪 Stabiel?", help=C_HELP["stable_txt"]),
+            "test_period": st.column_config.TextColumn("🧪 Periode", help=C_HELP["test_period"]),
+            "win_text": st.column_config.TextColumn("🧪 Positief", help=C_HELP["win_text"]),
+            "real_trades": _num("🧪 Trades", "%d", "real_trades"),
+            "real_total_pct": _num("🧪 Gerealiseerd %", "%.0f", "real_total_pct"),
+            "real_annual_pct": _num("🧪 Gerealiseerd %/jaar", "%.1f", "real_annual_pct"),
+            "open_now_pct": _num("🧪 Open nu %", "%.0f", "open_now_pct"),
+            "total_annual_pct": _num("🧪 Totaal %/jaar", "%.1f", "total_annual_pct"),
+            "bh_annual_pct": _num("🧪 Kopen&houden %/jaar", "%.1f", "bh_annual_pct"),
             "history_days": _num("Dagen data", "%d", "history_days"),
             "episodes": _num("Keren in zone", "%d", "episodes"),
             "ep_text": st.column_config.TextColumn("Hersteld (keren)", help=C_HELP["ep_text"]),
             "episode_hit_pct": st.column_config.ProgressColumn("Kans per keer %", min_value=0, max_value=100,
                                                                format="%.0f", help=C_HELP["episode_hit_pct"]),
-            "hit_rate_pct": _num("Kans per dag %", "%.0f", "hit_rate_pct"),
             "median_days": _num("Mediaan dagen", "%.0f", "median_days"),
             "median_further_pct": _num("Typ. verdere daling %", "%.0f", "median_further_pct"),
             "worst_further_pct": _num("Ergste verdere daling %", "%.0f", "worst_further_pct"),
-            "still_open": _num("Te recent", "%d", "still_open"),
-            "bt_start": st.column_config.DateColumn("Start backtest", format="DD/MM/YYYY", help=C_HELP["bt_start"]),
-            "bt_years": _num("Periode (jaar)", "%.1f", "bt_years"),
-            "dip_round_trips": _num("Trades", "%d", "dip_round_trips"),
-            "avg_hold_days": _num("Gem. dagen/trade", "%.0f", "avg_hold_days"),
+            "bt_start": st.column_config.DateColumn("Hist.: start", format="DD/MM/YYYY", help=C_HELP["bt_start"]),
+            "bt_years": _num("Hist.: jaar", "%.1f", "bt_years"),
+            "dip_round_trips": _num("Hist.: trades", "%d", "dip_round_trips"),
+            "avg_hold_days": _num("Hist.: dagen/trade", "%.0f", "avg_hold_days"),
             "capital": eur("Inzet €", "capital"),
-            "final_eur": eur("Eindwaarde €", "final_eur"),
-            "profit_eur": eur("Winst €", "profit_eur"),
-            "dip_annual_pct": _num("%/jaar", "%.1f", "dip_annual_pct"),
-            "buy_hold_eur": eur("Kopen&houden €", "buy_hold_eur"),
-            "invested_pct": _num("Tijd belegd %", "%.0f", "invested_pct"),
-            "lowest_eur": eur("Laagste waarde €", "lowest_eur"),
-            "open_cost_eur": eur("Open: vast €", "open_cost_eur"),
-            "open_value_eur": eur("Open: waarde €", "open_value_eur"),
-            "open_result_eur": eur("Open: resultaat €", "open_result_eur"),
-            "open_result_pct": _num("Open: resultaat %", "%.0f", "open_result_pct"),
+            "final_eur": eur("Hist.: eindwaarde €", "final_eur"),
+            "dip_annual_pct": _num("Hist.: %/jaar", "%.1f", "dip_annual_pct"),
+            "buy_hold_eur": eur("Hist.: kopen&houden €", "buy_hold_eur"),
+            "invested_pct": _num("Hist.: tijd belegd %", "%.0f", "invested_pct"),
+            "lowest_eur": eur("Hist.: laagste €", "lowest_eur"),
+            "open_result_pct": _num("Hist.: open positie %", "%.0f", "open_result_pct"),
         })
-    st.caption("⚠️ Verleden ≠ toekomst; survivorship bias maakt kansen te optimistisch.")
-
     rows_sel = []
     try:
         rows_sel = list(event.selection.rows)
@@ -719,18 +755,18 @@ def _render_wide(t: pd.DataFrame, cfg: dict) -> None:
     if rows_sel and rows_sel[0] < len(view):
         sym = view.iloc[rows_sel[0]]["symbol"]
         st.divider()
-        st.subheader(f"📈 {sym}: historiek en nu")
-        _detail_dip(sym, cfg, kp="sel_")
+        st.subheader(f"📈 {sym}: testvensters, historiek en nu")
+        _detail_dip(sym, cfg, vcfg, kp="sel_")
 
 
 # --------------------------------------------------------------------------- detail
-def _detail_tab(gcfg: dict, dcfg: dict) -> None:
+def _detail_tab(gcfg: dict, dcfg: dict, vcfg: dict) -> None:
     syms = set(cs.load_all())
     for key in ("table", "dip_table"):
         t = st.session_state.get(K + key)
         if t is not None:
             syms |= set(t["symbol"])
-    syms = {s for s in syms if "-" in s}            # oude Binance-namen (BTCUSDT) niet meer tonen
+    syms = {s for s in syms if "-" in s}
     options = sorted(syms) or DEFAULT_COINS
     default = st.query_params.get("coin", options[0])
     c1, c2 = st.columns([2, 3])
@@ -738,9 +774,9 @@ def _detail_tab(gcfg: dict, dcfg: dict) -> None:
                        key=K + "detail_sym")
     c1.caption(f"Coinbase: {_cb_text(sym)}")
     mode = c2.radio("Weergave", ["Dip-kopen (lang)", "Grid (kort)"], horizontal=True, key=K + "detail_mode")
-    st.query_params["coin"] = sym  # blijft behouden bij F5
+    st.query_params["coin"] = sym
     if mode.startswith("Dip"):
-        _detail_dip(sym, dcfg, kp="det_")
+        _detail_dip(sym, dcfg, vcfg, kp="det_")
     else:
         _detail_grid(sym, gcfg)
 
@@ -809,61 +845,60 @@ def _heatmap(opt: dict, chosen: tuple[float, float] | None, key: str) -> None:
     st.plotly_chart(fig, width="stretch", key=key)
 
 
-def _detail_test(sym: str, cfg: dict, p: dict) -> None:
-    st.subheader("🧪 Betrouwbaarheidstest (training / test)")
+def _detail_windows(sym: str, cfg: dict, vcfg: dict, p: dict) -> dict | None:
+    st.subheader("2. 🧪 Testvensters (blind getest)")
     wf = wf_for(sym, p, _wf_fn(cfg))
     if not wf["wf_ok"]:
         st.info(f"Niet getest: {wf['wf_reason']}.")
-        return
-    wf_label = "instelling uit de tabel" if wf["wf_fixed"] else "beste instelling in de training"
-    capital = wf["wf_capital"] if wf["wf_fixed"] else cfg["amount"]
-    st.markdown(
-        f"**Training** {wf['train_start']:%d/%m/%Y} → {wf['test_start']:%d/%m/%Y} "
-        f"({wf['train_years']:.1f} jaar): {wf_label} = koop bij **−{wf['wf_dip']*100:.0f}%**, "
-        f"verkoop bij **+{wf['wf_target']*100:.0f}%** → {wf['train_pct']:.0f}% totaal, "
-        f"**{fmt_annual(wf['train_annual_pct'], wf['train_short'] and wf['train_buys'] > 0)}** per jaar "
-        f"({wf['train_trades']} trades).  \n"
-        f"**Test** {wf['test_start']:%d/%m/%Y} → vandaag ({wf['test_years']:.1f} jaar), blind met diezelfde "
-        f"instelling en vers kapitaal: status **{wf['test_status']}**, {wf['test_trades']} afgeronde trades "
-        f"({wf['test_buys']}× gekocht).")
-    c = st.columns(4)
-    c[0].metric("Test totaal", f"{wf['test_pct']:.0f}%", help=C_HELP["test_pct"])
-    short_shown = bool(wf["test_short"]) and wf["test_buys"] > 0
-    c[1].metric("Test %/jaar", fmt_annual(wf["test_annual_pct"], short_shown), help=C_HELP["test_annual_pct"])
-    c[2].metric("Test eindwaarde", f"€ {capital * (1 + wf['test_pct'] / 100):,.0f}",
-                f"€ {capital * wf['test_pct'] / 100:,.0f}", help=C_HELP["test_eur"])
-    c[3].metric("Test kopen & houden", f"{wf['test_bh_pct']:.0f}%", help=C_HELP["test_bh_pct"])
-    if short_shown:
-        st.caption(f"⚠️ De testperiode is maar {wf['test_years']:.2f} jaar: het %/jaar-cijfer is omgerekend en niet "
-                   "betrouwbaar. Kijk naar **Test totaal**.")
-    if wf["test_status"] == "Geen koopkans":
-        st.caption("De munt kwam in de testperiode nooit tot de koopdrempel. 0% = geld bleef liggen. "
-                   "Over de kwaliteit van de instelling zegt dit niets.")
-    elif wf["test_pct"] <= 0 and wf["test_status"] == "Positie open":
-        st.caption("🟠 Test negatief met een open positie: gekocht tijdens de val en nog niet hersteld "
-                   f"(open sinds {wf['test_open_days']:.0f} dagen). Papieren verlies, geen bewijs dat het faalt.")
-    elif wf["test_pct"] <= 0:
-        st.caption("⚠️ In de test negatief: de instelling werkte hier niet. Wees voorzichtig.")
-    elif wf["test_pct"] < wf["test_bh_pct"]:
-        st.caption(f"🟡 Test positief, maar kopen&houden deed beter ({wf['test_bh_pct']:.0f}% vs "
-                   f"{wf['test_pct']:.0f}%): de strategie voegde in deze periode niets toe.")
+        return None
+    rows = []
+    for w in wf["windows"]:
+        if not w.get("ok"):
+            rows.append({"Venster": str(w["nr"]), "Gezocht op": "–",
+                         "Getest op": f"{pd.Timestamp(w['test_start']):%d/%m/%Y} → "
+                                      f"{pd.Timestamp(w['test_end']):%d/%m/%Y}",
+                         "Instelling": "–", "Status": w.get("reason", "")})
+            continue
+        rows.append({
+            "Venster": str(w["nr"]),
+            "Gezocht op": ("jouw vaste instelling" if wf["wf_fixed"] else
+                           f"{pd.Timestamp(w['train_start']):%m/%Y} → {pd.Timestamp(w['test_start']):%m/%Y}"),
+            "Getest op": f"{pd.Timestamp(w['test_start']):%d/%m/%Y} → {pd.Timestamp(w['test_end']):%d/%m/%Y}",
+            "Instelling": f"−{w['dip'] * 100:.0f}% / +{w['target'] * 100:.0f}%",
+            "Trades": w["trades"], "Status": w["status"],
+            "Gerealiseerd %": round(w["realized_pct"], 1),
+            "Open %": None if _isna(w["open_pct"]) else round(w["open_pct"], 1),
+            "Totaal %": round(w["total_pct"], 1), "Kopen&houden %": round(w["bh_pct"], 1),
+        })
+    today = (f"−{min(d for d, _ in p['tranches']) * 100:.0f}% / +{p['target'] * 100:.0f}%")
+    rows.append({"Venster": "Vandaag", "Gezocht op": "alle data tot nu", "Getest op": "–",
+                 "Instelling": today, "Status": "→ jouw limieten"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    c = st.columns(5)
+    yrs = wf["test_years"]
+    c[0].metric("Gerealiseerd %/jaar", "–" if _isna(wf["real_annual_pct"]) else f"{wf['real_annual_pct']:+.1f}%",
+                f"{wf['real_total_pct']:+.0f}% over {yrs:.1f} j", delta_color="off", help=C_HELP["real_annual_pct"])
+    c[1].metric("Afgeronde trades", wf["real_trades"], help=C_HELP["real_trades"])
+    c[2].metric("Positieve vensters", f"{wf['win_pos']} van {wf['n_windows']}", help=C_HELP["win_text"])
+    c[3].metric("Open nu", "–" if _isna(wf["open_now_pct"]) else f"{wf['open_now_pct']:+.0f}%",
+                help=C_HELP["open_now_pct"])
+    c[4].metric("Kopen&houden %/jaar", "–" if _isna(wf["bh_annual_pct"]) else f"{wf['bh_annual_pct']:+.1f}%",
+                help=C_HELP["bh_annual_pct"])
+    if wf["wf_fixed"]:
+        st.caption("Vaste/opgeslagen instelling: in elk venster precies die instelling getest.")
     else:
-        st.caption("✅ Test positief én beter dan kopen&houden: de instelling houdt stand op data die ze niet gezien heeft.")
+        from crypto_dip import is_stable
+        stable = is_stable(wf["settings"] + [(min(d for d, _ in p["tranches"]), p["target"])]
+                           if p["source"] == "Optimaal" else wf["settings"])
+        if stable is False:
+            st.warning("⚠️ **Instabiel**: de gevonden instelling verschuift sterk tussen de vensters en vandaag. "
+                       "De exacte limieten zijn minder betrouwbaar; overweeg minder in te zetten.")
+        elif stable:
+            st.caption("✅ Stabiel: de gevonden instelling blijft dicht bij elkaar.")
+    return wf
 
 
-def _px(v: float) -> str:
-    """Koers leesbaar: veel decimalen voor kleine munten, weinig voor grote."""
-    if v is None or pd.isna(v):
-        return "–"
-    if v >= 1000:
-        return f"{v:,.0f}"
-    if v >= 1:
-        return f"{v:,.2f}"
-    return f"{v:.6f}".rstrip("0")
-
-
-def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
-    """kp = unieke prefix voor widget-keys, zodat dezelfde munt op twee plaatsen getoond kan worden."""
+def _detail_dip(sym: str, cfg: dict, vcfg: dict, kp: str = "") -> None:
     q = quote_of(sym)
     try:
         df = _klines(sym, "1d", cfg["days"])
@@ -881,26 +916,24 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
         st.caption(f"ℹ️ Opgeslagen instellingen horen bij referentie {saved['lookback']} dagen en worden "
                    "nu niet gebruikt.")
         saved = None
-    # Instelling zoals de tabelrij ze gebruikt (opgeslagen > optimaal > vast; standaard één schijf).
     p = _coin_params(sym, cfg)
 
-    # ---- optimalisatie
-    st.subheader("1. Historisch beste koopdrempel × winstdoel")
+    st.subheader("1. Historisch beste koopdrempel × winstdoel (vandaag)")
     if opt["found"]:
         st.markdown(f"Beste stabiele combinatie over de hele historiek: koop bij **−{opt['dip']*100:.0f}%** "
-                    f"onder de top, verkoop bij **+{opt['target']*100:.0f}%** → **{opt['annual_pct']:.1f}%/jaar** "
-                    f"({opt['trades']} trades; buurcombinaties gemiddeld {opt['robust_pct']:.1f}%/jaar).")
+                    f"onder de top, verkoop bij **+{opt['target']*100:.0f}%**. Dit zijn je limieten voor vandaag "
+                    f"(tenzij je een eigen instelling opsloeg). Het %/jaar over die historiek "
+                    f"({opt['annual_pct']:.1f}%) is achteraf afgesteld: kijk voor de betrouwbaarheid naar de "
+                    "testvensters hieronder.")
     else:
         st.warning(f"Geen betrouwbaar optimum: {opt['reason']}. Verlaag 'Min. trades' of kies vaste waarden.")
     with st.expander("Toon alle geteste combinaties (heatmap)", expanded=False):
         st.caption("Elk vakje = één backtest met één schijf: %/jaar en aantal afgeronde trades (tr). "
                    "Leeg = te weinig trades. Groen blok = stabiel goede zone; één los groen vakje = toeval.")
         _heatmap(opt, (opt["dip"], opt["target"]) if opt["found"] else None, key=K + kp + "heat")
-    if cfg["test_frac"] > 0:
-        _detail_test(sym, cfg, p)
+    wf = _detail_windows(sym, cfg, vcfg, p) if cfg.get("n_windows", 0) > 0 else None
 
-    # ---- bedrag en schijven (standaard: zoals in de tabel = één schijf)
-    st.subheader("2. Jouw bedrag en schijven")
+    st.subheader("3. Jouw bedrag en schijven")
     reset_k = K + f"{kp}reset_{sym}"
     rv = st.session_state.get(reset_k, 0)
     if saved:
@@ -911,7 +944,6 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
         src = f"zoals in de tabel ({p['source'].lower()})"
     st.caption(f"Bron: **{src}**: {setup_text(init_tr, init_tgt)}. Standaard zit je hele bedrag in één schijf; "
                "voeg rijen toe om het te verdelen.")
-
     c1, c2 = st.columns([3, 1])
     with c1:
         edited = st.data_editor(
@@ -936,56 +968,37 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
     if b2.button("↩️", key=K + f"{kp}undo_{sym}", help="Zoals in de tabel: wijzigingen hierboven ongedaan maken."):
         st.session_state[reset_k] = rv + 1
         st.rerun()
-    if saved and b3.button("🗑️", key=K + f"{kp}del_{sym}", help="Wis opgeslagen instellingen; "
-                           "terug naar optimaal/vast."):
+    if saved and b3.button("🗑️", key=K + f"{kp}del_{sym}", help="Wis opgeslagen instellingen."):
         cs.delete(sym)
         st.rerun()
     if not tranches:
         st.info("Voeg minstens één schijf met een bedrag toe.")
         return
 
-    # ---- de regel in cijfers
     ti = top_info(df, cfg["lookback"], [dd_ for dd_, _ in tranches], target)
-    st.subheader("3. De regel in cijfers (nu)")
+    st.subheader("4. Jouw limieten in koers (nu)")
     c = st.columns(4)
     c[0].metric("Top (hoogste koers laatste %d dagen)" % cfg["lookback"], f"{_px(ti['top'])} {q}",
                 f"{ti['top_date']:%d/%m/%Y} · {ti['top_age']} dagen geleden", delta_color="off",
-                help="De top is een MEEBEWEGEND venster: het hoogste punt (intraday) van de laatste X dagen "
-                     "(referentie, instelbaar). Hij hangt niet aan je laatste verkoop. Een oude piek valt na X dagen "
-                     "weg en dan wordt de top lager.")
-    c[1].metric("Koers nu", f"{_px(ti['price'])} {q}", f"{ti['dd_pct']:.0f}% t.o.v. top", delta_color="off",
-                help="Laatste slotkoers (dagcandle) en hoeveel die onder de top staat.")
-    c[2].metric("Top valt weg over", f"{ti['days_left']} dagen" if ti["days_left"] > 0 else "nu",
-                help="Na dit aantal dagen valt de huidige top uit het venster. Zonder nieuw hoger punt wordt de top "
-                     "dan de volgende hoogste koers (zie rechts) en schuift het koopniveau mee omlaag.")
+                help="MEEBEWEGEND venster: het hoogste punt van de laatste X dagen. Een oude piek valt na X dagen weg.")
+    c[1].metric("Koers nu", f"{_px(ti['price'])} {q}", f"{ti['dd_pct']:.0f}% t.o.v. top", delta_color="off")
+    c[2].metric("Top valt weg over", f"{ti['days_left']} dagen" if ti["days_left"] > 0 else "nu")
     c[3].metric("Top daarna (indien niets hoger)", f"{_px(ti['next_top'])} {q}",
                 f"{(ti['next_top'] / ti['top'] - 1) * 100:.0f}% t.o.v. huidige top", delta_color="off")
     lvl = pd.DataFrame([{
-        "Schijf": i, "Koopdrempel": f"−{r['dip'] * 100:.0f}%", f"Koopniveau ({q})": _px(r["buy_level"]),
+        "Schijf": i, "Koopdrempel": f"−{r['dip'] * 100:.0f}%", f"Koop onder ({q})": _px(r["buy_level"]),
         "Nu": "🛒 In koopzone" if r["in_zone"] else f"👀 Nog {r['to_zone_pct']:.0f}% zakken",
-        "Verkoopdoel bij aankoop op dat niveau": f"{_px(r['sell_target'])} (+{target * 100:.0f}%)",
+        f"Verkoop bij ({q}) bij aankoop op dat niveau": f"{_px(r['sell_target'])} (+{target * 100:.0f}%)",
         "Koopniveau als de top wegvalt": _px(r["level_after"]),
     } for i, r in enumerate(ti["levels"], 1)])
     st.dataframe(lvl, hide_index=True, width="stretch")
-    with st.expander("🔍 Hoe werken top, koopniveau en opnieuw kopen precies?", expanded=False):
-        st.markdown(
-            f"- **Koopniveau = top × (1 − koopdrempel)**, nu {_px(ti['top'])} × (1 − {tranches[0][0] * 100:.0f}%) = "
-            f"**{_px(ti['levels'][0]['buy_level'])} {q}**. De regel koopt op de dag dat de **slotkoers** op of onder "
-            "dat niveau staat (aan die slotkoers, dus vaak iets lager).\n"
-            f"- **Verkoop = werkelijke aankoopprijs × (1 + {target * 100:.0f}%)**, niet 'koopniveau + winstdoel'.\n"
-            "- **De top hangt niet aan je laatste verkoop.** Na een verkoop is de koers meestal nog ver onder de top, "
-            "dus er wordt pas opnieuw gekocht als de koers **opnieuw** tot het koopniveau zakt.\n"
-            "- **Het koopniveau beweegt mee**: valt de oude top uit het venster, dan wordt hij lager (en het koopniveau "
-            "ook); klimt de koers naar een nieuwe top, dan stijgt het koopniveau.\n"
-            "- Schommelt de koers lang rond het koopniveau, dan koop en verkoop je dus **regelmatig** (elke ronde "
-            "±winstdoel min kosten).\n"
-            "- Zie *Uitleg → voorbeeld 10* voor een rekenvoorbeeld (top 100, koop bij 15, verkoop +20%).")
+    st.caption("Plaats je kooporder (limit) op of onder *Koop onder*. Na een aankoop: verkooporder op "
+               "werkelijke aankoopprijs × (1 + winstdoel).")
 
-    # ---- resultaat
     bt = ladder_backtest(df, cfg["lookback"], tranches, target, cfg["fee"])
     first = min(d for d, _ in tranches)
     s = dip_stats(df, cfg["lookback"], first, target, cfg["maxwait"])
-    st.subheader("4. Resultaat met jouw bedrag (hele historiek)")
+    st.subheader("5. Resultaat over de hele historiek (achteraf afgesteld)")
     ref = ladder_backtest(df, cfg["lookback"], list(p["tranches"]), p["target"], cfg["fee"])
     if ref.get("valid") and bt.get("valid"):
         if abs(ref["final_eur"] - bt["final_eur"]) < 0.5:
@@ -993,38 +1006,25 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
         else:
             st.warning(
                 f"⚠️ Je ziet hier **andere instellingen dan in de dip-tabel**, daarom een andere Eindwaarde.\n\n"
-                f"- **Tabel:** {setup_text(p['tranches'], p['target'])} → Eindwaarde **€ {ref['final_eur']:,.0f}** "
-                f"({ref['dip_round_trips']} trades)\n"
-                f"- **Hier:** {setup_text(tranches, target)} → Eindwaarde **€ {bt['final_eur']:,.0f}** "
-                f"({bt['dip_round_trips']} trades)\n\n"
-                "Druk op ↩️ (*Zoals in de tabel*) om dezelfde cijfers te zien.")
+                f"- **Tabel:** {setup_text(p['tranches'], p['target'])} → Eindwaarde **€ {ref['final_eur']:,.0f}**\n"
+                f"- **Hier:** {setup_text(tranches, target)} → Eindwaarde **€ {bt['final_eur']:,.0f}**\n\n"
+                "Druk op ↩️ om dezelfde cijfers te zien.")
     if not bt.get("valid"):
         st.warning("Te weinig data voor een backtest.")
         return
-    st.caption(f"Backtest van **{bt['bt_start']:%d/%m/%Y}** tot vandaag (**{bt['bt_years']:.1f} jaar**). "
-               f"{bt['dip_round_trips']} afgeronde trades"
-               + ("" if pd.isna(bt["avg_hold_days"]) else f", gemiddeld **{bt['avg_hold_days']:.0f} dagen** per trade")
-               + ("" if pd.isna(bt["open_days"]) else f"; open positie loopt al **{bt['open_days']:.0f} dagen**") + ".")
+    st.caption(f"Backtest van **{bt['bt_start']:%d/%m/%Y}** tot vandaag (**{bt['bt_years']:.1f} jaar**), "
+               f"{bt['dip_round_trips']} afgeronde trades. De instelling is op dit verleden afgesteld: geen "
+               "verwachting voor de toekomst.")
     c = st.columns(6)
-    c[0].metric("Inzet", f"€ {bt['capital']:,.0f}", help=C_HELP["capital"])
+    c[0].metric("Inzet", f"€ {bt['capital']:,.0f}")
     c[1].metric("Eindwaarde", f"€ {bt['final_eur']:,.0f}", f"€ {bt['profit_eur']:,.0f}", help=C_HELP["final_eur"])
-    c[2].metric("%/jaar", "–" if pd.isna(bt["dip_annual_pct"]) else f"{bt['dip_annual_pct']:.1f}%",
+    c[2].metric("Gerealiseerd", f"€ {bt['realized_eur']:,.0f}", f"{bt['realized_pct']:+.0f}%",
+                help="Alsof een open positie aan haar aankoopprijs verkocht werd: enkel afgeronde trades.")
+    c[3].metric("%/jaar", "–" if pd.isna(bt["dip_annual_pct"]) else f"{bt['dip_annual_pct']:.1f}%",
                 help=C_HELP["dip_annual_pct"])
-    c[3].metric("Kopen & houden", f"€ {bt['buy_hold_eur']:,.0f}", help=C_HELP["buy_hold_eur"])
-    c[4].metric("Laagste waarde", f"€ {bt['lowest_eur']:,.0f}", f"{bt['lowest_pct']:.0f}%",
+    c[4].metric("Kopen & houden", f"€ {bt['buy_hold_eur']:,.0f}", help=C_HELP["buy_hold_eur"])
+    c[5].metric("Laagste waarde", f"€ {bt['lowest_eur']:,.0f}", f"{bt['lowest_pct']:.0f}%",
                 help=C_HELP["lowest_eur"])
-    c[5].metric("Tijd belegd", f"{bt['invested_pct']:.0f}%", help=C_HELP["invested_pct"])
-    open_val = 0.0 if pd.isna(bt["open_value_eur"]) else bt["open_value_eur"]
-    st.caption(
-        f"**Eindwaarde € {bt['final_eur']:,.0f}** = vrij geld € {bt['final_eur'] - open_val:,.0f} "
-        f"(verkocht, of nog nooit gekocht) + open positie nu waard € {open_val:,.0f}. "
-        f"Winst = eindwaarde − inzet. *Open: vast* is wat je voor die open positie betaalde en komt dus "
-        f"**niet** extra bij de winst.")
-    if not pd.isna(bt["dip_annual_pct"]):
-        st.caption(f"Controle: € {bt['capital']:,.0f} × (1 + {bt['dip_annual_pct']:.1f}%) ^ {bt['bt_years']:.1f} jaar "
-                   f"≈ € {bt['capital'] * (1 + bt['dip_annual_pct'] / 100) ** bt['bt_years']:,.0f}.")
-    st.caption(f"Slechtste moment: de strategie zakte tot € {bt['lowest_eur']:,.0f}; "
-               f"kopen&houden zakte tot € {bt['buy_hold_lowest_eur']:,.0f} (zelfde inzet, zelfde periode).")
     c = st.columns(6)
     c[0].metric("Nu onder top", f"{s['current_dd_pct']:.0f}%", help=C_HELP["current_dd_pct"])
     c[1].metric("Hersteld (keren)", f"{s['episodes_hit']} van {s['episodes_eval']}", help=C_HELP["ep_text"])
@@ -1032,17 +1032,9 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
                 help=C_HELP["median_days"])
     c[3].metric("Ergste verdere daling", "–" if pd.isna(s["worst_further_pct"]) else f"{s['worst_further_pct']:.0f}%",
                 help=C_HELP["worst_further_pct"])
-    c[4].metric("Trades", bt["dip_round_trips"], help=C_HELP["dip_round_trips"])
-    c[5].metric("Open schijven", f"{bt['open_slots']}/{len(tranches)}",
-                help="Aantal schijven dat nu gekocht en nog niet verkocht is.")
-    st.caption(f"Keren in zone: **{s['episodes']}** afzonderlijke crashes (zonder 'zelfde crash'-filter zouden "
-               f"het er {s['episodes_raw']} zijn). {C_HELP['episodes']}")
-    if bt["open_slots"]:
-        c = st.columns(6)
-        c[0].metric("Open: vast", f"€ {bt['open_cost_eur']:,.0f}", help=C_HELP["open_cost_eur"])
-        c[1].metric("Open: waarde nu", f"€ {bt['open_value_eur']:,.0f}", help=C_HELP["open_value_eur"])
-        c[2].metric("Open: resultaat", f"€ {bt['open_result_eur']:,.0f}", f"{bt['open_result_pct']:.0f}%",
-                    help=C_HELP["open_result_eur"])
+    c[4].metric("Tijd belegd", f"{bt['invested_pct']:.0f}%", help=C_HELP["invested_pct"])
+    c[5].metric("Open positie", "–" if pd.isna(bt["open_result_pct"]) else f"{bt['open_result_pct']:+.0f}%",
+                help=C_HELP["open_result_pct"])
 
     dd = drawdown_series(df, cfg["lookback"]) * 100
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25], vertical_spacing=0.04,
@@ -1068,14 +1060,14 @@ def _detail_dip(sym: str, cfg: dict, kp: str = "") -> None:
     fig.add_trace(go.Scatter(x=df["time"].iloc[cfg["lookback"] - 1:], y=bh.values, name="kopen&houden €",
                              line=dict(color="gray", dash="dot")), row=3, col=1)
     fig.add_hline(y=bt["capital"], line=dict(color="black", width=0.5), row=3, col=1)
-    if cfg["test_frac"] > 0:
-        wf = wf_for(sym, p, _wf_fn(cfg))
-        if wf["wf_ok"]:
-            x0 = wf["test_start"].isoformat()
-            for r in (1, 2, 3):
-                fig.add_vline(x=x0, line=dict(color="purple", dash="dot", width=1), row=r, col=1)
-            fig.add_annotation(x=x0, y=1, yref="paper", text="🧪 start test", showarrow=False,
-                               xanchor="left", font=dict(color="purple"))
+    if wf:
+        for w in wf["windows"]:
+            if w.get("ok"):
+                x0 = pd.Timestamp(w["test_start"]).isoformat()
+                for r in (1, 2, 3):
+                    fig.add_vline(x=x0, line=dict(color="purple", dash="dot", width=1), row=r, col=1)
+                fig.add_annotation(x=x0, y=1, yref="paper", text=f"🧪 venster {w['nr']}", showarrow=False,
+                                   xanchor="left", font=dict(color="purple"))
     fig.update_yaxes(type="log", row=1, col=1)
     fig.update_layout(height=850, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig, width="stretch", key=K + kp + "fig")
@@ -1100,9 +1092,9 @@ def render_crypto_page() -> None:
         gcfg = _grid_settings(fee)
         _grid_tab(gcfg)
     with t1:
-        dcfg = _dip_settings(fee)
-        _dip_tab(dcfg)
+        dcfg, vcfg = _dip_settings(fee)
+        _dip_tab(dcfg, vcfg)
     with t3:
-        _detail_tab(gcfg, dcfg)
+        _detail_tab(gcfg, dcfg, vcfg)
     with t4:
         _uitleg()
