@@ -22,6 +22,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -67,6 +68,8 @@ SHORT = {
     "real_trades": "Afgeronde trades in de doorlopende test: het bewijs.",
     "real_total_pct": "Enkel echt verkochte winst (open positie aan aankoopprijs).",
     "real_annual_pct": "Gerealiseerd per jaar: dit gebruikt het oordeel.",
+    "real_eur": "Je startbedrag na de test, enkel echt verkochte winst.",
+    "total_eur": "Je startbedrag na de test, open positie aan de koers van vandaag.",
     "open_now_pct": "Positie die nu open staat t.o.v. aankoop (papier).",
     "total_annual_pct": "Per jaar inclusief open positie.",
     "bh_annual_pct": "Kopen en houden over dezelfde periode, per jaar.",
@@ -102,6 +105,7 @@ SECTIONS = [
         ("Periode", "test_period", "txt"), ("Training eerste venster", "train_years_first", "years"),
         ("Positieve vensters", "win_text", "txt"),
         ("Gerealiseerde trades", "real_trades", "int"), ("Gerealiseerd totaal", "real_total_pct", "sign"),
+        ("Gerealiseerd bedrag", "real_eur", "eur"), ("Totaal bedrag (incl. open)", "total_eur", "eur"),
         ("Gerealiseerd %/jaar", "real_annual_pct", "sign1"), ("Open nu", "open_now_pct", "sign"),
         ("Totaal %/jaar (incl. open)", "total_annual_pct", "sign1"),
         ("Kopen&houden %/jaar", "bh_annual_pct", "sign1"),
@@ -214,6 +218,8 @@ def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
         "nr": range(1, len(t) + 1),
         "symbol": t["symbol"].values,
         "verdict": t["verdict"].values,
+        "short_why": txt("short_why"),
+        "n_issues": num("n_issues"),
         "now": t["now"].values,
         "rule": [f"−{d:.0f}% / +{g:.0f}%" if not (_isna(d) or _isna(g)) else "–"
                  for d, g in zip(t["dip_pct"], t["target_pct"])],
@@ -221,6 +227,8 @@ def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
         "to_zone_pct": num("to_zone_pct"),
         "real_annual_pct": num("real_annual_pct"),
         "real_trades": num("real_trades"),
+        "real_eur": num("real_eur"),
+        "total_eur": num("total_eur"),
         "test_years": num("test_years"),
         "win_text": txt("win_text"),
         "stable_txt": txt("stable_txt"),
@@ -244,6 +252,9 @@ def _render_compact(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
                                                 help="Standaardvolgorde: op oordeel, dan op gerealiseerd %/jaar."),
             "symbol": st.column_config.TextColumn("Munt"),
             "verdict": st.column_config.TextColumn("Oordeel", help=C_HELP["verdict"]),
+            "short_why": st.column_config.TextColumn("Reden (kort)", width="medium", help=C_HELP["short_why"]),
+            "n_issues": st.column_config.NumberColumn("Knelpunten", format="%d", width="small",
+                                                      help=C_HELP["n_issues"]),
             "now": st.column_config.TextColumn("Koopzone nu?", help=C_HELP["now"]),
             "rule": st.column_config.TextColumn("Koop / verkoop (vandaag)",
                                                 help="Koopdrempel onder de top / winstdoel boven je aankoopprijs: "
@@ -252,6 +263,9 @@ def _render_compact(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
             "to_zone_pct": _num("Nog te zakken %", "%.0f", "to_zone_pct"),
             "real_annual_pct": _num("🧪 Gerealiseerd %/jaar", "%.1f", "real_annual_pct"),
             "real_trades": _num("🧪 Trades", "%d", "real_trades"),
+            "real_eur": st.column_config.NumberColumn("🧪 Gerealiseerd €", format="€ %.0f", help=C_HELP["real_eur"]),
+            "total_eur": st.column_config.NumberColumn("🧪 Totaal € (incl. open)", format="€ %.0f",
+                                                       help=C_HELP["total_eur"]),
             "test_years": st.column_config.NumberColumn("🧪 Testduur (j)", format="%.1f",
                                                         help="Totale duur van de testvensters samen."),
             "win_text": st.column_config.TextColumn("🧪 Positief", help=C_HELP["win_text"]),
@@ -284,6 +298,67 @@ def _render_compact(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
             _detail_dip(sym, cfg, vcfg, kp="card_")
 
 
+# (label, kolom, soort, stap) voor de kolomfilters
+COLUMN_FILTERS = [
+    ("Knelpunten (twijfel)", "n_issues", "num", 1.0),
+    ("🧪 Testduur (jaar)", "test_years", "num", 0.1),
+    ("🧪 Training eerste venster (jaar)", "train_years_first", "num", 0.1),
+    ("🧪 Gerealiseerd %/jaar", "real_annual_pct", "num", 1.0),
+    ("🧪 Totaal %/jaar (incl. open)", "total_annual_pct", "num", 1.0),
+    ("🧪 Gerealiseerd €", "real_eur", "num", 100.0),
+    ("🧪 Totaal € (incl. open)", "total_eur", "num", 100.0),
+    ("🧪 Afgeronde trades", "real_trades", "num", 1.0),
+    ("🧪 Open nu %", "open_now_pct", "num", 1.0),
+    ("🧪 Kopen&houden %/jaar", "bh_annual_pct", "num", 1.0),
+    ("🧪 Stabiel?", "stable_txt", "txt", None),
+    ("Nog te zakken %", "to_zone_pct", "num", 1.0),
+    ("Koopdrempel %", "dip_pct", "num", 5.0),
+    ("Winstdoel %", "target_pct", "num", 5.0),
+    ("Dagen data", "history_days", "num", 10.0),
+    ("Keren in zone", "episodes", "num", 1.0),
+    ("Ergste verdere daling %", "worst_further_pct", "num", 1.0),
+]
+
+
+def _column_filters(t: pd.DataFrame) -> pd.DataFrame:
+    """Filters per kolom: kies kolommen, stel per kolom een bereik (getallen) of waarden (tekst) in."""
+    avail = [f for f in COLUMN_FILTERS if f[1] in t.columns]
+    with st.expander("🔎 Filters per kolom", expanded=bool(st.session_state.get(K + "colf_sel"))):
+        chosen = st.multiselect("Filter op", [f[0] for f in avail], key=K + "colf_sel",
+                                help="Kies één of meer kolommen; per kolom verschijnt een bereik. Bv. "
+                                     "'🧪 Testduur (jaar)' vanaf 2, of '🧪 Totaal %/jaar' vanaf 20.")
+        keep_empty = st.checkbox("Munten zonder waarde (leeg) behouden", value=False, key=K + "colf_empty",
+                                 help="Bv. munten zonder testvenster hebben geen testduur. Standaard vallen ze weg "
+                                      "zodra je op die kolom filtert.")
+        out = t
+        for label, col, kind, step in avail:
+            if label not in chosen:
+                continue
+            if kind == "txt":
+                vals = sorted({str(x) for x in t[col] if not _isna(x)})
+                sel = st.multiselect(label, vals, default=vals, key=K + f"colf_{col}")
+                mask = out[col].astype(str).isin(sel)
+            else:
+                v = pd.to_numeric(t[col], errors="coerce").dropna()
+                if v.empty:
+                    st.caption(f"{label}: geen waarden.")
+                    continue
+                lo, hi = float(np.floor(v.min() / step) * step), float(np.ceil(v.max() / step) * step)
+                if lo == hi:
+                    hi = lo + step
+                c1, c2 = st.columns(2)
+                mn = c1.number_input(f"{label} – vanaf", lo, hi, lo, step, key=K + f"colf_{col}_min")
+                mx = c2.number_input(f"{label} – tot en met", lo, hi, hi, step, key=K + f"colf_{col}_max")
+                x = pd.to_numeric(out[col], errors="coerce")
+                mask = x.between(mn, mx)
+            if keep_empty:
+                mask = mask | out[col].isna()
+            out = out[mask]
+        if chosen:
+            st.caption(f"Kolomfilters: {len(out)} van {len(t)} munten.")
+    return out
+
+
 def _filter_table(t: pd.DataFrame) -> pd.DataFrame:
     present = [lbl for lbl in VERDICT_LABELS if lbl in set(t["verdict"])]
     c1, c2 = st.columns([1, 3])
@@ -294,6 +369,7 @@ def _filter_table(t: pd.DataFrame) -> pd.DataFrame:
     out = t[t["verdict"].isin(chosen)] if chosen else t.iloc[0:0]
     if only_zone:
         out = out[pd.to_numeric(out["to_zone_pct"], errors="coerce") <= 0]
+    out = _column_filters(out)
     if len(out) < len(t):
         st.caption(f"{len(out)} van {len(t)} munten getoond.")
     return out.reset_index(drop=True)
@@ -684,6 +760,13 @@ def _dip_tab(cfg: dict, vcfg: dict) -> None:
         if not rest.empty:
             st.info("In de koopzone, maar (nog) niet 🟢: "
                     + ", ".join(f"{s} ({v.split()[0]})" for s, v in zip(rest["symbol"], rest["verdict"])))
+    tw = t[t["verdict"].str.startswith("🟡")]
+    if not tw.empty:
+        best = tw.nsmallest(5, "_k0") if "_k0" in tw else tw.head(5)
+        one = best[pd.to_numeric(best["n_issues"], errors="coerce") == 1]
+        if not one.empty:
+            st.caption("🟡 Twijfel met maar **één knelpunt** (staan bovenaan bij de twijfels): " + ", ".join(
+                f"{s} ({w})" for s, w in zip(one["symbol"], one["short_why"])))
     with st.expander("🧭 Hoe wordt het oordeel bepaald?", expanded=False):
         st.markdown(VERDICT_RULES)
     with st.expander("ℹ️ Uitleg kolommen", expanded=False):
@@ -709,10 +792,10 @@ def _render_wide(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
     t = t.copy()
     t["buy_level_txt"] = [_px(x) for x in t["buy_level"]]
     t["sell_level_txt"] = [_px(x) for x in t["sell_level"]]
-    cols = ["symbol", "coinbase", "verdict", "now", "why", "source", "dip_pct", "target_pct", "buy_level_txt",
+    cols = ["symbol", "coinbase", "verdict", "short_why", "n_issues", "now", "why", "source", "dip_pct", "target_pct", "buy_level_txt",
             "sell_level_txt", "current_dd_pct", "to_zone_pct"]
     if cfg.get("n_windows", 0) > 0:
-        cols += TEST_COLS + ["train_years_first"]
+        cols += TEST_COLS + ["train_years_first", "real_eur", "total_eur"]
     cols += ["history_days", "episodes", "ep_text", "episode_hit_pct", "median_days", "median_further_pct",
              "worst_further_pct", "bt_start", "bt_years", "dip_round_trips", "avg_hold_days", "capital",
              "final_eur", "dip_annual_pct", "buy_hold_eur", "invested_pct", "lowest_eur", "open_result_pct"]
@@ -730,6 +813,10 @@ def _render_wide(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
             "verdict": st.column_config.TextColumn("Oordeel", help=C_HELP["verdict"]),
             "now": st.column_config.TextColumn("Koopzone nu?", help=C_HELP["now"]),
             "why": st.column_config.TextColumn("Waarom", width="large", help=C_HELP["why"]),
+            "short_why": st.column_config.TextColumn("Reden (kort)", help=C_HELP["short_why"]),
+            "n_issues": st.column_config.NumberColumn("Knelpunten", format="%d", help=C_HELP["n_issues"]),
+            "real_eur": st.column_config.NumberColumn("🧪 Gerealiseerd €", format="€ %.0f", help=C_HELP["real_eur"]),
+            "total_eur": st.column_config.NumberColumn("🧪 Totaal €", format="€ %.0f", help=C_HELP["total_eur"]),
             "source": st.column_config.TextColumn("Bron", help=C_HELP["source"]),
             "dip_pct": _num("Koopdrempel %", "%.0f", "dip_pct"),
             "target_pct": _num("Winstdoel %", "%.0f", "target_pct"),

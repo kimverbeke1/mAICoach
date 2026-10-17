@@ -192,20 +192,22 @@ def test_fields(sym: str, cfg: dict, p: dict, wf_fn: WalkFn) -> dict:
     }
 
 
-def verdict(r: pd.Series, v: dict) -> tuple[str, str, int]:
-    """(label, reden, sorteer-rang). Beoordeelt op de TESTVENSTERS (doorlopend, blind getest), met de nadruk op
+def verdict(r: pd.Series, v: dict) -> tuple[str, str, int, str, int]:
+    """(label, reden, sorteer-rang, korte reden, aantal knelpunten). Beoordeelt op de TESTVENSTERS (doorlopend, blind getest), met de nadruk op
     GEREALISEERDE winst en voldoende bewijs. v = oordeel-drempels."""
     v = {**VERDICT_DEFAULTS, **(v or {})}
     if _flag(r.get("too_short")):
         n, need = _num(r.get("history_days")), _num(r.get("need_days"))
         return ("⚪ Te weinig data",
                 f"Maar {n:.0f} dagen koersdata; met deze referentieperiode zijn er minstens {need:.0f} nodig. "
-                "Kies bij ⚙️ Instellingen een kortere referentie (bv. 90 of 180 dagen) om deze munt mee te nemen.", 5)
+                "Kies bij ⚙️ Instellingen een kortere referentie (bv. 90 of 180 dagen) om deze munt mee te nemen.", 5,
+                f"{n:.0f} dagen data", 9)
     status = r.get("test_status")
     if not isinstance(status, str) or status != "OK":
         reason = status[len("Niet getest: "):] if isinstance(status, str) and status.startswith("Niet getest") \
             else "testvensters uit"
-        return "⚪ Niet getest", f"Geen testvenster mogelijk ({reason}): enkel hele-historiek-cijfers.", 2
+        return ("⚪ Niet getest", f"Geen testvenster mogelijk ({reason}): enkel hele-historiek-cijfers.", 2,
+                "geen testvenster", 9)
 
     R, buys = _int(r.get("real_trades")), _int(r.get("buys_test"))
     ra, ta = _num(r.get("real_annual_pct")), _num(r.get("total_annual_pct"))
@@ -225,7 +227,8 @@ def verdict(r: pd.Series, v: dict) -> tuple[str, str, int]:
 
     if buys == 0:
         return ("⚪ Niets bewezen",
-                f"In de {nw} testvenster(s) zakte de munt nooit tot de koopdrempel: de werkwijze is niet getoetst.", 2)
+                f"In de {nw} testvenster(s) zakte de munt nooit tot de koopdrempel: de werkwijze is niet getoetst.", 2,
+                "nooit gekocht in test", 9)
 
     score_ra = rt if short else ra
     min_ann, min_R, max_dd = float(v["min_annual"]), int(v["min_real_trades"]), float(v["max_open_dd"])
@@ -236,7 +239,7 @@ def verdict(r: pd.Series, v: dict) -> tuple[str, str, int]:
     if good:
         return ("🟢 Interessant",
                 f"{real_txt.capitalize()}, {R} afgeronde trade(s), positief in {wp} van {wa} actieve vensters"
-                + (", instelling stabiel" if stable else "") + open_txt + "." + bh_txt, 0)
+                + (", instelling stabiel" if stable else "") + open_txt + "." + bh_txt, 0, "✓ alle criteria", 0)
 
     deep_open = not math.isnan(on) and on < -max_dd
     if deep_open and (R < min_R or math.isnan(score_ra) or score_ra < min_ann):
@@ -244,13 +247,13 @@ def verdict(r: pd.Series, v: dict) -> tuple[str, str, int]:
         return ("🟠 Onder water",
                 f"Positie nu {on:+.0f}%" + ("" if math.isnan(od) else f" (open sinds {od:.0f} dagen")
                 + wait + (")" if not math.isnan(od) else "") + f"; {real_txt}, {R} afgeronde trade(s). "
-                "Papieren verlies: nog niet hersteld." + bh_txt, 3)
+                "Papieren verlies: nog niet hersteld." + bh_txt, 3, f"positie {on:+.0f}%", 9)
 
     if not math.isnan(ra) and ra < 0 and (math.isnan(ta) or ta <= 0):
         return ("🔴 Niet interessant", f"{real_txt.capitalize()} en ook inclusief open positie geen winst "
-                f"({ta:+.0f}%/jaar), {R} afgeronde trade(s)." + bh_txt, 4)
+                f"({ta:+.0f}%/jaar), {R} afgeronde trade(s)." + bh_txt, 4, "verlies", 9)
 
-    issues = []
+    issues, tags = [], []
     if short_hist:
         parts = []
         if not math.isnan(yrs) and yrs < float(v["min_test_years"]):
@@ -258,17 +261,26 @@ def verdict(r: pd.Series, v: dict) -> tuple[str, str, int]:
         if not math.isnan(tr_yrs) and tr_yrs < float(v["min_train_years"]):
             parts.append(f"training eerste venster {tr_yrs:.1f} j < {float(v['min_train_years']):.1f} j")
         issues.append("korte historiek (" + ", ".join(parts) + ")")
+        tags.append("korte test " + f"{yrs:.1f} j".replace(".", ",")
+                    if not math.isnan(yrs) and yrs < float(v["min_test_years"])
+                    else "korte training " + f"{tr_yrs:.1f} j".replace(".", ","))
     if R < min_R:
         issues.append(f"te weinig afgeronde trades ({R} < {min_R})")
+        tags.append(f"{R} trade{'s' if R != 1 else ''}")
     if math.isnan(score_ra) or score_ra < min_ann:
         issues.append(f"gerealiseerd rendement onder je minimum ({score_ra:+.0f}% < {min_ann:.0f}%)")
+        tags.append(f"rendement {score_ra:+.0f}%" if not math.isnan(score_ra) else "geen rendement")
     if stable is False:
         issues.append("instelling instabiel tussen de vensters")
+        tags.append("instabiel")
     if deep_open:
         issues.append(f"positie nu {on:+.0f}% (dieper dan −{max_dd:.0f}%)")
+        tags.append(f"open {on:+.0f}%")
     if 2 * wp < wa:
         issues.append(f"maar {wp} van {wa} actieve vensters positief")
-    return ("🟡 Twijfel", f"{real_txt.capitalize()}, maar: " + "; ".join(issues) + "." + bh_txt, 1)
+        tags.append(f"{wp}/{wa} vensters +")
+    return ("🟡 Twijfel", f"{real_txt.capitalize()}, maar: " + "; ".join(issues) + "." + bh_txt, 1,
+            " · ".join(tags), len(tags))
 
 
 def now_label(z) -> str:
@@ -284,7 +296,8 @@ def sort_table(t: pd.DataFrame) -> pd.DataFrame:
     t = t.copy()
     t["_k1"] = ra.where(~short, rt).fillna(-1e9)
     t["_k2"] = pd.to_numeric(t["dip_annual_pct"], errors="coerce").fillna(-1e9)
-    return t.sort_values(["_rank", "_k1", "_k2"], ascending=[True, False, False]).reset_index(drop=True)
+    t["_k0"] = pd.to_numeric(t.get("n_issues", 0), errors="coerce").fillna(0)
+    return t.sort_values(["_rank", "_k0", "_k1", "_k2"], ascending=[True, True, False, False]).reset_index(drop=True)
 
 
 def apply_verdicts(t: pd.DataFrame, v: dict) -> pd.DataFrame:
@@ -294,7 +307,10 @@ def apply_verdicts(t: pd.DataFrame, v: dict) -> pd.DataFrame:
         if c not in t:
             t[c] = np.nan
     res = t.apply(lambda r: verdict(r, v), axis=1, result_type="expand")
-    t["verdict"], t["why"], t["_rank"] = res[0], res[1], res[2]
+    t["verdict"], t["why"], t["_rank"], t["short_why"], t["n_issues"] = res[0], res[1], res[2], res[3], res[4]
+    cap = pd.to_numeric(t["capital"], errors="coerce")
+    t["real_eur"] = cap * (1 + pd.to_numeric(t["real_total_pct"], errors="coerce") / 100)
+    t["total_eur"] = cap * (1 + pd.to_numeric(t["total_total_pct"], errors="coerce") / 100)
     t["now"] = t["to_zone_pct"].apply(now_label)
     return sort_table(t)
 

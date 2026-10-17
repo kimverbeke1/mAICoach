@@ -98,6 +98,13 @@ C_HELP = {
                "🔴 Niet interessant – gerealiseerd én inclusief open positie verlies.\n"
                "De drempels stel je in bij ⚙️ Instellingen → Oordeel.",
     "why": "Korte reden achter het oordeel, met de cijfers erbij.",
+    "short_why": "Kernwoorden van wat ontbreekt voor 🟢 (bij 🟡) of de hoofdreden (bij andere oordelen), bv. "
+                 "'korte test 0,7 j · 2 trades'. De volledige uitleg staat in 'Waarom' (rij aanklikken).",
+    "n_issues": "Aantal knelpunten dat een 🟡 van 🟢 scheidt. 1 = bijna interessant. Binnen 🟡 staat de tabel "
+                "gesorteerd op dit aantal (minste eerst), daarna op gerealiseerd %/jaar.",
+    "real_eur": "Je startbedrag na de doorlopende test, enkel met echt verkochte winst (open positie aan haar "
+                "aankoopprijs).",
+    "total_eur": "Je startbedrag na de doorlopende test, inclusief de open positie aan de koers van vandaag.",
     "now": "KOOPZONE NU? Puur mechanisch: staat de munt vandaag onder je koopdrempel?\n"
            "🛒 In koopzone = de regel zegt nu: koop.\n"
            "👀 Nog X% zakken = de munt moet eerst nog X% dalen.\n"
@@ -249,7 +256,7 @@ winst. De drempels stel je zelf in (⚙️ Instellingen → *Oordeel*); wijzigen
 | 🟢 **Interessant** | testduur ≥ *min. testduur* **én** training eerste venster ≥ *min. training* **én** ≥ *min. trades* afgeronde trades **én** gerealiseerd ≥ *min. %/jaar* **én** instelling niet instabiel **én** minstens de helft van de actieve vensters positief **én** positie nu niet dieper dan *max. diepte* |
 | 🟠 **Onder water** | Positie nu dieper dan *max. diepte* **en** te weinig gerealiseerde winst of trades |
 | 🔴 **Niet interessant** | Gerealiseerd verlies **en** ook inclusief open positie geen winst |
-| 🟡 **Twijfel** | Al de rest (bv. **korte historiek**): de reden(en) staan in *Waarom* |
+| 🟡 **Twijfel** | Al de rest (bv. **korte historiek**): kernwoorden in *Reden (kort)*, volledig in *Waarom*. Binnen 🟡 eerst de munten met de minste **knelpunten** |
 
 **Sortering:** 🟢 → 🟡 → ⚪ → 🟠 → 🔴, binnen elk niveau op gerealiseerd %/jaar.
 
