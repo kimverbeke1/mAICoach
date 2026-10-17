@@ -6,8 +6,9 @@ Koersdata: Coinbase. Opslag: Firestore (cloud) of lokaal (crypto_store.py).
 Dip-resultaten: COMPACTE, SORTEERBARE tabel; klik een rij voor alle cijfers en de grafiek. Filters: enkel in
 koopzone, per oordeel. De brede tabel blijft beschikbaar.
 
-Betrouwbaarheid: MEERDERE TESTVENSTERS (walk_forward_multi). Oordeel op GEREALISEERDE winst met instelbare
-drempels (min. %/jaar, min. trades, max. diepte open positie); drempels wijzigen = meteen nieuw oordeel.
+Betrouwbaarheid: MEERDERE TESTVENSTERS als ÉÉN DOORLOPENDE simulatie (walk_forward_multi). Oordeel op
+GEREALISEERDE winst met instelbare drempels (min. %/jaar, min. trades, max. diepte open positie, min. testduur,
+min. training); drempels wijzigen = meteen nieuw oordeel.
 
 Standaardinstellingen (ingebouwd of bewaard met '💾 Bewaar als standaard') -> de app toont de nachtelijke tabel.
 Gewijzigde reken-instellingen -> de app rekent zelf, voor 'Aantal munten bij herberekening' (standaard 150)."""
@@ -30,11 +31,12 @@ import crypto_settings as cs
 import crypto_store as store
 from crypto_backtest import grid_backtest
 from crypto_data import base_of, coinbase_label, get_coinbase_products, get_klines, get_top_symbols, quote_of
-from crypto_dip import dip_stats, drawdown_series, ladder_backtest, optimize_dip, top_info, walk_forward_multi
+from crypto_dip import (dip_stats, drawdown_series, is_stable, ladder_backtest, optimize_dip, top_info,
+                        walk_forward_multi)
 from crypto_metrics import add_score, compute_metrics, zigzag_pivots
 from crypto_scan import (LIVE_TOP_N, SAVABLE_CALC, TEST_COLS, apply_verdicts, cfg_key, coin_params,
                          effective_defaults, is_default, scan_coin, setup_text, table_from_json, table_to_json,
-                         wf_for, windows_from_json)
+                         wf_for)
 from crypto_texts import C_HELP, DIP_EXAMPLES, DIP_EXPLAIN, GENERAL, H, VERDICT_RULES
 
 K = "crypto_"  # prefix voor session_state-keys (geen botsing met mAICoach/PadelAnalysis)
@@ -57,16 +59,17 @@ SHORT = {
     "sell_level": "Verkoopdoel bij aankoop op het koopniveau (altijd: aankoopprijs + winstdoel).",
     "current_dd_pct": "Hoeveel de koers nu onder de top staat.",
     "to_zone_pct": "Hoeveel de koers nog moet zakken tot de koopzone (0 = nu in de koopzone).",
-    "wf_settings": "Instelling per testvenster (telkens gezocht op de data ervóór).",
+    "wf_settings": "Instelling per testvenster voor nieuwe aankopen (telkens gezocht op de data ervóór).",
     "stable_txt": "Blijft de gevonden instelling dicht bij elkaar? Instabiel = getallen minder betrouwbaar.",
     "test_period": "Totale periode van de testvensters (eindigt vandaag).",
-    "win_text": "Aantal vensters met winst (incl. open positie).",
-    "real_trades": "Afgeronde trades in alle vensters samen: het bewijs.",
-    "real_total_pct": "Enkel echte winst (open positie aan aankoopprijs).",
+    "train_years_first": "Data waarop de instelling voor het eerste venster gezocht werd.",
+    "win_text": "Actieve vensters met winst (incl. open positie).",
+    "real_trades": "Afgeronde trades in de doorlopende test: het bewijs.",
+    "real_total_pct": "Enkel echt verkochte winst (open positie aan aankoopprijs).",
     "real_annual_pct": "Gerealiseerd per jaar: dit gebruikt het oordeel.",
-    "open_now_pct": "Laatste, nog open positie t.o.v. aankoop (papier).",
+    "open_now_pct": "Positie die nu open staat t.o.v. aankoop (papier).",
     "total_annual_pct": "Per jaar inclusief open positie.",
-    "bh_annual_pct": "Kopen en houden in dezelfde vensters, per jaar.",
+    "bh_annual_pct": "Kopen en houden over dezelfde periode, per jaar.",
     "history_days": "Aantal dagen koersgeschiedenis.",
     "episodes": "Afzonderlijke keren in de koopzone (5+ zegt iets).",
     "ep_text": "Hoe vaak het winstdoel daarna gehaald werd binnen de max. wachttijd.",
@@ -94,9 +97,10 @@ SECTIONS = [
         ("Nu onder top", "current_dd_pct", "pct"), ("Nog te zakken", "to_zone_pct", "pct"),
         ("Coinbase", "coinbase", "txt"),
     ]),
-    ("🧪 Testvensters (blind getest)", [
+    ("🧪 Testvensters (doorlopend, blind getest)", [
         ("Instelling per venster", "wf_settings", "txt"), ("Stabiel?", "stable_txt", "txt"),
-        ("Periode", "test_period", "txt"), ("Positieve vensters", "win_text", "txt"),
+        ("Periode", "test_period", "txt"), ("Training eerste venster", "train_years_first", "years"),
+        ("Positieve vensters", "win_text", "txt"),
         ("Gerealiseerde trades", "real_trades", "int"), ("Gerealiseerd totaal", "real_total_pct", "sign"),
         ("Gerealiseerd %/jaar", "real_annual_pct", "sign1"), ("Open nu", "open_now_pct", "sign"),
         ("Totaal %/jaar (incl. open)", "total_annual_pct", "sign1"),
@@ -126,7 +130,6 @@ def _isna(v) -> bool:
 
 
 def _px(v) -> str:
-    """Koers leesbaar: veel decimalen voor kleine munten, weinig voor grote."""
     if _isna(v):
         return "–"
     v = float(v)
@@ -135,6 +138,10 @@ def _px(v) -> str:
     if v >= 1:
         return f"{v:,.2f}"
     return f"{v:.6f}".rstrip("0")
+
+
+def _years_txt(v) -> str:
+    return f"{float(v):.1f} j".replace(".", ",")
 
 
 def _fmt(v, kind: str) -> str:
@@ -214,6 +221,7 @@ def _compact_view(t: pd.DataFrame) -> pd.DataFrame:
         "to_zone_pct": num("to_zone_pct"),
         "real_annual_pct": num("real_annual_pct"),
         "real_trades": num("real_trades"),
+        "test_years": num("test_years"),
         "win_text": txt("win_text"),
         "stable_txt": txt("stable_txt"),
         "open_now_pct": num("open_now_pct"),
@@ -244,6 +252,8 @@ def _render_compact(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
             "to_zone_pct": _num("Nog te zakken %", "%.0f", "to_zone_pct"),
             "real_annual_pct": _num("🧪 Gerealiseerd %/jaar", "%.1f", "real_annual_pct"),
             "real_trades": _num("🧪 Trades", "%d", "real_trades"),
+            "test_years": st.column_config.NumberColumn("🧪 Testduur (j)", format="%.1f",
+                                                        help="Totale duur van de testvensters samen."),
             "win_text": st.column_config.TextColumn("🧪 Positief", help=C_HELP["win_text"]),
             "stable_txt": st.column_config.TextColumn("🧪 Stabiel?", help=C_HELP["stable_txt"]),
             "open_now_pct": _num("🧪 Open nu %", "%.0f", "open_now_pct"),
@@ -328,8 +338,10 @@ def _optimize(symbol: str, days: int, lookback: int, fee: float, min_trades: int
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _walk_multi(symbol: str, days: int, lookback: int, fee: float, min_trades: int, n_windows: int,
-                amount: float, fixed_tr: tuple | None = None, fixed_target: float | None = None) -> dict:
-    """fixed_tr = None: per venster de beste instelling zoeken. Anders: precies die instelling testen."""
+                amount: float, fixed_tr: tuple | None = None, fixed_target: float | None = None,
+                _v: int = 3) -> dict:
+    """fixed_tr = None: per venster de beste instelling zoeken. Anders: precies die instelling testen.
+    _v = versie van de berekening (doorlopende simulatie), zodat oude cache niet hergebruikt wordt."""
     fixed = None if fixed_tr is None else {"tranches": list(fixed_tr), "target": fixed_target}
     return walk_forward_multi(_klines(symbol, "1d", days), lookback, fee, min_trades, n_windows, amount, fixed)
 
@@ -511,11 +523,18 @@ def _dip_settings(fee: float) -> tuple[dict, dict]:
                                     key=K + "v_min_real", help=H["min_real_trades"])
         max_open = c12.number_input("Max. diepte open positie voor 🟢 (%)", 0.0, 100.0, float(vd["max_open_dd"]),
                                     5.0, key=K + "v_max_open", help=H["max_open_dd"])
+        c13, c14 = st.columns(2)
+        min_test = c13.number_input("Min. testduur voor 🟢 (jaar)", 0.0, 5.0, float(vd["min_test_years"]), 0.5,
+                                    key=K + "v_min_test", help=H["min_test_years"])
+        min_train = c14.number_input("Min. training eerste venster voor 🟢 (jaar)", 0.0, 7.0,
+                                     float(vd["min_train_years"]), 0.5, key=K + "v_min_train",
+                                     help=H["min_train_years"])
 
         cfg = dict(days=years * 365 + 5, lookback=lookback, amount=amount, optimal=not fixed, dip=dip,
                    target=target, maxwait=maxwait, min_trades=int(min_trades), fee=fee, top_n=int(d["top_n"]),
                    n_windows=int(n_windows), only_cb=True)
-        vcfg = dict(min_annual=float(min_annual), min_real_trades=int(min_real), max_open_dd=float(max_open))
+        vcfg = dict(min_annual=float(min_annual), min_real_trades=int(min_real), max_open_dd=float(max_open),
+                    min_test_years=float(min_test), min_train_years=float(min_train))
 
         b1, b2 = st.columns([1, 3])
         if b1.button("💾 Bewaar als standaard", key=K + "save_defaults", help=H["save_defaults"]):
@@ -627,11 +646,11 @@ def _dip_tab(cfg: dict, vcfg: dict) -> None:
         st.info("Nog geen resultaat voor deze instellingen. Druk op **Dip-analyse uitvoeren**; het resultaat "
                 "wordt daarna bewaard.")
         return
-    if "real_annual_pct" not in t.columns:
-        st.warning("Deze bewaarde tabel komt van een oudere versie (zonder testvensters). Druk op "
+    if "train_years_first" not in t.columns:
+        st.warning("Deze tabel komt van een oudere versie (zonder doorlopende testvensters). Druk op "
                    "**Opnieuw berekenen**.")
         return
-    t = apply_verdicts(t, vcfg)                       # oordeel altijd met de huidige drempels
+    t = apply_verdicts(t, vcfg)
     meta = st.session_state.get(K + "dip_meta") or {}
     if meta.get("ts"):
         when = pd.Timestamp(meta["ts"], unit="s", tz="UTC").tz_convert("Europe/Brussels")
@@ -650,7 +669,8 @@ def _dip_tab(cfg: dict, vcfg: dict) -> None:
     counts = t["verdict"].value_counts()
     st.markdown("**Oordeel:** " + "  ·  ".join(f"{lbl} **{counts[lbl]}**" for lbl in VERDICT_LABELS
                                                   if lbl in counts.index)
-                + f"  — 🟢 = ≥ {vcfg['min_real_trades']} afgeronde trades, gerealiseerd ≥ {vcfg['min_annual']:.0f}%/jaar, "
+                + f"  — 🟢 = testduur ≥ {vcfg['min_test_years']:g} j, training ≥ {vcfg['min_train_years']:g} j, "
+                  f"≥ {vcfg['min_real_trades']} afgeronde trades, gerealiseerd ≥ {vcfg['min_annual']:.0f}%/jaar, "
                   f"open positie niet dieper dan −{vcfg['max_open_dd']:.0f}%.")
     in_zone = t[pd.to_numeric(t["to_zone_pct"], errors="coerce") <= 0]
     if in_zone.empty:
@@ -692,7 +712,7 @@ def _render_wide(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
     cols = ["symbol", "coinbase", "verdict", "now", "why", "source", "dip_pct", "target_pct", "buy_level_txt",
             "sell_level_txt", "current_dd_pct", "to_zone_pct"]
     if cfg.get("n_windows", 0) > 0:
-        cols += TEST_COLS
+        cols += TEST_COLS + ["train_years_first"]
     cols += ["history_days", "episodes", "ep_text", "episode_hit_pct", "median_days", "median_further_pct",
              "worst_further_pct", "bt_start", "bt_years", "dip_round_trips", "avg_hold_days", "capital",
              "final_eur", "dip_annual_pct", "buy_hold_eur", "invested_pct", "lowest_eur", "open_result_pct"]
@@ -720,6 +740,8 @@ def _render_wide(t: pd.DataFrame, cfg: dict, vcfg: dict) -> None:
             "wf_settings": st.column_config.TextColumn("🧪 Instelling per venster", help=C_HELP["wf_settings"]),
             "stable_txt": st.column_config.TextColumn("🧪 Stabiel?", help=C_HELP["stable_txt"]),
             "test_period": st.column_config.TextColumn("🧪 Periode", help=C_HELP["test_period"]),
+            "train_years_first": st.column_config.NumberColumn("🧪 Training eerste venster (j)", format="%.1f",
+                                                               help=H["min_train_years"]),
             "win_text": st.column_config.TextColumn("🧪 Positief", help=C_HELP["win_text"]),
             "real_trades": _num("🧪 Trades", "%d", "real_trades"),
             "real_total_pct": _num("🧪 Gerealiseerd %", "%.0f", "real_total_pct"),
@@ -846,48 +868,56 @@ def _heatmap(opt: dict, chosen: tuple[float, float] | None, key: str) -> None:
 
 
 def _detail_windows(sym: str, cfg: dict, vcfg: dict, p: dict) -> dict | None:
-    st.subheader("2. 🧪 Testvensters (blind getest)")
+    st.subheader("2. 🧪 Testvensters (doorlopend, blind getest)")
     wf = wf_for(sym, p, _wf_fn(cfg))
     if not wf["wf_ok"]:
         st.info(f"Niet getest: {wf['wf_reason']}.")
         return None
+    st.caption(f"Eén doorlopende simulatie met € {cfg['amount']:,.0f}: een positie die op het einde van een venster "
+               "nog open staat, loopt door in het volgende en wordt verkocht volgens haar eigen winstdoel. "
+               "De instelling van een venster geldt enkel voor nieuwe aankopen.")
     rows = []
     for w in wf["windows"]:
-        if not w.get("ok"):
-            rows.append({"Venster": str(w["nr"]), "Gezocht op": "–",
-                         "Getest op": f"{pd.Timestamp(w['test_start']):%d/%m/%Y} → "
-                                      f"{pd.Timestamp(w['test_end']):%d/%m/%Y}",
-                         "Instelling": "–", "Status": w.get("reason", "")})
-            continue
+        dur = _years_txt(w["years"]) + (" ⚠️ ingekort" if w.get("truncated") else "")
         rows.append({
             "Venster": str(w["nr"]),
             "Gezocht op": ("jouw vaste instelling" if wf["wf_fixed"] else
                            f"{pd.Timestamp(w['train_start']):%m/%Y} → {pd.Timestamp(w['test_start']):%m/%Y}"),
             "Getest op": f"{pd.Timestamp(w['test_start']):%d/%m/%Y} → {pd.Timestamp(w['test_end']):%d/%m/%Y}",
-            "Instelling": f"−{w['dip'] * 100:.0f}% / +{w['target'] * 100:.0f}%",
-            "Trades": w["trades"], "Status": w["status"],
-            "Gerealiseerd %": round(w["realized_pct"], 1),
+            "Duur": dur,
+            "Instelling nieuwe aankopen": ("– (geen gevonden)" if w["dip"] is None
+                                           else f"−{w['dip'] * 100:.0f}% / +{w['target'] * 100:.0f}%"),
+            "Doorgeschoven": "↪️ ja" if w["carried_in"] else "",
+            "Aankopen": w["buys"], "Verkopen": w["trades"], "Status einde": w["status"],
+            "Gerealiseerd %": None if _isna(w["realized_pct"]) else round(w["realized_pct"], 1),
             "Open %": None if _isna(w["open_pct"]) else round(w["open_pct"], 1),
-            "Totaal %": round(w["total_pct"], 1), "Kopen&houden %": round(w["bh_pct"], 1),
+            "Totaal %": None if _isna(w["total_pct"]) else round(w["total_pct"], 1),
+            "Kopen&houden %": round(w["bh_pct"], 1),
         })
-    today = (f"−{min(d for d, _ in p['tranches']) * 100:.0f}% / +{p['target'] * 100:.0f}%")
-    rows.append({"Venster": "Vandaag", "Gezocht op": "alle data tot nu", "Getest op": "–",
-                 "Instelling": today, "Status": "→ jouw limieten"})
+    today = f"−{min(d for d, _ in p['tranches']) * 100:.0f}% / +{p['target'] * 100:.0f}%"
+    rows.append({"Venster": "Vandaag", "Gezocht op": "alle data tot nu", "Getest op": "–", "Duur": "",
+                 "Instelling nieuwe aankopen": today, "Status einde": "→ jouw limieten"})
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    c = st.columns(5)
+    c = st.columns(6)
     yrs = wf["test_years"]
     c[0].metric("Gerealiseerd %/jaar", "–" if _isna(wf["real_annual_pct"]) else f"{wf['real_annual_pct']:+.1f}%",
                 f"{wf['real_total_pct']:+.0f}% over {yrs:.1f} j", delta_color="off", help=C_HELP["real_annual_pct"])
     c[1].metric("Afgeronde trades", wf["real_trades"], help=C_HELP["real_trades"])
-    c[2].metric("Positieve vensters", f"{wf['win_pos']} van {wf['n_windows']}", help=C_HELP["win_text"])
+    c[2].metric("Positieve vensters", f"{wf['win_pos']} van {wf['win_active']}", help=C_HELP["win_text"])
     c[3].metric("Open nu", "–" if _isna(wf["open_now_pct"]) else f"{wf['open_now_pct']:+.0f}%",
-                help=C_HELP["open_now_pct"])
-    c[4].metric("Kopen&houden %/jaar", "–" if _isna(wf["bh_annual_pct"]) else f"{wf['bh_annual_pct']:+.1f}%",
+                None if _isna(wf["open_now_days"]) else f"sinds {wf['open_now_days']:.0f} dagen",
+                delta_color="off", help=C_HELP["open_now_pct"])
+    c[4].metric("Testduur / training", f"{_years_txt(yrs)} / {_years_txt(wf['train_years_first'])}",
+                help="Totale testduur en aantal jaar data waarop het eerste venster gezocht werd.")
+    c[5].metric("Kopen&houden %/jaar", "–" if _isna(wf["bh_annual_pct"]) else f"{wf['bh_annual_pct']:+.1f}%",
                 help=C_HELP["bh_annual_pct"])
+    if yrs < vcfg["min_test_years"] or wf["train_years_first"] < vcfg["min_train_years"]:
+        st.warning(f"⚠️ **Korte historiek**: test {_years_txt(yrs)} (minimum {vcfg['min_test_years']:g} j), training "
+                   f"eerste venster {_years_txt(wf['train_years_first'])} (minimum {vcfg['min_train_years']:g} j). "
+                   "Te weinig bewijs voor 🟢.")
     if wf["wf_fixed"]:
         st.caption("Vaste/opgeslagen instelling: in elk venster precies die instelling getest.")
     else:
-        from crypto_dip import is_stable
         stable = is_stable(wf["settings"] + [(min(d for d, _ in p["tranches"]), p["target"])]
                            if p["source"] == "Optimaal" else wf["settings"])
         if stable is False:
@@ -1062,12 +1092,11 @@ def _detail_dip(sym: str, cfg: dict, vcfg: dict, kp: str = "") -> None:
     fig.add_hline(y=bt["capital"], line=dict(color="black", width=0.5), row=3, col=1)
     if wf:
         for w in wf["windows"]:
-            if w.get("ok"):
-                x0 = pd.Timestamp(w["test_start"]).isoformat()
-                for r in (1, 2, 3):
-                    fig.add_vline(x=x0, line=dict(color="purple", dash="dot", width=1), row=r, col=1)
-                fig.add_annotation(x=x0, y=1, yref="paper", text=f"🧪 venster {w['nr']}", showarrow=False,
-                                   xanchor="left", font=dict(color="purple"))
+            x0 = pd.Timestamp(w["test_start"]).isoformat()
+            for r in (1, 2, 3):
+                fig.add_vline(x=x0, line=dict(color="purple", dash="dot", width=1), row=r, col=1)
+            fig.add_annotation(x=x0, y=1, yref="paper", text=f"🧪 venster {w['nr']}", showarrow=False,
+                               xanchor="left", font=dict(color="purple"))
     fig.update_yaxes(type="log", row=1, col=1)
     fig.update_layout(height=850, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig, width="stretch", key=K + kp + "fig")

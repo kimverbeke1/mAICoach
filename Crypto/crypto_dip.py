@@ -6,10 +6,15 @@ en een betrouwbaarheidstest met MEERDERE TESTVENSTERS (walk_forward_multi).
 SNELHEID_2026-10-16: de optimalisatie gebruikt een snelle variant van de backtest voor één schijf
 (_fast_single), identiek resultaat aan ladder_backtest met één schijf maar veel sneller.
 
-TESTVENSTERS_2026-10-17: i.p.v. één testperiode wordt de werkwijze ('zoek de beste instelling op het verleden,
-pas ze toe op de toekomst') in meerdere opeenvolgende jaarvensters blind getest. Per venster wordt de instelling
-gezocht op ALLE data vóór dat venster en daarna getest op het venster zelf (vers kapitaal). Resultaat per venster:
-gerealiseerd (afgeronde trades) én open (papieren) resultaat apart."""
+TESTVENSTERS_2026-10-17: de werkwijze ('zoek de beste instelling op het verleden, pas ze toe op de toekomst')
+wordt in meerdere opeenvolgende jaarvensters blind getest. Per venster wordt de instelling gezocht op ALLE data
+vóór dat venster.
+
+DOORLOPEND_2026-10-17: de vensters vormen ÉÉN doorlopende simulatie met hetzelfde geld, zoals in het echt.
+Een positie die op het einde van een venster nog open staat, loopt door in het volgende venster en wordt verkocht
+volgens HAAR EIGEN winstdoel. De nieuwe instelling van een venster geldt enkel voor nieuwe aankopen.
+'Gerealiseerd' = vrij geld + aankoopbedrag van een open positie (= alsof die aan haar aankoopprijs verkocht werd):
+enkel echt verkochte winst telt."""
 from __future__ import annotations
 
 import numpy as np
@@ -19,16 +24,17 @@ DIP_GRID = np.round(np.arange(0.30, 0.851, 0.05), 2)            # koopdrempels 3
 TARGET_GRID = np.array([0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.75, 1.00])  # winstdoelen
 
 # Wanneer telt iets als een NIEUWE keer in de koopzone (zie episode_starts)
-EPISODE_GAP_DAYS = 30     # zo lang buiten de zone => de volgende duik is een nieuwe keer
-EPISODE_REBOUND = 0.10    # of: koers herstelt zoveel procentpunt boven de koopdrempel
+EPISODE_GAP_DAYS = 30
+EPISODE_REBOUND = 0.10
 
 # Testvensters
 WINDOW_DAYS = 365         # lengte van één testvenster
-MIN_TRAIN_DAYS = 365      # minstens zoveel backtest-dagen vóór een venster om op te zoeken
-MIN_WINDOW_DAYS = 90      # kortere (laatste/jonge) vensters worden niet gebruikt
+MIN_TRAIN_DAYS = 365      # minstens zoveel backtest-dagen vóór een venster om op te zoeken (technisch minimum)
+MIN_WINDOW_DAYS = 90      # kortere vensters worden niet gebruikt
+TRUNC_RATIO = 0.95        # venster korter dan 95% van WINDOW_DAYS = 'ingekort'
 # Stabiel = de gevonden instelling verschuift weinig tussen vensters en t.o.v. vandaag
-STABLE_DIP_SPREAD = 0.15          # max. verschil tussen hoogste en laagste koopdrempel (15 procentpunt)
-STABLE_TARGET_RATIO = 2.5         # max. verhouding hoogste / laagste winstdoel
+STABLE_DIP_SPREAD = 0.15
+STABLE_TARGET_RATIO = 2.5
 
 
 def drawdown_series(df: pd.DataFrame, lookback: int) -> pd.Series:
@@ -39,9 +45,7 @@ def drawdown_series(df: pd.DataFrame, lookback: int) -> pd.Series:
 
 def episode_starts(dd: np.ndarray, dip: float, gap_days: int = EPISODE_GAP_DAYS,
                    rebound: float = EPISODE_REBOUND) -> np.ndarray:
-    """Eerste dag van elke AFZONDERLIJKE keer in de koopzone (= elke afzonderlijke crash).
-    Een keer is pas afgelopen als de koers (a) hersteld is tot minstens `rebound` procentpunt boven de
-    koopdrempel, of (b) minstens `gap_days` dagen buiten de zone gebleven is."""
+    """Eerste dag van elke AFZONDERLIJKE keer in de koopzone (= elke afzonderlijke crash)."""
     rebound = min(rebound, dip / 2)
     exit_level = -(dip - rebound)
     starts, in_ep, days_out = [], False, 0
@@ -116,13 +120,10 @@ def dip_stats(df: pd.DataFrame, lookback: int, dip: float, target: float, max_da
 # --------------------------------------------------------------------------- backtest
 def ladder_backtest(df: pd.DataFrame, lookback: int, tranches: list[tuple[float, float]],
                     target: float, fee: float, dd: np.ndarray | None = None) -> dict:
-    """Eén of meer schijven per munt. Elke schijf = (koopdrempel, bedrag €) en werkt onafhankelijk:
+    """Eén of meer schijven per munt over de hele historiek. Elke schijf = (koopdrempel, bedrag €):
     koop met het volledige schijfbedrag op slotkoers zodra de daling >= drempel, verkoop zodra de koers
     aankoop*(1+target) raakt, daarna opnieuw kopen als de voorwaarde nog geldt. Winst wordt herbelegd.
-    Geen stop-loss. Start pas als er een 'top' gekend is.
-
-    'realized_eur' = vrij geld + aankoopbedrag van de open positie = de waarde ALSOF de open positie aan
-    haar aankoopprijs verkocht werd. Zo zijn gerealiseerd (afgeronde trades) en open (papier) gescheiden."""
+    'realized_eur' = vrij geld + aankoopbedrag van de open positie (alsof aan aankoopprijs verkocht)."""
     close = df["close"].to_numpy(float)
     high = df["high"].to_numpy(float)
     times = df["time"].to_numpy()
@@ -233,8 +234,7 @@ def _fast_single(high: list, close: list, dd: list, start: int, dip: float, targ
 # --------------------------------------------------------------------------- optimalisatie
 def optimize_dip(df: pd.DataFrame, lookback: int, fee: float, min_trades: int = 3) -> dict:
     """Test alle combinaties koopdrempel × winstdoel (1 schijf) en kiest de historisch beste ROBUUSTE
-    combinatie (mediaan van zichzelf + buren in het rooster). Combinaties met minder dan `min_trades`
-    afgeronde trades tellen niet mee."""
+    combinatie (mediaan van zichzelf + buren in het rooster)."""
     close_a = df["close"].to_numpy(float)
     n = len(close_a)
     start = lookback - 1
@@ -284,8 +284,7 @@ def suggest_ladder(dip: float, amount: float, parts: int = 3, spacing: float = 0
 
 # --------------------------------------------------------------------------- meerdere testvensters
 def is_stable(settings: list[tuple[float, float]]) -> bool | None:
-    """Stabiel = koopdrempels liggen binnen STABLE_DIP_SPREAD van elkaar en het hoogste winstdoel is hoogstens
-    STABLE_TARGET_RATIO × het laagste. None als er minder dan 2 instellingen zijn."""
+    """Stabiel = koopdrempels binnen STABLE_DIP_SPREAD en hoogste winstdoel ≤ STABLE_TARGET_RATIO × laagste."""
     s = [(d, t) for d, t in settings if d is not None and t is not None]
     if len(s) < 2:
         return None
@@ -298,25 +297,23 @@ def walk_forward_multi(df: pd.DataFrame, lookback: int, fee: float, min_trades: 
                        capital: float = 1000.0, fixed: dict | None = None,
                        window_days: int = WINDOW_DAYS) -> dict:
     """
-    Meerdere testvensters van `window_days` dagen, achteraan de historiek (het laatste venster eindigt vandaag).
-    Per venster:
-      - TRAINING = alle data vóór het venster; daarop wordt de beste instelling gezocht (fixed=None),
-        of precies jouw instelling gebruikt (fixed={"tranches": [...], "target": ...});
-      - TEST = het venster zelf, blind, met vers kapitaal `capital` (de voorafgaande `lookback` dagen gaan mee
-        zodat de 'top' meteen gekend is).
-    Vensters met minder dan MIN_TRAIN_DAYS backtest-dagen ervoor of korter dan MIN_WINDOW_DAYS vallen weg
-    (jonge munten krijgen dus minder of kortere vensters).
-
-    Geeft per venster: periode, instelling, trades, gerealiseerd %, open %, totaal %, kopen&houden %, en
-    samengevat: gerealiseerd en totaal rendement per jaar (vensters na elkaar geschakeld), aantal positieve
-    vensters, en of de instelling stabiel is.
+    Meerdere testvensters van `window_days` dagen, achteraan de historiek (het laatste eindigt vandaag), als
+    ÉÉN DOORLOPENDE simulatie met hetzelfde geld:
+      - per venster wordt de instelling gezocht op alle data vóór het venster (fixed=None), of precies jouw
+        instelling gebruikt (fixed={"tranches": [...], "target": ...});
+      - die instelling geldt voor NIEUWE aankopen in dat venster;
+      - een positie die bij de start van een venster nog open staat, loopt door en wordt verkocht volgens
+        haar eigen winstdoel (van het venster waarin ze gekocht werd).
+    Per venster: periode, lengte (ingekort?), instelling, aankopen, verkopen, doorgeschoven positie,
+    gerealiseerd %, open %, totaal %, kopen&houden %. Samengevat: gerealiseerd en totaal t.o.v. het
+    startbedrag, per jaar, positieve vensters, open positie vandaag, stabiliteit, trainingsduur eerste venster.
     """
     n = len(df)
     bt0 = lookback - 1
     times = df["time"]
     windows = []
     for k in range(n_windows):
-        end = n - k * window_days                    # exclusief
+        end = n - k * window_days
         start = max(end - window_days, bt0 + MIN_TRAIN_DAYS)
         if end - start < MIN_WINDOW_DAYS:
             break
@@ -326,63 +323,113 @@ def walk_forward_multi(df: pd.DataFrame, lookback: int, fee: float, min_trades: 
         return {"wf_ok": False, "wf_reason": "te weinig historiek voor een testvenster "
                 f"(minstens {MIN_TRAIN_DAYS} + {MIN_WINDOW_DAYS} dagen na de referentieperiode)"}
 
-    rows = []
-    for w, (s, e) in enumerate(windows, 1):
-        train_df = df.iloc[:s].reset_index(drop=True)
+    close = df["close"].to_numpy(float)
+    high = df["high"].to_numpy(float)
+    dd = drawdown_series(df, lookback).to_numpy(float)
+
+    # Instelling per venster
+    plans = []
+    for s, e in windows:
         if fixed is None:
-            opt = optimize_dip(train_df, lookback, fee, min_trades)
-            if not opt["found"]:
-                rows.append({"nr": w, "test_start": times.iloc[s], "test_end": times.iloc[e - 1],
-                             "train_start": times.iloc[bt0], "ok": False,
-                             "reason": "geen instelling gevonden in de training (" + opt["reason"] + ")"})
-                continue
-            tr, target = [(opt["dip"], capital)], opt["target"]
+            opt = optimize_dip(df.iloc[:s].reset_index(drop=True), lookback, fee, min_trades)
+            if opt["found"]:
+                plans.append({"dips": [opt["dip"]], "shares": [1.0], "target": opt["target"], "reason": ""})
+            else:
+                plans.append({"dips": None, "shares": None, "target": None,
+                              "reason": "geen instelling gevonden in de training: geen nieuwe aankopen"})
         else:
             tot = sum(a for _, a in fixed["tranches"]) or 1.0
-            tr = [(float(d), capital * float(a) / tot) for d, a in fixed["tranches"]]
-            target = float(fixed["target"])
-        test_df = df.iloc[s - bt0:e].reset_index(drop=True)
-        bt = ladder_backtest(test_df, lookback, tr, target, fee)
-        if not bt.get("valid"):
-            rows.append({"nr": w, "test_start": times.iloc[s], "test_end": times.iloc[e - 1],
-                         "train_start": times.iloc[bt0], "ok": False, "reason": "backtest ongeldig"})
-            continue
-        status = "Geen koopkans" if bt["dip_buys"] == 0 else ("Positie open" if bt["open_slots"] else "Afgerond")
+            plans.append({"dips": [float(d) for d, _ in fixed["tranches"]],
+                          "shares": [float(a) / tot for _, a in fixed["tranches"]],
+                          "target": float(fixed["target"]), "reason": ""})
+    if all(p["dips"] is None for p in plans):
+        return {"wf_ok": False, "wf_reason": plans[0]["reason"].split(":")[0]}
+
+    # Schijven: aantal = maximum over de vensters (bij 'Optimaal' altijd 1). Elke schijf heeft eigen geld.
+    k = max(len(p["dips"]) for p in plans if p["dips"])
+    first = next(p for p in plans if p["dips"])
+    shares = (first["shares"] + [0.0] * k)[:k]
+    cash = [capital * sh for sh in shares]
+    qty, entry, cost, tgt_open, buy_i = [0.0] * k, [0.0] * k, [0.0] * k, [0.0] * k, [0] * k
+
+    def mtm(i):
+        return sum(cash) + sum(qty) * close[i]
+
+    def real():
+        return sum(cash) + sum(cost[t] for t in range(k) if qty[t] > 0)
+
+    rows = []
+    prev_close_idx = windows[0][0] - 1
+    for w, ((s, e), plan) in enumerate(zip(windows, plans), 1):
+        carried = any(q > 0 for q in qty)
+        m0, r0 = mtm(prev_close_idx), real()
+        buys = sells = 0
+        dips = plan["dips"]
+        for i in range(s, e):
+            for t in range(k):
+                if qty[t] > 0:
+                    tp = entry[t] * (1 + tgt_open[t])
+                    if high[i] >= tp:
+                        cash[t] = qty[t] * tp * (1 - fee)
+                        qty[t] = 0.0
+                        sells += 1
+                elif dips is not None and t < len(dips) and cash[t] > 0 and dd[i] <= -dips[t]:
+                    qty[t] = cash[t] / close[i] * (1 - fee)
+                    entry[t] = close[i]
+                    cost[t] = cash[t]
+                    tgt_open[t] = plan["target"]
+                    buy_i[t] = i
+                    cash[t] = 0.0
+                    buys += 1
+        m1, r1 = mtm(e - 1), real()
+        open_t = [t for t in range(k) if qty[t] > 0]
+        open_cost = sum(cost[t] for t in open_t)
+        open_val = sum(qty[t] for t in open_t) * close[e - 1]
+        if open_t:
+            status = "Positie open" + (" (doorgeschoven)" if carried and buys == 0 and sells == 0 else "")
+        elif buys or sells:
+            status = "Afgerond"
+        else:
+            status = "Geen koopkans"
+        days = e - s
         rows.append({
-            "nr": w, "ok": True, "train_start": times.iloc[bt0], "test_start": bt["bt_start"],
-            "test_end": bt["bt_end"], "years": bt["bt_years"],
-            "dip": min(d for d, _ in tr), "target": target,
-            "trades": bt["dip_round_trips"], "buys": bt["dip_buys"], "status": status,
-            "realized_pct": bt["realized_pct"], "open_pct": bt["open_result_pct"],
-            "total_pct": bt["dip_total_pct"], "bh_pct": bt["buy_hold_pct"],
-            "open_days": bt["open_days"],
+            "nr": w, "ok": True, "train_start": times.iloc[bt0], "test_start": times.iloc[s],
+            "test_end": times.iloc[e - 1], "years": days / 365, "days": days,
+            "truncated": bool(days < window_days * TRUNC_RATIO),
+            "dip": (min(dips) if dips else None), "target": plan["target"], "plan_reason": plan["reason"],
+            "carried_in": carried, "buys": buys, "trades": sells, "status": status,
+            "realized_pct": (r1 / r0 - 1) * 100 if r0 > 0 else np.nan,
+            "open_pct": (open_val / open_cost - 1) * 100 if open_t and open_cost > 0 else np.nan,
+            "total_pct": (m1 / m0 - 1) * 100 if m0 > 0 else np.nan,
+            "bh_pct": (close[e - 1] / close[prev_close_idx] - 1) * 100,
+            "open_days": (e - 1 - min(buy_i[t] for t in open_t)) if open_t else np.nan,
         })
+        prev_close_idx = e - 1
 
-    ok = [r for r in rows if r.get("ok")]
-    if not ok:
-        return {"wf_ok": False, "wf_reason": rows[0].get("reason", "geen bruikbaar venster"), "windows": rows}
-    years = sum(r["years"] for r in ok)
-    real_mult = float(np.prod([1 + r["realized_pct"] / 100 for r in ok]))
-    tot_mult = float(np.prod([1 + r["total_pct"] / 100 for r in ok]))
-    bh_mult = float(np.prod([1 + r["bh_pct"] / 100 for r in ok]))
+    years = sum(r["years"] for r in rows)
+    m_final, r_final = mtm(n - 1), real()
+    bh_mult = close[n - 1] / close[windows[0][0] - 1]
 
-    def ann(m):
-        return ((m ** (1 / years)) - 1) * 100 if years > 0 and m > 0 else np.nan
+    def ann(mult):
+        return ((mult ** (1 / years)) - 1) * 100 if years > 0 and mult > 0 else np.nan
 
-    last = ok[-1]
+    last = rows[-1]
+    open_now = last["open_pct"] if last["status"].startswith("Positie open") else np.nan
     return {
         "wf_ok": True, "wf_fixed": fixed is not None, "windows": rows,
-        "n_windows": len(ok), "test_years": years,
-        "test_start": ok[0]["test_start"], "test_end": last["test_end"],
-        "real_trades": int(sum(r["trades"] for r in ok)), "buys": int(sum(r["buys"] for r in ok)),
-        "real_total_pct": (real_mult - 1) * 100, "real_annual_pct": ann(real_mult),
-        "total_total_pct": (tot_mult - 1) * 100, "total_annual_pct": ann(tot_mult),
+        "n_windows": len(rows), "test_years": years,
+        "train_years_first": (windows[0][0] - bt0) / 365,
+        "n_truncated": int(sum(1 for r in rows if r["truncated"])),
+        "test_start": rows[0]["test_start"], "test_end": last["test_end"],
+        "real_trades": int(sum(r["trades"] for r in rows)), "buys": int(sum(r["buys"] for r in rows)),
+        "real_total_pct": (r_final / capital - 1) * 100, "real_annual_pct": ann(r_final / capital),
+        "total_total_pct": (m_final / capital - 1) * 100, "total_annual_pct": ann(m_final / capital),
         "bh_total_pct": (bh_mult - 1) * 100, "bh_annual_pct": ann(bh_mult),
-        "win_pos": int(sum(1 for r in ok if r["total_pct"] > 0)),
-        "win_active": int(sum(1 for r in ok if r["buys"] > 0)),
-        "open_now_pct": last["open_pct"] if last["status"] == "Positie open" else np.nan,
-        "open_now_days": last["open_days"] if last["status"] == "Positie open" else np.nan,
-        "settings": [(r["dip"], r["target"]) for r in ok],
+        "win_pos": int(sum(1 for r in rows if not np.isnan(r["total_pct"]) and r["total_pct"] > 0)),
+        "win_active": int(sum(1 for r in rows if r["buys"] or r["trades"] or r["carried_in"])),
+        "open_now_pct": open_now,
+        "open_now_days": last["open_days"] if not np.isnan(open_now) else np.nan,
+        "settings": [(r["dip"], r["target"]) for r in rows if r["dip"] is not None],
         "short_test": bool(years < 0.5),
     }
 
